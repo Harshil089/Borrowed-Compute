@@ -11,7 +11,10 @@ use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
 use anyhow::Context;
-use bc_auth::{clear_session, cloud_url, default_device_name, load_session, save_session, CloudClient};
+use bc_auth::{
+    clear_session, cloud_url_for, default_device_name, is_unauthorized, load_session, save_cloud_url,
+    save_session, CloudClient, DEFAULT_CLOUD_URL,
+};
 use bc_cli::flows::{
     append_timing, client_home, default_mac, key_path, load_spec, resolve_mac, set_default_mac,
     split_command, wait_for_pairing,
@@ -25,11 +28,18 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::oneshot;
+
+impl AppState {
+    /// A client for the saved cloud address and session. Read from disk each time, so a
+    /// sign-in with the `bc` command shows up here too.
+    fn cloud(&self) -> CloudClient {
+        CloudClient::from_home(cloud_url_for(&self.home), &self.home)
+    }
+}
 
 struct AppState {
     home: PathBuf,
-    cloud: Mutex<CloudClient>,
     /// Cancels the running job. At most one job runs at a time.
     job: StdMutex<Option<oneshot::Sender<()>>>,
 }
@@ -54,6 +64,9 @@ struct Status {
     device_id: Option<String>,
     default_mac: Option<String>,
     cloud_url: String,
+    /// False while the address is still the built-in default, which only works when this
+    /// computer is the Mac itself.
+    cloud_url_set: bool,
 }
 
 #[derive(Serialize)]
@@ -108,14 +121,24 @@ fn get_status(state: State<'_, AppState>) -> Status {
         signed_in: load_session(&state.home).is_some(),
         device_id: device_id(&state.home).ok(),
         default_mac: default_mac(&state.home),
-        cloud_url: cloud_url(),
+        cloud_url: cloud_url_for(&state.home),
+        cloud_url_set: cloud_url_for(&state.home) != DEFAULT_CLOUD_URL,
     }
 }
 
 #[tauri::command]
 async fn get_account(state: State<'_, AppState>) -> CmdResult<Account> {
-    let cloud = state.cloud.lock().await.clone();
-    let me = cloud.me().await.map_err(err_chain)?;
+    let cloud = state.cloud();
+    let me = match cloud.me().await {
+        Ok(me) => me,
+        // The session belongs to another cloud (or expired): sign out so the window
+        // offers sign-in again instead of failing on every request.
+        Err(e) if is_unauthorized(&e) => {
+            sign_out_locally(&state).await;
+            return Err("signed-out".into());
+        }
+        Err(e) => return Err(err_chain(e)),
+    };
     let id = device_id(&state.home)?;
     let device_name = cloud
         .devices()
@@ -129,7 +152,7 @@ async fn get_account(state: State<'_, AppState>) -> CmdResult<Account> {
 #[tauri::command]
 async fn login(app: AppHandle, state: State<'_, AppState>, name: String) -> CmdResult<Account> {
     // A fresh client, so other commands are not blocked while the user is on GitHub.
-    let mut client = CloudClient::new(cloud_url(), None);
+    let mut client = CloudClient::new(cloud_url_for(&state.home), None);
     let emitter = app.clone();
     let (token, login) = client
         .login(|start| {
@@ -145,25 +168,48 @@ async fn login(app: AppHandle, state: State<'_, AppState>, name: String) -> CmdR
         n => n.to_string(),
     };
     let device = client.register(&key, &name, DeviceKind::current()).await.map_err(err_chain)?;
-    *state.cloud.lock().await = client;
+    drop(client);
     Ok(Account { login, device_name: Some(device.name) })
 }
 
 #[tauri::command]
 async fn logout(state: State<'_, AppState>) -> CmdResult<()> {
-    let cloud = state.cloud.lock().await.clone();
+    let cloud = state.cloud();
     if cloud.token().is_some() {
         let _ = cloud.logout().await;
     }
-    clear_session(&state.home);
-    *state.cloud.lock().await = CloudClient::new(cloud_url(), None);
+    sign_out_locally(&state).await;
     Ok(())
+}
+
+async fn sign_out_locally(state: &AppState) {
+    clear_session(&state.home);
+}
+
+/// Checks that a Borrowed Compute cloud answers at `url`, without saving it.
+#[tauri::command]
+async fn test_cloud_url(url: String) -> CmdResult<String> {
+    let url = bc_auth::normalize_cloud_url(&url).map_err(err_chain)?;
+    CloudClient::new(&url, None).health().await.map_err(err_chain)?;
+    Ok(url)
+}
+
+/// Saves the cloud address. A new address means a different cloud, so this device signs
+/// out and signs in again there.
+#[tauri::command]
+async fn set_cloud_url(state: State<'_, AppState>, url: String) -> CmdResult<String> {
+    let before = cloud_url_for(&state.home);
+    let saved = save_cloud_url(&state.home, &url).map_err(err_chain)?;
+    if saved != before {
+        sign_out_locally(&state).await;
+    }
+    Ok(saved)
 }
 
 #[tauri::command]
 async fn list_devices(state: State<'_, AppState>) -> CmdResult<Devices> {
     let me = device_id(&state.home)?;
-    let cloud = state.cloud.lock().await.clone();
+    let cloud = state.cloud();
     let devices = cloud.devices().await.map_err(err_chain)?;
     let pairings = cloud
         .pairings(&me)
@@ -178,7 +224,7 @@ async fn list_devices(state: State<'_, AppState>) -> CmdResult<Devices> {
 #[tauri::command]
 async fn request_pairing(state: State<'_, AppState>, mac: String) -> CmdResult<PairingInfo> {
     let me = device_id(&state.home)?;
-    let cloud = state.cloud.lock().await.clone();
+    let cloud = state.cloud();
     cloud.request_pairing(&me, &mac).await.map_err(err_chain)
 }
 
@@ -186,7 +232,7 @@ async fn request_pairing(state: State<'_, AppState>, mac: String) -> CmdResult<P
 #[tauri::command]
 async fn wait_pairing(state: State<'_, AppState>, id: i64, expires_in_secs: i64) -> CmdResult<bool> {
     let me = device_id(&state.home)?;
-    let cloud = state.cloud.lock().await.clone();
+    let cloud = state.cloud();
     let expires = Duration::from_secs(expires_in_secs.max(0) as u64);
     wait_for_pairing(&cloud, &me, id, expires, || {}).await.map_err(err_chain)
 }
@@ -275,7 +321,7 @@ async fn run_job_inner(
     let spec = load_spec(&root, None, split_command(command)?)?;
 
     phase(app, format!("Finding {mac}…"));
-    let cloud = state.cloud.lock().await.clone();
+    let cloud = state.cloud();
     let resolved = resolve_mac(&cloud, mac).await?;
     if let Some(warning) = &resolved.offline_warning {
         let _ = app.emit("job-output", OutputChunk { stream: "notice", text: format!("{warning}\n") });
@@ -407,11 +453,10 @@ impl Write for EmitWriter {
 
 fn main() {
     let home = client_home().expect("config directory");
-    let cloud = CloudClient::from_home(cloud_url(), &home);
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .manage(AppState { home, cloud: Mutex::new(cloud), job: StdMutex::new(None) })
+        .manage(AppState { home, job: StdMutex::new(None) })
         .invoke_handler(tauri::generate_handler![
             get_status,
             get_account,
@@ -425,7 +470,9 @@ fn main() {
             project_info,
             run_job,
             cancel_job,
-            open_url
+            open_url,
+            test_cloud_url,
+            set_cloud_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running Borrowed Compute");

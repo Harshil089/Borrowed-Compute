@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use bc_agent::paired::PairedDevices;
 use bc_agent::service::{Agent, AgentPaths};
-use bc_auth::{cloud_url, default_device_name, save_session, CloudClient};
+use bc_auth::{cloud_url_for, default_device_name, save_session, CloudClient};
 use bc_net::{home_dir, load_or_create_key, EndpointId};
 use bc_proto::cloud::{DeviceKind, PairingStatus};
 use clap::{Parser, Subcommand};
@@ -52,7 +52,7 @@ async fn main() -> Result<()> {
     let home = home_dir()?.join("agent");
     let paired = PairedDevices::new(home.join("paired"));
     let key_path = home.join("device.key");
-    let mut cloud = CloudClient::from_home(cloud_url(), &home);
+    let mut cloud = CloudClient::from_home(cloud_url_for(&home), &home);
 
     match cli.command {
         Command::Login { name } => {
@@ -138,7 +138,7 @@ async fn main() -> Result<()> {
             let agent = Agent::start(&AgentPaths::new(home.clone()), relay_only, None).await?;
             eprintln!("bc-agent ready, device id {}", agent.endpoint.id());
             if cloud.token().is_some() {
-                eprintln!("signed in: syncing presence and pairings with {}", cloud_url());
+                eprintln!("signed in: syncing presence and pairings with {}", cloud_url_for(&home));
                 agent.spawn_cloud_sync(cloud);
             } else {
                 eprintln!("not signed in: using the local paired list only");

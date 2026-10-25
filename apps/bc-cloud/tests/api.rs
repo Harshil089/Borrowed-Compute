@@ -1,8 +1,8 @@
-//! Cloud API tests: real Postgres, fake GitHub, real HTTP through `bc-auth`.
+//! Cloud API tests: real databases, fake GitHub, real HTTP through `bc-auth`.
 //!
-//! Set `BC_TEST_DATABASE_URL` to an admin connection string, for example
-//! `postgres://bc@127.0.0.1:54329/postgres`. Each test creates its own database.
-//! Without it, these tests are skipped.
+//! Every test runs against a fresh SQLite file. Set `BC_TEST_DATABASE_URL` to a Postgres
+//! admin connection string, for example `postgres://bc@127.0.0.1:54329/postgres`, to also
+//! run it against a fresh Postgres database.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -11,7 +11,7 @@ use axum::extract::State;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use bc_auth::CloudClient;
-use bc_cloud::{app, migrate, AppState, GitHub};
+use bc_cloud::{app, connect, AppState, GitHub};
 use bc_proto::cloud::{DeviceKind, PairingStatus};
 use iroh_base::SecretKey;
 use serde_json::{json, Value};
@@ -74,22 +74,25 @@ struct Env {
     github: Arc<FakeGitHub>,
 }
 
-async fn setup() -> Option<Env> {
-    let Ok(admin_url) = std::env::var("BC_TEST_DATABASE_URL") else {
-        eprintln!("BC_TEST_DATABASE_URL not set; skipping cloud API test");
-        return None;
-    };
-    let admin = PgPoolOptions::new().max_connections(1).connect(&admin_url).await.unwrap();
-    let name = format!("bc_test_{}", bc_cloud::auth::random_hex(6));
-    admin.execute(format!("create database {name}").as_str()).await.unwrap();
-    let (base, _) = admin_url.rsplit_once('/').unwrap();
-    let db = PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&format!("{base}/{name}"))
-        .await
-        .unwrap();
-    migrate(&db).await.unwrap();
+/// Database URLs to run each test against: a fresh SQLite file always, plus a fresh
+/// Postgres database when `BC_TEST_DATABASE_URL` points at a Postgres admin connection.
+async fn databases() -> Vec<(String, Option<tempfile::TempDir>)> {
+    let dir = tempfile::tempdir().unwrap();
+    let mut urls = vec![(bc_cloud::sqlite_url(&dir.path().join("cloud test.db")), Some(dir))];
+    if let Ok(admin_url) = std::env::var("BC_TEST_DATABASE_URL") {
+        let admin = PgPoolOptions::new().max_connections(1).connect(&admin_url).await.unwrap();
+        let name = format!("bc_test_{}", bc_cloud::auth::random_hex(6));
+        admin.execute(format!("create database {name}").as_str()).await.unwrap();
+        let (base, _) = admin_url.rsplit_once('/').unwrap();
+        urls.push((format!("{base}/{name}"), None));
+    } else {
+        eprintln!("BC_TEST_DATABASE_URL not set; testing SQLite only");
+    }
+    urls
+}
 
+async fn setup(database_url: &str) -> Env {
+    let db = connect(database_url).await.unwrap();
     let github = Arc::new(FakeGitHub::default());
     let gh_url = serve(fake_github(github.clone())).await;
     let state = AppState {
@@ -97,7 +100,7 @@ async fn setup() -> Option<Env> {
         github: Arc::new(GitHub::with_bases("test-client".into(), gh_url.clone(), gh_url)),
     };
     let cloud = serve(app(state)).await;
-    Some(Env { cloud, github })
+    Env { cloud, github }
 }
 
 impl Env {
@@ -114,7 +117,12 @@ impl Env {
 
 #[tokio::test]
 async fn sign_in_register_pair_and_revoke() {
-    let Some(env) = setup().await else { return };
+    for (url, _dir) in databases().await {
+        sign_in_register_pair_and_revoke_on(setup(&url).await).await;
+    }
+}
+
+async fn sign_in_register_pair_and_revoke_on(env: Env) {
     let alice = env.login(1, "alice").await;
     assert_eq!(alice.me().await.unwrap().login, "alice");
 
@@ -164,7 +172,12 @@ async fn sign_in_register_pair_and_revoke() {
 
 #[tokio::test]
 async fn rejects_bad_proofs_and_other_accounts() {
-    let Some(env) = setup().await else { return };
+    for (url, _dir) in databases().await {
+        rejects_bad_proofs_and_other_accounts_on(setup(&url).await).await;
+    }
+}
+
+async fn rejects_bad_proofs_and_other_accounts_on(env: Env) {
     let alice = env.login(1, "alice").await;
     let mallory = env.login(2, "mallory").await;
 

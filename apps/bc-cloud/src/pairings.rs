@@ -11,30 +11,29 @@ use serde::Deserialize;
 
 use crate::auth::Account;
 use crate::error::{ApiError, ApiResult};
-use crate::AppState;
+use crate::{now, AppState};
 
-const CODE_MINUTES: i32 = 10;
+const CODE_SECS: i64 = 10 * 60;
 
-type PairingRow = (i64, String, String, String, String, String, String, Option<i64>);
+type PairingRow = (i64, String, String, String, String, String, String, i64);
 
-const PAIRING_SELECT: &str = "select p.id, p.client_id, c.name, p.mac_id, m.name, p.status, p.code,
-        case when p.status = 'pending' then extract(epoch from p.expires_at - now())::bigint end
+const PAIRING_SELECT: &str = "select p.id, p.client_id, c.name, p.mac_id, m.name, p.status, p.code, p.expires_at
     from pairings p
     join devices c on c.endpoint_id = p.client_id
     join devices m on m.endpoint_id = p.mac_id";
 
-fn to_info(row: PairingRow) -> PairingInfo {
-    let (id, client_id, client_name, mac_id, mac_name, status, code, expires_in_secs) = row;
-    let status = if status == "approved" { PairingStatus::Approved } else { PairingStatus::Pending };
+fn to_info(row: PairingRow, now: i64) -> PairingInfo {
+    let (id, client_id, client_name, mac_id, mac_name, status, code, expires_at) = row;
+    let pending = status != "approved";
     PairingInfo {
         id,
         client_id,
         client_name,
         mac_id,
         mac_name,
-        status,
-        code: (status == PairingStatus::Pending).then_some(code),
-        expires_in_secs,
+        status: if pending { PairingStatus::Pending } else { PairingStatus::Approved },
+        code: pending.then_some(code),
+        expires_in_secs: pending.then_some(expires_at - now),
     }
 }
 
@@ -43,7 +42,7 @@ async fn fetch(state: &AppState, id: i64) -> ApiResult<PairingInfo> {
         .bind(id)
         .fetch_one(&state.db)
         .await?;
-    Ok(to_info(row))
+    Ok(to_info(row, now()))
 }
 
 pub async fn create(
@@ -51,13 +50,12 @@ pub async fn create(
     account: Account,
     Json(req): Json<CreatePairing>,
 ) -> ApiResult<(StatusCode, Json<PairingInfo>)> {
-    let client: Option<(String,)> = sqlx::query_as(
-        "select endpoint_id from devices where endpoint_id = $1 and account_id = $2",
-    )
-    .bind(&req.client)
-    .bind(account.id)
-    .fetch_optional(&state.db)
-    .await?;
+    let client: Option<(String,)> =
+        sqlx::query_as("select endpoint_id from devices where endpoint_id = $1 and account_id = $2")
+            .bind(req.client.clone())
+            .bind(account.id)
+            .fetch_optional(&state.db)
+            .await?;
     let (client_id,) =
         client.ok_or_else(|| ApiError::not_found("this device is not registered; run login first"))?;
 
@@ -66,7 +64,7 @@ pub async fn create(
          where account_id = $1 and (endpoint_id = $2 or name = $2)",
     )
     .bind(account.id)
-    .bind(&req.mac)
+    .bind(req.mac.clone())
     .fetch_optional(&state.db)
     .await?;
     let (mac_id, kind) = mac.ok_or_else(|| {
@@ -80,21 +78,23 @@ pub async fn create(
     }
 
     // Keep an approved pairing or a still-valid code; otherwise issue a fresh code.
+    let now = now();
     let code = format!("{:06}", rand::random::<u32>() % 1_000_000);
     let (id,): (i64,) = sqlx::query_as(
-        "insert into pairings (client_id, mac_id, code, status, expires_at)
-         values ($1, $2, $3, 'pending', now() + make_interval(mins => $4))
+        "insert into pairings (client_id, mac_id, code, status, created_at, expires_at)
+         values ($1, $2, $3, 'pending', $4, $5)
          on conflict (client_id, mac_id) do update
-           set code = case when pairings.status = 'pending' and pairings.expires_at <= now()
+           set code = case when pairings.status = 'pending' and pairings.expires_at <= $4
                            then excluded.code else pairings.code end,
-               expires_at = case when pairings.status = 'pending' and pairings.expires_at <= now()
+               expires_at = case when pairings.status = 'pending' and pairings.expires_at <= $4
                                  then excluded.expires_at else pairings.expires_at end
          returning id",
     )
-    .bind(&client_id)
-    .bind(&mac_id)
-    .bind(&code)
-    .bind(CODE_MINUTES)
+    .bind(client_id)
+    .bind(mac_id)
+    .bind(code)
+    .bind(now)
+    .bind(now + CODE_SECS)
     .fetch_one(&state.db)
     .await?;
     Ok((StatusCode::CREATED, Json(fetch(&state, id).await?)))
@@ -111,17 +111,19 @@ pub async fn list(
     account: Account,
     Query(q): Query<ListQuery>,
 ) -> ApiResult<Json<Vec<PairingInfo>>> {
+    let now = now();
     let rows: Vec<PairingRow> = sqlx::query_as(&format!(
         "{PAIRING_SELECT}
          where (p.mac_id = $1 or p.client_id = $1) and m.account_id = $2
-           and (p.status = 'approved' or p.expires_at > now())
-         order by p.created_at"
+           and (p.status = 'approved' or p.expires_at > $3)
+         order by p.created_at, p.id"
     ))
-    .bind(&q.device)
+    .bind(q.device)
     .bind(account.id)
+    .bind(now)
     .fetch_all(&state.db)
     .await?;
-    Ok(Json(rows.into_iter().map(to_info).collect()))
+    Ok(Json(rows.into_iter().map(|r| to_info(r, now)).collect()))
 }
 
 pub async fn approve(
@@ -130,8 +132,8 @@ pub async fn approve(
     Path(id): Path<i64>,
     Json(req): Json<ApprovePairing>,
 ) -> ApiResult<Json<PairingInfo>> {
-    let row: Option<(String, String, bool)> = sqlx::query_as(
-        "select p.status, p.code, p.expires_at > now() from pairings p
+    let row: Option<(String, String, i64)> = sqlx::query_as(
+        "select p.status, p.code, p.expires_at from pairings p
          join devices m on m.endpoint_id = p.mac_id
          where p.id = $1 and m.account_id = $2",
     )
@@ -139,11 +141,11 @@ pub async fn approve(
     .bind(account.id)
     .fetch_optional(&state.db)
     .await?;
-    let (status, code, fresh) = row.ok_or_else(|| ApiError::not_found("no such pairing request"))?;
+    let (status, code, expires_at) = row.ok_or_else(|| ApiError::not_found("no such pairing request"))?;
     if status == "approved" {
         return Ok(Json(fetch(&state, id).await?));
     }
-    if !fresh {
+    if expires_at <= now() {
         return Err(ApiError::bad_request("pairing code expired; ask again from the other device"));
     }
     if code != req.code.trim() {
@@ -162,8 +164,8 @@ pub async fn remove(
     Path(id): Path<i64>,
 ) -> ApiResult<StatusCode> {
     let done = sqlx::query(
-        "delete from pairings p using devices m
-         where p.id = $1 and m.endpoint_id = p.mac_id and m.account_id = $2",
+        "delete from pairings
+         where id = $1 and mac_id in (select endpoint_id from devices where account_id = $2)",
     )
     .bind(id)
     .bind(account.id)
@@ -186,7 +188,7 @@ pub async fn paired_clients(
          where p.mac_id = $1 and m.account_id = $2 and p.status = 'approved'
          order by p.client_id",
     )
-    .bind(&mac_id)
+    .bind(mac_id)
     .bind(account.id)
     .fetch_all(&state.db)
     .await?;

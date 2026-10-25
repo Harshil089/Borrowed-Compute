@@ -2,8 +2,14 @@
 //!
 //! Runs the same agent service as `bc-agent serve`, plus sign-in, pairing approval and a
 //! list of recent jobs. Closing the window keeps the agent running; Quit stops it.
+//!
+//! It also hosts the cloud (accounts, devices, pairing) in a SQLite file on this Mac, and
+//! shares it with the user's PC through `tailscale serve`, so no server is needed. When a
+//! different cloud address is configured for this Mac, it uses that one instead.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod tailscale;
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -11,7 +17,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use bc_agent::events::{AgentEvent, JobEnd};
 use bc_agent::service::{Agent, AgentPaths};
-use bc_auth::{clear_session, cloud_url, default_device_name, load_session, save_session, CloudClient};
+use bc_auth::{
+    clear_session, cloud_url_for, default_device_name, is_unauthorized, load_session, save_session,
+    CloudClient, DEFAULT_CLOUD_URL,
+};
 use bc_net::{home_dir, load_or_create_key};
 use bc_proto::cloud::{DeviceKind, PairingInfo};
 use serde::Serialize;
@@ -23,6 +32,24 @@ use tokio::sync::{Mutex, OnceCell};
 use tokio::task::JoinHandle;
 
 const MAX_JOBS: usize = 50;
+
+/// Port of the built-in cloud. It listens on localhost only; Tailscale serve exposes it to
+/// the user's tailnet.
+const CLOUD_PORT: u16 = 8080;
+
+/// Client id of the GitHub OAuth app used for sign-in. OAuth client ids are public by
+/// design (device flow uses no client secret). `BC_GITHUB_CLIENT_ID` overrides it.
+const DEFAULT_GITHUB_CLIENT_ID: &str = "Ov23liLwrFmQ0cqqpXfy";
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct CloudHost {
+    /// True when this Mac hosts the cloud (its cloud address is the built-in default).
+    hosting: bool,
+    running: bool,
+    error: Option<String>,
+    /// The cloud address this Mac's agent uses.
+    url: String,
+}
 
 #[derive(Debug, Clone, Serialize)]
 struct JobRecord {
@@ -48,7 +75,7 @@ struct Status {
     serving: bool,
     start_error: Option<String>,
     cloud: CloudState,
-    cloud_url: String,
+    host: CloudHost,
 }
 
 #[derive(Serialize)]
@@ -57,9 +84,17 @@ struct Account {
     device_name: Option<String>,
 }
 
+impl AppState {
+    /// A client for this Mac's cloud address and session. Read from disk each time, so a
+    /// sign-in with `bc-agent login` shows up here too.
+    fn cloud(&self) -> CloudClient {
+        CloudClient::from_home(cloud_url_for(&self.paths.home), &self.paths.home)
+    }
+}
+
 struct AppState {
     paths: AgentPaths,
-    cloud: Mutex<CloudClient>,
+    host: StdMutex<CloudHost>,
     agent: OnceCell<Arc<Agent>>,
     start_error: StdMutex<Option<String>>,
     sync: Mutex<Option<JoinHandle<()>>>,
@@ -88,7 +123,7 @@ async fn restart_sync(state: &AppState) {
     if let Some(old) = sync.take() {
         old.abort();
     }
-    let cloud = state.cloud.lock().await.clone();
+    let cloud = state.cloud();
     if let (Some(agent), true) = (state.agent.get(), cloud.token().is_some()) {
         *sync = Some(agent.spawn_cloud_sync(cloud));
     }
@@ -103,14 +138,27 @@ fn get_status(state: State<'_, AppState>) -> CmdResult<Status> {
         serving: state.agent.get().is_some(),
         start_error: state.start_error.lock().unwrap().clone(),
         cloud: if signed_in { state.cloud_state.lock().unwrap().clone() } else { CloudState::default() },
-        cloud_url: cloud_url(),
+        host: state.host.lock().unwrap().clone(),
     })
 }
 
 #[tauri::command]
 async fn get_account(state: State<'_, AppState>) -> CmdResult<Account> {
-    let cloud = state.cloud.lock().await.clone();
-    let me = cloud.me().await.map_err(|e| format!("{e:#}"))?;
+    let cloud = state.cloud();
+    let me = match cloud.me().await {
+        Ok(me) => me,
+        // The session belongs to another cloud (or expired): sign out so the window
+        // offers sign-in again instead of failing on every request.
+        Err(e) if is_unauthorized(&e) => {
+            sign_out_locally(&state).await;
+            return Err("signed-out".into());
+        }
+        Err(e) => return Err(format!("{e:#}")),
+    };
+    // A session that appeared on disk (for example from `bc-agent login`) needs sync.
+    if state.sync.lock().await.is_none() {
+        restart_sync(&state).await;
+    }
     let id = device_id(&state)?;
     let device_name = cloud
         .devices()
@@ -124,7 +172,7 @@ async fn get_account(state: State<'_, AppState>) -> CmdResult<Account> {
 #[tauri::command]
 async fn login(app: AppHandle, state: State<'_, AppState>, name: String) -> CmdResult<Account> {
     // A fresh client, so other commands are not blocked while the user is on GitHub.
-    let mut client = CloudClient::new(cloud_url(), None);
+    let mut client = CloudClient::new(cloud_url_for(&state.paths.home), None);
     let emitter = app.clone();
     let (token, login) = client
         .login(|start| {
@@ -140,7 +188,7 @@ async fn login(app: AppHandle, state: State<'_, AppState>, name: String) -> CmdR
         n => n.to_string(),
     };
     let device = client.register(&key, &name, DeviceKind::Mac).await.map_err(|e| format!("{e:#}"))?;
-    *state.cloud.lock().await = client;
+    drop(client);
     *state.cloud_state.lock().unwrap() = CloudState::default();
     restart_sync(&state).await;
     Ok(Account { login, device_name: Some(device.name) })
@@ -148,14 +196,46 @@ async fn login(app: AppHandle, state: State<'_, AppState>, name: String) -> CmdR
 
 #[tauri::command]
 async fn logout(state: State<'_, AppState>) -> CmdResult<()> {
-    let cloud = state.cloud.lock().await.clone();
+    let cloud = state.cloud();
     if cloud.token().is_some() {
         let _ = cloud.logout().await;
     }
+    sign_out_locally(&state).await;
+    Ok(())
+}
+
+async fn sign_out_locally(state: &AppState) {
     clear_session(&state.paths.home);
-    *state.cloud.lock().await = CloudClient::new(cloud_url(), None);
     *state.cloud_state.lock().unwrap() = CloudState::default();
-    restart_sync(&state).await;
+    restart_sync(state).await;
+}
+
+#[tauri::command]
+async fn tailscale_status() -> tailscale::TailscaleState {
+    tailscale::state(CLOUD_PORT).await
+}
+
+#[tauri::command]
+async fn tailscale_share() -> CmdResult<tailscale::ShareResult> {
+    tailscale::share(CLOUD_PORT).await.map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn tailscale_stop() -> CmdResult<()> {
+    tailscale::stop().await.map_err(|e| format!("{e:#}"))
+}
+
+/// Runs the cloud from a SQLite file in this Mac's Borrowed Compute folder.
+async fn host_cloud(data_dir: std::path::PathBuf) -> anyhow::Result<()> {
+    std::fs::create_dir_all(&data_dir)?;
+    let db = bc_cloud::connect(&bc_cloud::sqlite_url(&data_dir.join("cloud.db"))).await?;
+    let client_id = std::env::var("BC_GITHUB_CLIENT_ID")
+        .unwrap_or_else(|_| DEFAULT_GITHUB_CLIENT_ID.to_string());
+    let state = bc_cloud::AppState { db, github: Arc::new(bc_cloud::GitHub::new(client_id)) };
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", CLOUD_PORT))
+        .await
+        .map_err(|e| anyhow::anyhow!("port {CLOUD_PORT} is busy ({e}); quit whatever else uses it"))?;
+    bc_cloud::serve(listener, state).await?;
     Ok(())
 }
 
@@ -163,20 +243,20 @@ async fn logout(state: State<'_, AppState>) -> CmdResult<()> {
 #[tauri::command]
 async fn list_pairings(state: State<'_, AppState>) -> CmdResult<Vec<PairingInfo>> {
     let me = device_id(&state)?;
-    let cloud = state.cloud.lock().await.clone();
+    let cloud = state.cloud();
     let list = cloud.pairings(&me).await.map_err(|e| format!("{e:#}"))?;
     Ok(list.into_iter().filter(|p| p.mac_id == me).collect())
 }
 
 #[tauri::command]
 async fn approve(state: State<'_, AppState>, id: i64, code: String) -> CmdResult<PairingInfo> {
-    let cloud = state.cloud.lock().await.clone();
+    let cloud = state.cloud();
     cloud.approve(id, &code).await.map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
 async fn unpair(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
-    let cloud = state.cloud.lock().await.clone();
+    let cloud = state.cloud();
     cloud.unpair(id).await.map_err(|e| format!("{e:#}"))
 }
 
@@ -255,16 +335,18 @@ fn toggle_window(app: &AppHandle) {
 }
 
 fn main() {
-    let home = home_dir().expect("config directory").join("agent");
+    let root = home_dir().expect("config directory");
+    let home = root.join("agent");
     let paths = AgentPaths::new(home.clone());
-    let cloud = CloudClient::from_home(cloud_url(), &home);
-    let signed_in = cloud.token().is_some();
+    let cloud_url = cloud_url_for(&home);
+    let hosting = cloud_url == DEFAULT_CLOUD_URL;
+    let signed_in = load_session(&home).is_some();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(AppState {
             paths,
-            cloud: Mutex::new(cloud),
+            host: StdMutex::new(CloudHost { hosting, running: false, error: None, url: cloud_url }),
             agent: OnceCell::new(),
             start_error: StdMutex::new(None),
             sync: Mutex::new(None),
@@ -280,7 +362,10 @@ fn main() {
             approve,
             unpair,
             recent_jobs,
-            open_url
+            open_url,
+            tailscale_status,
+            tailscale_share,
+            tailscale_stop
         ])
         .setup(move |app| {
             // A menu-bar app: no Dock icon.
@@ -313,6 +398,24 @@ fn main() {
                 })
                 .build(app)?;
 
+            if hosting {
+                let handle = app.handle().clone();
+                let data_dir = root.join("cloud");
+                tauri::async_runtime::spawn(async move {
+                    handle.state::<AppState>().host.lock().unwrap().running = true;
+                    let result = host_cloud(data_dir).await;
+                    let state = handle.state::<AppState>();
+                    let mut host = state.host.lock().unwrap();
+                    host.running = false;
+                    host.error = Some(match result {
+                        Ok(()) => "the built-in cloud stopped".to_string(),
+                        Err(e) => format!("{e:#}"),
+                    });
+                    drop(host);
+                    let _ = handle.emit("status-changed", ());
+                });
+            }
+
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -332,8 +435,33 @@ fn main() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 while let Some(event) = rx.recv().await {
-                    record(&handle.state::<AppState>(), &event);
+                    let state = handle.state::<AppState>();
+                    record(&state, &event);
+                    // The cloud no longer accepts this Mac's session (expired, or it was
+                    // issued by a different cloud): sign out and ask the user to sign in.
+                    if let AgentEvent::CloudSync { ok: false, error: Some(error) } = &event {
+                        if error.ends_with("(401 Unauthorized)") {
+                            sign_out_locally(&state).await;
+                            show_window(&handle);
+                        }
+                    }
                     let _ = handle.emit("agent-event", &event);
+                }
+            });
+
+            // Start cloud sync when a session appears on disk, for example after
+            // `bc-agent login`, even while the window is closed.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    let state = handle.state::<AppState>();
+                    let signed_in = load_session(&state.paths.home).is_some();
+                    let syncing = state.sync.lock().await.is_some();
+                    if signed_in != syncing && state.agent.get().is_some() {
+                        restart_sync(&state).await;
+                        let _ = handle.emit("status-changed", ());
+                    }
                 }
             });
 

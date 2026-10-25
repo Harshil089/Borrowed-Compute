@@ -1,7 +1,5 @@
 //! Device registry and presence.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
@@ -10,35 +8,26 @@ use iroh_base::{PublicKey, Signature};
 
 use crate::auth::Account;
 use crate::error::{ApiError, ApiResult};
-use crate::{AppState, ONLINE_WINDOW_SECS};
+use crate::{now, AppState, ONLINE_WINDOW_SECS};
 
 /// How far a registration signature's timestamp may be from the cloud's clock.
 const MAX_SKEW_SECS: u64 = 300;
 const MAX_NAME: usize = 64;
 
-type DeviceRow = (String, String, String, bool, Option<i64>, Option<serde_json::Value>);
+type DeviceRow = (String, String, String, Option<i64>, Option<String>);
 
-pub const DEVICE_COLUMNS: &str = "endpoint_id, name, kind,
-    coalesce(last_seen > now() - make_interval(secs => $ONLINE), false),
-    extract(epoch from now() - last_seen)::bigint,
-    addr";
+pub const DEVICE_SELECT: &str = "select endpoint_id, name, kind, last_seen, addr from devices";
 
-pub fn device_select(rest: &str) -> String {
-    format!(
-        "select {} from devices {rest}",
-        DEVICE_COLUMNS.replace("$ONLINE", &ONLINE_WINDOW_SECS.to_string())
-    )
-}
-
-pub fn to_info(row: DeviceRow) -> DeviceInfo {
-    let (endpoint_id, name, kind, online, last_seen_secs_ago, addr) = row;
+pub fn to_info(row: DeviceRow, now: i64) -> DeviceInfo {
+    let (endpoint_id, name, kind, last_seen, addr) = row;
+    let ago = last_seen.map(|t| (now - t).max(0));
     DeviceInfo {
         endpoint_id,
         name,
         kind: DeviceKind::parse(&kind).unwrap_or(DeviceKind::Other),
-        online,
-        last_seen_secs_ago,
-        addr,
+        online: ago.is_some_and(|a| a < ONLINE_WINDOW_SECS),
+        last_seen_secs_ago: ago,
+        addr: addr.and_then(|a| serde_json::from_str(&a).ok()),
     }
 }
 
@@ -57,8 +46,8 @@ pub async fn register(
         "select endpoint_id from devices where account_id = $1 and name = $2 and endpoint_id <> $3",
     )
     .bind(account.id)
-    .bind(name)
-    .bind(&req.endpoint_id)
+    .bind(name.to_string())
+    .bind(req.endpoint_id.clone())
     .fetch_optional(&state.db)
     .await?;
     if taken.is_some() {
@@ -67,31 +56,31 @@ pub async fn register(
 
     // Re-registering updates name and kind, but only for the account that owns the key.
     let owned: Option<(i64,)> = sqlx::query_as(
-        "insert into devices (endpoint_id, account_id, name, kind) values ($1, $2, $3, $4)
+        "insert into devices (endpoint_id, account_id, name, kind, created_at) values ($1, $2, $3, $4, $5)
          on conflict (endpoint_id) do update set name = excluded.name, kind = excluded.kind
          where devices.account_id = excluded.account_id
          returning account_id",
     )
-    .bind(&req.endpoint_id)
+    .bind(req.endpoint_id.clone())
     .bind(account.id)
-    .bind(name)
+    .bind(name.to_string())
     .bind(req.kind.as_str())
+    .bind(now())
     .fetch_optional(&state.db)
     .await?;
     if owned.is_none() {
         return Err(ApiError::conflict("this device key belongs to another account"));
     }
 
-    let row: DeviceRow = sqlx::query_as(&device_select("where endpoint_id = $1"))
-        .bind(&req.endpoint_id)
+    let row: DeviceRow = sqlx::query_as(&format!("{DEVICE_SELECT} where endpoint_id = $1"))
+        .bind(req.endpoint_id)
         .fetch_one(&state.db)
         .await?;
-    Ok((StatusCode::CREATED, Json(to_info(row))))
+    Ok((StatusCode::CREATED, Json(to_info(row, now()))))
 }
 
 fn verify_key_proof(req: &RegisterDevice, account: &Account) -> ApiResult<()> {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-    if now.abs_diff(req.signed_at) > MAX_SKEW_SECS {
+    if (now() as u64).abs_diff(req.signed_at) > MAX_SKEW_SECS {
         return Err(ApiError::bad_request("registration timestamp is too far from server time"));
     }
     let key: PublicKey = req
@@ -108,11 +97,13 @@ fn verify_key_proof(req: &RegisterDevice, account: &Account) -> ApiResult<()> {
 }
 
 pub async fn list(State(state): State<AppState>, account: Account) -> ApiResult<Json<Vec<DeviceInfo>>> {
-    let rows: Vec<DeviceRow> = sqlx::query_as(&device_select("where account_id = $1 order by name"))
-        .bind(account.id)
-        .fetch_all(&state.db)
-        .await?;
-    Ok(Json(rows.into_iter().map(to_info).collect()))
+    let rows: Vec<DeviceRow> =
+        sqlx::query_as(&format!("{DEVICE_SELECT} where account_id = $1 order by name"))
+            .bind(account.id)
+            .fetch_all(&state.db)
+            .await?;
+    let now = now();
+    Ok(Json(rows.into_iter().map(|r| to_info(r, now)).collect()))
 }
 
 pub async fn heartbeat(
@@ -121,13 +112,15 @@ pub async fn heartbeat(
     Path(id): Path<String>,
     Json(req): Json<Heartbeat>,
 ) -> ApiResult<StatusCode> {
+    let addr = req.addr.map(|a| a.to_string());
     let done = sqlx::query(
-        "update devices set last_seen = now(), addr = coalesce($3, addr)
-         where endpoint_id = $1 and account_id = $2",
+        "update devices set last_seen = $1, addr = coalesce($2, addr)
+         where endpoint_id = $3 and account_id = $4",
     )
-    .bind(&id)
+    .bind(now())
+    .bind(addr)
+    .bind(id)
     .bind(account.id)
-    .bind(req.addr)
     .execute(&state.db)
     .await?;
     if done.rows_affected() == 0 {
@@ -142,7 +135,7 @@ pub async fn remove(
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
     let done = sqlx::query("delete from devices where endpoint_id = $1 and account_id = $2")
-        .bind(&id)
+        .bind(id)
         .bind(account.id)
         .execute(&state.db)
         .await?;

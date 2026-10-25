@@ -7,12 +7,51 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
+// The web view has no native confirm() dialog, so ask inside the window instead.
+function ask(message, okLabel = "OK", danger = false) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "ask-overlay";
+    overlay.setAttribute("role", "alertdialog");
+    overlay.setAttribute("aria-modal", "true");
+    overlay.innerHTML = `
+      <div class="ask-box">
+        <p></p>
+        <div class="ask-actions">
+          <button data-ask="no">Cancel</button>
+          <button data-ask="yes" class="primary ${danger ? "danger" : ""}"></button>
+        </div>
+      </div>`;
+    overlay.querySelector("p").textContent = message;
+    overlay.querySelector('[data-ask="yes"]').textContent = okLabel;
+    const done = (answer) => {
+      overlay.remove();
+      document.removeEventListener("keydown", onKey, true);
+      resolve(answer);
+    };
+    const onKey = (e) => {
+      if (e.key === "Escape") { e.stopPropagation(); done(false); }
+    };
+    overlay.addEventListener("click", (e) => {
+      const button = e.target.closest("[data-ask]");
+      if (button) { e.stopPropagation(); done(button.dataset.ask === "yes"); }
+    });
+    document.addEventListener("keydown", onKey, true);
+    document.body.appendChild(overlay);
+    overlay.querySelector('[data-ask="no"]').focus();
+  });
+}
+
 let status = null;
 let account = null;
 let pairings = [];
 let jobs = [];
 let verificationUri = null;
 let signingIn = false;
+let tailscale = null;
+let sharing = false;
+let shareMessage = null;
+let approvalUrl = null;
 
 function showError(message) {
   const box = $("error");
@@ -40,6 +79,8 @@ function renderStatus() {
     label = "Starting";
   } else if (status.start_error) {
     cls = "bad"; label = "Not running";
+  } else if (status.host.hosting && status.host.error) {
+    cls = "bad"; label = "Cloud stopped";
   } else if (!status.serving) {
     label = "Starting";
   } else if (!status.signed_in) {
@@ -67,7 +108,10 @@ function render() {
     : "";
   $("device-id").textContent = status?.device_id ? `Device ${status.device_id.slice(0, 16)}…` : "";
   if (status?.start_error) showError(`The agent could not start: ${status.start_error}`);
+  else if (status?.host.hosting && status.host.error) showError(`The built-in cloud is not running: ${status.host.error}`);
   if (!signedIn) return;
+
+  renderConnect();
 
   const pending = pairings.filter((p) => p.status === "pending");
   $("requests").innerHTML = pending.length
@@ -114,6 +158,70 @@ function render() {
     : `<div class="empty">Jobs from paired devices appear here.</div>`;
 }
 
+const copyIcon = "Copy";
+
+function renderConnect() {
+  const box = $("connect");
+  if (!status.host.hosting) {
+    box.innerHTML = `
+      <p>This Mac uses the cloud at</p>
+      <div class="address"><span>${esc(status.host.url)}</span></div>
+      <p class="muted">Enter the same address in Borrowed Compute on your PC.</p>`;
+    return;
+  }
+  const t = tailscale;
+  let body;
+  if (!t) {
+    body = `<div class="row"><span class="spinner"></span><span class="muted">Checking Tailscale…</span></div>`;
+  } else if (t.state === "sharing") {
+    body = `
+      <p>Your PC reaches this Mac's cloud at:</p>
+      <div class="address"><span id="share-url">${esc(t.url)}</span><button data-copy="${esc(t.url)}">${copyIcon}</button></div>
+      <p class="muted">In Borrowed Compute on your PC, enter this address. Only devices in your Tailscale network can open it.</p>
+      <div class="actions"><button class="link" data-ts="stop">Stop sharing</button></div>`;
+  } else if (t.state === "ready") {
+    body = `
+      <p>Tailscale is connected as <span class="mono">${esc(t.host)}</span>. Share this Mac's cloud with your other devices:</p>
+      <div class="actions"><button class="primary" data-ts="share" ${sharing ? "disabled" : ""}>${sharing ? "Sharing…" : "Share with my devices"}</button></div>`;
+  } else if (t.state === "https_disabled") {
+    body = `
+      <p>Tailscale is connected, but your tailnet has not turned on HTTPS certificates, which sharing needs.</p>
+      <ol class="steps"><li>Open the Tailscale admin page, DNS tab.</li><li>Turn on MagicDNS and HTTPS Certificates.</li><li>Come back and click Check again.</li></ol>
+      <div class="actions">
+        <button class="primary" data-open="https://login.tailscale.com/admin/dns">Open Tailscale DNS settings</button>
+        <button data-ts="check">Check again</button>
+      </div>`;
+  } else if (t.state === "not_running") {
+    body = `
+      <p>Tailscale is installed but not connected. Open Tailscale from the menu bar and sign in.</p>
+      <div class="actions"><button data-ts="check">Check again</button></div>`;
+  } else if (t.state === "not_installed") {
+    body = `
+      <p>Your PC reaches this Mac through Tailscale, a free private network between your own devices.</p>
+      <ol class="steps">
+        <li>Install Tailscale on this Mac and on your PC.</li>
+        <li>Sign in to Tailscale on both with the same account.</li>
+        <li>Come back here and click Check again.</li>
+      </ol>
+      <div class="actions">
+        <button class="primary" data-open="https://tailscale.com/download">Download Tailscale</button>
+        <button data-ts="check">Check again</button>
+      </div>`;
+  } else {
+    body = `<p>Tailscale reported a problem: ${esc(t.message)}</p><div class="actions"><button data-ts="check">Check again</button></div>`;
+  }
+  if (approvalUrl) {
+    body += `
+      <div class="banner warn">Tailscale needs you to allow sharing for your tailnet once.</div>
+      <div class="actions">
+        <button class="primary" data-open="${esc(approvalUrl)}">Allow in Tailscale</button>
+        <button data-ts="share">Try again</button>
+      </div>`;
+  }
+  if (shareMessage) body += `<div class="banner bad">${esc(shareMessage)}</div>`;
+  box.innerHTML = body;
+}
+
 function jobState(j) {
   if (j.rejected) return ["bad", "Rejected"];
   if (!j.end) return ["warn", "Running"];
@@ -131,7 +239,15 @@ async function refresh() {
   try {
     status = await invoke("get_status");
     if (status.signed_in) {
-      if (!account) account = await invoke("get_account").catch(() => null);
+      if (!account) {
+        try {
+          account = await invoke("get_account");
+        } catch (e) {
+          // The session belonged to another cloud; the app signed out, so show sign-in.
+          if (String(e) === "signed-out") { status = await invoke("get_status"); render(); return; }
+        }
+      }
+      if (status.host.hosting) tailscale = await invoke("tailscale_status");
       pairings = await invoke("list_pairings");
       jobs = await invoke("recent_jobs");
       showError(status.start_error ? `The agent could not start: ${status.start_error}` : "");
@@ -165,13 +281,45 @@ $("reopen").addEventListener("click", () => {
 });
 
 $("signout").addEventListener("click", async () => {
-  if (!confirm("Sign out? Paired devices will not be able to send jobs until you sign in again.")) return;
+  if (!(await ask("Sign out? Paired devices will not be able to send jobs until you sign in again.", "Sign out", true))) return;
   await invoke("logout").catch((e) => showError(String(e)));
   account = null; pairings = []; jobs = [];
   await refresh();
 });
 
 document.addEventListener("click", async (event) => {
+  const copy = event.target.closest("[data-copy]");
+  const open = event.target.closest("[data-open]");
+  const ts = event.target.closest("[data-ts]");
+  if (copy) {
+    await navigator.clipboard.writeText(copy.dataset.copy).catch(() => {});
+    copy.textContent = "Copied";
+    setTimeout(() => { copy.textContent = copyIcon; }, 1500);
+    return;
+  }
+  if (open) {
+    invoke("open_url", { url: open.dataset.open }).catch((e) => showError(String(e)));
+    return;
+  }
+  if (ts) {
+    shareMessage = null;
+    if (ts.dataset.ts === "share") {
+      sharing = true; approvalUrl = null; renderConnect();
+      try {
+        const r = await invoke("tailscale_share");
+        if (r.result === "needs_approval") approvalUrl = r.url;
+      } catch (e) {
+        shareMessage = String(e);
+      }
+      sharing = false;
+    } else if (ts.dataset.ts === "stop") {
+      if (!(await ask("Stop sharing? Your PC will not reach this Mac's cloud until you share again.", "Stop sharing", true))) return;
+      await invoke("tailscale_stop").catch((e) => { shareMessage = String(e); });
+    }
+    tailscale = null; renderConnect();
+    await refresh();
+    return;
+  }
   const approve = event.target.closest("[data-approve]");
   const remove = event.target.closest("[data-unpair]");
   try {
@@ -180,7 +328,7 @@ document.addEventListener("click", async (event) => {
       await invoke("approve", { id: Number(approve.dataset.approve), code: approve.dataset.code });
       await refresh();
     } else if (remove) {
-      if (!confirm(`Remove ${remove.dataset.name}? It will stop being able to send jobs within 15 seconds.`)) return;
+      if (!(await ask(`Remove ${remove.dataset.name}? It will stop being able to send jobs within 15 seconds.`, "Remove", true))) return;
       remove.disabled = true;
       await invoke("unpair", { id: Number(remove.dataset.unpair) });
       await refresh();

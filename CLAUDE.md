@@ -14,9 +14,9 @@ Product and design docs live outside this repo, in the parent folder `../`: `Bor
 | `apps/bc-agent` | Mac agent: `runner.rs` (workspace, process, output), `server.rs` (per-connection protocol), `paired.rs` (allowlist), `cloud_sync.rs` (heartbeat + paired list), `service.rs` (the running agent, shared by `bc-agent serve` and the menu-bar app), `events.rs` (job and sync events for a UI) |
 | `apps/bc-cli` | `bc` binary: `pack.rs` (tar of project), `run.rs` (client side of a job), `flows.rs` (steps shared with the desktop app: resolve Mac, load spec, split command, wait for pairing), `main.rs` (commands) |
 | `apps/bc-desktop` | Tauri 2 client app ("Borrowed Compute"): `src/main.rs` commands, `ui/` plain HTML/CSS/JS. Shares the CLI's home dir, so it is the same device as `bc`. |
-| `apps/bc-desktop-agent` | Tauri 2 menu-bar app on the Mac ("Borrowed Compute Agent"): runs `bc_agent::service::Agent`, pairing approval, recent jobs |
+| `apps/bc-desktop-agent` | Tauri 2 menu-bar app on the Mac ("Borrowed Compute Agent"): runs `bc_agent::service::Agent`, hosts `bc-cloud` on SQLite when the Mac's cloud address is the default, shares it with `tailscale serve` (`src/tailscale.rs`), pairing approval, recent jobs |
 | `design/` | Icon sources (SVG). Regenerate with `npx @tauri-apps/cli@2.12.4 icon design/icon-client.svg -o apps/bc-desktop/icons` |
-| `apps/bc-cloud` | axum + Postgres: GitHub device-flow sign-in, devices, pairings, presence. Migrations in `migrations/` |
+| `apps/bc-cloud` | axum + sqlx `Any`: GitHub device-flow sign-in, devices, pairings, presence. Runs on SQLite (inside the Mac app) or Postgres. Migrations in `migrations/sqlite` and `migrations/postgres` |
 
 ## Commands
 
@@ -25,7 +25,7 @@ cargo test --workspace
 cargo clippy --workspace --all-targets
 ```
 
-Cloud API tests need Postgres; without `BC_TEST_DATABASE_URL` they are skipped (and pass silently). Each test creates its own database:
+Cloud API tests always run on a fresh SQLite file; with `BC_TEST_DATABASE_URL` set they also run on Postgres (each test creates its own database):
 
 ```bash
 BC_TEST_DATABASE_URL=postgres://bc@127.0.0.1:54329/postgres cargo test --workspace
@@ -35,7 +35,7 @@ Throwaway local Postgres (Homebrew): `initdb -D <dir> -U bc --auth=trust`, then 
 
 Desktop apps: `cargo run -p bc-desktop` or `cargo run -p bc-desktop-agent` for development (the UI is static files in `ui/`, no bundler). Bundles: `npx @tauri-apps/cli@2.12.4 build` inside the app's folder (`--debug --bundles app` for a quick macOS `.app`). The UI is embedded at compile time, so rebuild after editing `ui/`. For a `.dmg`, run with `CI=true` so the bundler skips its Finder AppleScript styling, which times out without automation permission. Release builds rely on `[profile.release.build-override] strip = false` in `Cargo.toml`; without it, macOS 27 fails every release build with "mis-aligned LINKEDIT string pool".
 
-Run the cloud: `BC_DATABASE_URL=... BC_GITHUB_CLIENT_ID=... cargo run -p bc-cloud` (listens on `127.0.0.1:8080`). Devices use `BC_CLOUD_URL`; `BC_HOME` relocates keys, sessions and the timing log.
+Run the cloud on its own: `BC_DATABASE_URL=postgres://… or sqlite://<file>?mode=rwc BC_GITHUB_CLIENT_ID=... cargo run -p bc-cloud` (listens on `127.0.0.1:8080`). Normally the Mac app hosts it. A device's cloud address is `BC_CLOUD_URL`, else the `cloud-url` file in its home folder (set by the apps or `bc cloud <address>`), else `http://127.0.0.1:8080`. `BC_HOME` relocates keys, sessions, the cloud address and the Mac app's `cloud/cloud.db`.
 
 ## Rules
 
@@ -52,8 +52,11 @@ Run the cloud: `BC_DATABASE_URL=... BC_GITHUB_CLIENT_ID=... cargo run -p bc-clou
 - **Tests that need `sh` or the Mac agent are `cfg(unix)`**, so `cargo test --workspace` still runs on Windows CI.
 - **Workspaces are deleted after every job**, and the job's process group is killed on exit, timeout and cancel (`GroupGuard` in `runner.rs`). Keep both guarantees.
 - **Desktop apps call the libraries, never the CLI binaries.** New client or agent behavior goes in `bc_cli::flows` or `bc_agent::service` first, then both the CLI and the app use it.
+- **Never use `confirm()`, `alert()` or `prompt()` in the desktop UIs.** The web view has no native handler for them on macOS (the Mac app's `confirm()` returned "no" without showing anything). Use `ask()` in each `ui/app.js`.
 - **Keep `ui/base.css` identical** in both desktop apps. Text colors must pass WCAG AA (4.5:1) in light and dark mode.
 - Cloud SQL uses runtime `sqlx::query`/`query_as`, not compile-time macros, so builds need no database.
+- **Cloud SQL must run on SQLite and Postgres.** No database-side time (`now()`, intervals): pass Unix seconds from `bc_cloud::now()`. Number `$N` parameters in order of first use. Keep both migration folders describing the same schema. Tests run every API test on SQLite.
+- **The apps read the session from disk on every call** (`AppState::cloud()`), so the CLI and the app stay one device. A 401 means the session belongs to another cloud: sign out locally and show sign-in.
 - Write code comments and docs in plain prose: why, not what.
 
 ## Known gaps (Phase one)
@@ -62,6 +65,7 @@ Run the cloud: `BC_DATABASE_URL=... BC_GITHUB_CLIENT_ID=... cargo run -p bc-clou
 - No sandbox yet: jobs run as the agent's user. The `_bcjob` user plus a Seatbelt profile is Phase two (Q4).
 - The whole project is uploaded per run (up to 2 GiB). Content-addressed chunked sync is Phase two (Q2).
 - Keys and session tokens are owner-only files, not yet in the OS keychain.
-- Without sign-in, discovery uses iroh's public relays (dev only). Our own `iroh-relay` deployment is not written.
+- Discovery and relays use iroh's public relays (dev only). Our own `iroh-relay` deployment is not written.
+- The Mac app's built-in cloud is reachable from other devices only through Tailscale. Tested on one Mac (share, HTTPS address, sign-in and a job through it); not yet from a second device.
 - The desktop apps are verified on macOS only. CI builds the Windows installers, but nobody has run them on a Windows PC yet.
 - The Mac agent app is not signed or notarized, and does not start at login yet.

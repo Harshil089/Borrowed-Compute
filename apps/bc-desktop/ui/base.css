@@ -18,6 +18,7 @@
   --warn-soft: #fff3df;
   --bad: #c42b2b;
   --bad-soft: #fde8e8;
+  --bad-text: #ffffff;
   --console-bg: #0f1218;
   --console-text: #d8dde6;
   --console-err: #ff9b8f;
@@ -48,6 +49,7 @@
     --warn-soft: #2e2413;
     --bad: #ff6b6b;
     --bad-soft: #351919;
+    --bad-text: #1c0a0a;
     --console-bg: #0a0c10;
     --shadow: none;
     color-scheme: dark;
@@ -163,3 +165,22 @@ input.mono { font-family: var(--mono); font-size: 12.5px; }
 }
 
 .empty { padding: 14px; text-align: center; color: var(--faint); font-size: 12.5px; }
+
+/* In-app confirmation (the web view has no native confirm() dialog). */
+.ask-overlay {
+  position: fixed; inset: 0; z-index: 100;
+  display: grid; place-items: center;
+  background: rgba(10, 12, 16, 0.45);
+  padding: 20px;
+}
+.ask-box {
+  width: min(380px, 100%);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px;
+  display: flex; flex-direction: column; gap: 14px;
+}
+.ask-box p { margin: 0; }
+.ask-actions { display: flex; justify-content: flex-end; gap: 8px; }
+button.primary.danger { background: var(--bad); border-color: var(--bad); color: var(--bad-text); }

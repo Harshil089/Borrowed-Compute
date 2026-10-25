@@ -9,9 +9,9 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{ApiError, ApiResult};
 use crate::github::Poll;
-use crate::AppState;
+use crate::{now, AppState};
 
-const SESSION_DAYS: i32 = 90;
+const SESSION_SECS: i64 = 90 * 24 * 3600;
 
 /// The signed-in account behind a request's bearer token.
 #[derive(Debug, Clone)]
@@ -34,9 +34,10 @@ impl FromRequestParts<AppState> for Account {
         let token_hash = Sha256::digest(token.as_bytes()).to_vec();
         let row: Option<(i64, String)> = sqlx::query_as(
             "select a.id, a.github_login from sessions s join accounts a on a.id = s.account_id
-             where s.token_hash = $1 and s.expires_at > now()",
+             where s.token_hash = $1 and s.expires_at > $2",
         )
-        .bind(&token_hash)
+        .bind(token_hash.clone())
+        .bind(now())
         .fetch_optional(&state.db)
         .await?;
         let (id, login) =
@@ -48,17 +49,16 @@ impl FromRequestParts<AppState> for Account {
 pub async fn start_device_flow(State(state): State<AppState>) -> ApiResult<Json<DeviceFlowStart>> {
     let code = state.github.start().await?;
     let flow_id = random_hex(16);
-    sqlx::query(
-        "insert into device_flows (id, device_code, expires_at)
-         values ($1, $2, now() + make_interval(secs => $3))",
-    )
-    .bind(&flow_id)
-    .bind(&code.device_code)
-    .bind(code.expires_in as f64)
-    .execute(&state.db)
-    .await?;
+    let now = now();
+    sqlx::query("insert into device_flows (id, device_code, expires_at) values ($1, $2, $3)")
+        .bind(flow_id.clone())
+        .bind(code.device_code.clone())
+        .bind(now + code.expires_in as i64)
+        .execute(&state.db)
+        .await?;
     // Old flows are useless after they expire.
-    sqlx::query("delete from device_flows where expires_at < now()")
+    sqlx::query("delete from device_flows where expires_at < $1")
+        .bind(now)
         .execute(&state.db)
         .await?;
     Ok(Json(DeviceFlowStart {
@@ -74,12 +74,12 @@ pub async fn poll_device_flow(
     State(state): State<AppState>,
     Json(req): Json<DeviceFlowPoll>,
 ) -> ApiResult<Json<DeviceFlowStatus>> {
-    let row: Option<(String,)> = sqlx::query_as(
-        "select device_code from device_flows where id = $1 and expires_at > now()",
-    )
-    .bind(&req.flow_id)
-    .fetch_optional(&state.db)
-    .await?;
+    let row: Option<(String,)> =
+        sqlx::query_as("select device_code from device_flows where id = $1 and expires_at > $2")
+            .bind(req.flow_id.clone())
+            .bind(now())
+            .fetch_optional(&state.db)
+            .await?;
     let Some((device_code,)) = row else {
         return Ok(Json(DeviceFlowStatus::Expired));
     };
@@ -95,28 +95,30 @@ pub async fn poll_device_flow(
     let user = state.github.user(&token).await?;
     drop(token);
 
+    let now = now();
     let (account_id,): (i64,) = sqlx::query_as(
-        "insert into accounts (github_id, github_login) values ($1, $2)
+        "insert into accounts (github_id, github_login, created_at) values ($1, $2, $3)
          on conflict (github_id) do update set github_login = excluded.github_login
          returning id",
     )
     .bind(user.id)
-    .bind(&user.login)
+    .bind(user.login.clone())
+    .bind(now)
     .fetch_one(&state.db)
     .await?;
 
     let session_token = format!("{SESSION_PREFIX}{}", random_hex(32));
     sqlx::query(
-        "insert into sessions (token_hash, account_id, expires_at)
-         values ($1, $2, now() + make_interval(days => $3))",
+        "insert into sessions (token_hash, account_id, created_at, expires_at) values ($1, $2, $3, $4)",
     )
     .bind(Sha256::digest(session_token.as_bytes()).to_vec())
     .bind(account_id)
-    .bind(SESSION_DAYS)
+    .bind(now)
+    .bind(now + SESSION_SECS)
     .execute(&state.db)
     .await?;
     sqlx::query("delete from device_flows where id = $1")
-        .bind(&req.flow_id)
+        .bind(req.flow_id)
         .execute(&state.db)
         .await?;
 
@@ -129,7 +131,7 @@ pub async fn me(account: Account) -> Json<Me> {
 
 pub async fn logout(State(state): State<AppState>, account: Account) -> ApiResult<StatusCode> {
     sqlx::query("delete from sessions where token_hash = $1")
-        .bind(&account.token_hash)
+        .bind(account.token_hash)
         .execute(&state.db)
         .await?;
     Ok(StatusCode::NO_CONTENT)

@@ -545,13 +545,16 @@ dependencies = [
  "bc-proto",
  "hex",
  "iroh-base",
+ "percent-encoding",
  "rand 0.8.8",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
+ "tempfile",
  "tokio",
+ "url",
 ]
 
 [[package]]
@@ -579,6 +582,7 @@ dependencies = [
  "anyhow",
  "bc-agent",
  "bc-auth",
+ "bc-cloud",
  "bc-net",
  "bc-proto",
  "serde",
@@ -2644,7 +2648,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
@@ -3113,7 +3117,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
- "webpki-roots",
+ "webpki-roots 1.0.11",
  "ws_stream_wasm",
 ]
 
@@ -3424,6 +3428,7 @@ version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e99fb7a497b1e3339bc746195567ed8d3e24945ecd636e3619d20b9de9e9149"
 dependencies = [
+ "cc",
  "pkg-config",
  "vcpkg",
 ]
@@ -3636,7 +3641,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
- "webpki-roots",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
@@ -5139,7 +5144,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "webpki-roots",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
@@ -6045,6 +6050,7 @@ dependencies = [
  "memchr",
  "once_cell",
  "percent-encoding",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -6054,6 +6060,7 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "url",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -6086,7 +6093,6 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sqlx-core",
- "sqlx-mysql",
  "sqlx-postgres",
  "sqlx-sqlite",
  "syn 2.0.119",
@@ -6125,7 +6131,6 @@ dependencies = [
  "percent-encoding",
  "rand 0.8.8",
  "rsa",
- "serde",
  "sha1 0.10.7",
  "sha2 0.10.9",
  "smallvec",
@@ -6927,7 +6932,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-rustls",
- "webpki-roots",
+ "webpki-roots 1.0.11",
  "x509-parser",
 ]
 
@@ -7576,6 +7581,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e49d0e65abc00c142e8f9428da991da9f1a250c39be97459901eb12b9b49f62a"
 dependencies = [
  "rustls-pki-types",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "0.26.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
+dependencies = [
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
