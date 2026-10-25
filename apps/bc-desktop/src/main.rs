@@ -91,6 +91,22 @@ struct ProjectInfo {
     has_spec: bool,
     command: Option<String>,
     spec_error: Option<String>,
+    /// What the folder looks like, when it has no bc.toml.
+    detected: Option<DetectedView>,
+}
+
+#[derive(Serialize)]
+struct DetectedView {
+    kind: String,
+    reason: String,
+    suggestions: Vec<SuggestionView>,
+}
+
+#[derive(Serialize)]
+struct SuggestionView {
+    label: String,
+    /// The command as the command box shows it; `split_command` turns it back into argv.
+    command: String,
 }
 
 #[derive(Serialize)]
@@ -301,11 +317,20 @@ async fn pick_folder(app: AppHandle) -> CmdResult<Option<String>> {
 fn project_info(folder: String) -> ProjectInfo {
     let path = Path::new(&folder).join("bc.toml");
     if !path.exists() {
-        return ProjectInfo { has_spec: false, command: None, spec_error: None };
+        let detected = bc_cli::detect::detect(Path::new(&folder)).map(|d| DetectedView {
+            kind: d.kind,
+            reason: d.reason,
+            suggestions: d
+                .suggestions
+                .into_iter()
+                .map(|s| SuggestionView { label: s.label, command: join_command(&s.argv) })
+                .collect(),
+        });
+        return ProjectInfo { has_spec: false, command: None, spec_error: None, detected };
     }
     match std::fs::read_to_string(&path).map_err(anyhow::Error::from).and_then(|t| Ok(JobSpec::from_toml(&t)?)) {
-        Ok(spec) => ProjectInfo { has_spec: true, command: Some(join_command(&spec.job.argv)), spec_error: None },
-        Err(e) => ProjectInfo { has_spec: true, command: None, spec_error: Some(format!("{e:#}")) },
+        Ok(spec) => ProjectInfo { has_spec: true, command: Some(join_command(&spec.job.argv)), spec_error: None, detected: None },
+        Err(e) => ProjectInfo { has_spec: true, command: None, spec_error: Some(format!("{e:#}")), detected: None },
     }
 }
 
