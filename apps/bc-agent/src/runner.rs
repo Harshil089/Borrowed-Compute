@@ -5,15 +5,15 @@
 //! the Seatbelt profile come in Phase two.
 
 use std::path::{Component, Path, PathBuf};
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use bc_proto::wire::{AgentMsg, JobRequest, OutputStream};
+use bc_proto::wire::{AgentMsg, JobRequest, JobUsage, OutputStream};
 use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::process::Command;
+use tokio::process::{ChildStderr, ChildStdout};
 use tokio::sync::mpsc;
 
 const READ_CHUNK: usize = 16 * 1024;
@@ -117,34 +117,37 @@ async fn execute(
     }
     let (program, args) = req.argv.split_first().context("empty argv")?;
 
-    let mut cmd = Command::new(program);
+    let mut cmd = std::process::Command::new(program);
     cmd.args(args)
         .current_dir(&workdir)
         .envs(&req.env)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+        .stderr(Stdio::piped());
     // Own process group, so the job and everything it starts can be killed together.
     #[cfg(unix)]
-    cmd.process_group(0);
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
 
+    let t0 = Instant::now();
     let mut child = cmd
         .spawn()
         .with_context(|| format!("starting {program:?}"))?;
     let pid = child.id();
-    let group = GroupGuard(pid);
+    let group = GroupGuard(Some(pid));
     let _ = tx.send(AgentMsg::Started).await;
 
     let seq = Arc::new(AtomicU64::new(0));
     let stdout = tokio::spawn(pump(
-        child.stdout.take().context("no stdout")?,
+        ChildStdout::from_std(child.stdout.take().context("no stdout")?)?,
         OutputStream::Stdout,
         seq.clone(),
         tx.clone(),
     ));
     let stderr = tokio::spawn(pump(
-        child.stderr.take().context("no stderr")?,
+        ChildStderr::from_std(child.stderr.take().context("no stderr")?)?,
         OutputStream::Stderr,
         seq,
         tx.clone(),
@@ -154,13 +157,17 @@ async fn execute(
         .timeout_secs
         .map(Duration::from_secs)
         .unwrap_or(config.default_timeout);
-    let (status, timed_out) = match tokio::time::timeout(limit, child.wait()).await {
-        Ok(status) => (status?, false),
+    // The wait runs on its own thread and reaps the process even if this job is abandoned:
+    // the group guard kills the job, and the wait then returns.
+    let mut wait = tokio::task::spawn_blocking(move || wait_with_usage(child));
+    let ((status, usage), timed_out) = match tokio::time::timeout(limit, &mut wait).await {
+        Ok(waited) => (waited??, false),
         Err(_) => {
-            kill_group(pid);
-            (child.wait().await?, true)
+            kill_group(Some(pid));
+            (wait.await??, true)
         }
     };
+    let wall = t0.elapsed();
     // Background processes left by the job would keep its output pipes open.
     drop(group);
     let _ = stdout.await;
@@ -169,7 +176,46 @@ async fn execute(
     Ok(AgentMsg::Exited {
         code: if timed_out { None } else { status.code() },
         timed_out,
+        usage: usage.map(|u| JobUsage { wall_ms: wall.as_millis() as u64, ..u }),
     })
+}
+
+/// Waits for the job's process and reads what it and the processes it waited for used.
+#[cfg(unix)]
+fn wait_with_usage(child: std::process::Child) -> std::io::Result<(ExitStatus, Option<JobUsage>)> {
+    use std::os::unix::process::ExitStatusExt;
+
+    let pid = child.id() as libc::pid_t;
+    // Waiting by pid reaps the process; `child` is never waited on, so dropping it is safe.
+    drop(child);
+    let mut status = 0;
+    // SAFETY: rusage is plain data that wait4 fills in.
+    let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+    loop {
+        // SAFETY: valid pointers to locals; pid is our own unreaped child.
+        if unsafe { libc::wait4(pid, &mut status, 0, &mut ru) } == pid {
+            break;
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+    let ms = |t: libc::timeval| t.tv_sec as u64 * 1000 + t.tv_usec as u64 / 1000;
+    // macOS reports peak memory in bytes, Linux in kilobytes.
+    let rss_unit = if cfg!(target_os = "macos") { 1 } else { 1024 };
+    let usage = JobUsage {
+        wall_ms: 0,
+        user_ms: ms(ru.ru_utime),
+        system_ms: ms(ru.ru_stime),
+        max_rss_bytes: ru.ru_maxrss as u64 * rss_unit,
+    };
+    Ok((ExitStatus::from_raw(status), Some(usage)))
+}
+
+#[cfg(not(unix))]
+fn wait_with_usage(mut child: std::process::Child) -> std::io::Result<(ExitStatus, Option<JobUsage>)> {
+    Ok((child.wait()?, None))
 }
 
 async fn pump(
@@ -215,8 +261,13 @@ fn kill_group(pid: Option<u32>) {
             libc::killpg(pid as libc::pid_t, libc::SIGKILL);
         }
     }
+    // Phase one targets Mac agents; this keeps a Windows agent from leaking the job.
     #[cfg(not(unix))]
-    let _ = pid;
+    if let Some(pid) = pid {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .output();
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -289,13 +340,13 @@ mod tests {
         assert_eq!(msgs.first(), Some(&AgentMsg::Started));
         assert_eq!(output(&msgs, OutputStream::Stdout), "hi from windows\nyes\n");
         assert_eq!(output(&msgs, OutputStream::Stderr), "oops\n");
-        assert_eq!(
-            msgs.last(),
-            Some(&AgentMsg::Exited {
-                code: Some(3),
-                timed_out: false
-            })
-        );
+        match msgs.last() {
+            Some(AgentMsg::Exited { code: Some(3), timed_out: false, usage: Some(u) }) => {
+                assert!(u.wall_ms < 10_000, "{u:?}");
+                assert!(u.max_rss_bytes > 100_000, "peak memory looks wrong: {u:?}");
+            }
+            other => panic!("unexpected end {other:?}"),
+        }
         assert!(!ws.exists(), "workspace must be deleted after the job");
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -307,13 +358,10 @@ mod tests {
             archive(&[]),
         )
         .await;
-        assert_eq!(
+        assert!(matches!(
             msgs.last(),
-            Some(&AgentMsg::Exited {
-                code: None,
-                timed_out: true
-            })
-        );
+            Some(AgentMsg::Exited { code: None, timed_out: true, usage: Some(_) })
+        ));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -344,6 +392,24 @@ mod tests {
             "processes outlived the job: {}",
             String::from_utf8_lossy(&left.stdout)
         );
+    }
+
+    #[tokio::test]
+    async fn counts_cpu_of_processes_the_job_waits_for() {
+        // The busy loop runs in a child of `sh`, which waits for it.
+        let (msgs, _ws, root) = run(
+            request(&["sh", "-c", "sh -c 'i=0; while [ $i -lt 300000 ]; do i=$((i+1)); done'"], None),
+            archive(&[]),
+        )
+        .await;
+        match msgs.last() {
+            Some(AgentMsg::Exited { code: Some(0), usage: Some(u), .. }) => {
+                assert!(u.user_ms + u.system_ms >= 50, "child CPU not counted: {u:?}");
+                assert!(u.wall_ms >= u.user_ms / 2, "{u:?}");
+            }
+            other => panic!("unexpected end {other:?}"),
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

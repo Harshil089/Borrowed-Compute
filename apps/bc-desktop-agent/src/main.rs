@@ -9,6 +9,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod logs;
 mod tailscale;
 
 use std::collections::VecDeque;
@@ -23,7 +24,8 @@ use bc_auth::{
 };
 use bc_net::{home_dir, load_or_create_key};
 use bc_proto::cloud::{DeviceKind, PairingInfo};
-use serde::Serialize;
+use logs::{log, Logs};
+use serde::{Deserialize, Serialize};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
@@ -51,12 +53,14 @@ struct CloudHost {
     url: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct JobRecord {
     job_id: Option<String>,
     client: String,
     argv: Vec<String>,
     started_ms: u64,
+    #[serde(default)]
+    finished_ms: Option<u64>,
     end: Option<JobEnd>,
     rejected: Option<String>,
 }
@@ -100,6 +104,7 @@ struct AppState {
     sync: Mutex<Option<JoinHandle<()>>>,
     jobs: StdMutex<VecDeque<JobRecord>>,
     cloud_state: StdMutex<CloudState>,
+    logs: Logs,
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -283,16 +288,21 @@ fn record(state: &AppState, event: &AgentEvent) {
                 client: client.clone(),
                 argv: argv.clone(),
                 started_ms: now_ms(),
+                finished_ms: None,
                 end: None,
                 rejected: None,
             });
             jobs.truncate(MAX_JOBS);
+            log(format_args!("job {job_id} started for {}: {}", short(client), argv.join(" ")));
         }
         AgentEvent::JobFinished { job_id, end } => {
             let mut jobs = state.jobs.lock().unwrap();
             if let Some(job) = jobs.iter_mut().find(|j| j.job_id.as_deref() == Some(job_id)) {
                 job.end = Some(end.clone());
+                job.finished_ms = Some(now_ms());
+                state.logs.append_job(job);
             }
+            log(format_args!("job {job_id} {}", describe_end(end)));
         }
         AgentEvent::JobRejected { client, reason } => {
             let mut jobs = state.jobs.lock().unwrap();
@@ -301,10 +311,15 @@ fn record(state: &AppState, event: &AgentEvent) {
                 client: client.clone(),
                 argv: Vec::new(),
                 started_ms: now_ms(),
+                finished_ms: None,
                 end: None,
                 rejected: Some(reason.clone()),
             });
             jobs.truncate(MAX_JOBS);
+            if let Some(job) = jobs.front() {
+                state.logs.append_job(job);
+            }
+            log(format_args!("rejected a job from {}: {reason}", short(client)));
         }
         AgentEvent::CloudSync { ok, error } => {
             *state.cloud_state.lock().unwrap() = CloudState {
@@ -314,6 +329,34 @@ fn record(state: &AppState, event: &AgentEvent) {
             };
         }
     }
+}
+
+fn short(id: &str) -> &str {
+    id.get(..10).unwrap_or(id)
+}
+
+fn describe_end(end: &JobEnd) -> String {
+    match end {
+        JobEnd::Exited { code, timed_out, usage } => {
+            let how = match (timed_out, code) {
+                (true, _) => "timed out".to_string(),
+                (false, Some(c)) => format!("exited with code {c}"),
+                (false, None) => "was stopped by a signal".to_string(),
+            };
+            match usage {
+                Some(u) => format!("{how} · {}", u.summary()),
+                None => how,
+            }
+        }
+        JobEnd::Failed { reason } => format!("failed: {reason}"),
+        JobEnd::Cancelled => "was cancelled by the client".to_string(),
+        JobEnd::Disconnected => "ended: the client disconnected".to_string(),
+    }
+}
+
+#[tauri::command]
+fn open_logs(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+    app.opener().open_path(state.logs.dir.to_string_lossy(), None::<&str>).map_err(err)
 }
 
 fn show_window(app: &AppHandle) {
@@ -341,6 +384,12 @@ fn main() {
     let cloud_url = cloud_url_for(&home);
     let hosting = cloud_url == DEFAULT_CLOUD_URL;
     let signed_in = load_session(&home).is_some();
+    let logs = Logs::new(root.join("logs"));
+    if let Err(e) = logs.capture_stderr() {
+        eprintln!("could not open agent.log: {e}");
+    }
+    log(format_args!("Borrowed Compute Agent {} starting", env!("CARGO_PKG_VERSION")));
+    let jobs = logs.recent_jobs(MAX_JOBS).into();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -350,8 +399,9 @@ fn main() {
             agent: OnceCell::new(),
             start_error: StdMutex::new(None),
             sync: Mutex::new(None),
-            jobs: StdMutex::new(VecDeque::new()),
+            jobs: StdMutex::new(jobs),
             cloud_state: StdMutex::new(CloudState::default()),
+            logs,
         })
         .invoke_handler(tauri::generate_handler![
             get_status,
@@ -362,6 +412,7 @@ fn main() {
             approve,
             unpair,
             recent_jobs,
+            open_logs,
             open_url,
             tailscale_status,
             tailscale_share,
@@ -407,10 +458,12 @@ fn main() {
                     let state = handle.state::<AppState>();
                     let mut host = state.host.lock().unwrap();
                     host.running = false;
-                    host.error = Some(match result {
+                    let error = match result {
                         Ok(()) => "the built-in cloud stopped".to_string(),
                         Err(e) => format!("{e:#}"),
-                    });
+                    };
+                    log(format_args!("built-in cloud: {error}"));
+                    host.error = Some(error);
                     drop(host);
                     let _ = handle.emit("status-changed", ());
                 });
@@ -427,7 +480,10 @@ fn main() {
                         tauri::async_runtime::spawn(async move { agent.accept_loop().await });
                         restart_sync(&state).await;
                     }
-                    Err(e) => *state.start_error.lock().unwrap() = Some(format!("{e:#}")),
+                    Err(e) => {
+                        log(format_args!("agent could not start: {e:#}"));
+                        *state.start_error.lock().unwrap() = Some(format!("{e:#}"));
+                    }
                 }
                 let _ = handle.emit("status-changed", ());
             });

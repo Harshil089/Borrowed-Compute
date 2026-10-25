@@ -54,6 +54,36 @@ impl JobRequest {
     }
 }
 
+/// What a job used on the Mac. CPU time and peak memory cover the job's process and
+/// every process it waited for, such as the compilers a build tool starts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobUsage {
+    pub wall_ms: u64,
+    pub user_ms: u64,
+    pub system_ms: u64,
+    /// Largest resident memory of any single process in the job.
+    pub max_rss_bytes: u64,
+}
+
+impl JobUsage {
+    /// "CPU 12.4 s (3.1 cores) · peak memory 210 MB · ran 4.0 s", for people.
+    pub fn summary(&self) -> String {
+        let cpu_ms = self.user_ms + self.system_ms;
+        let secs = |ms: u64| format!("{:.1} s", ms as f64 / 1000.0);
+        let cores = if self.wall_ms > 0 {
+            format!(" ({:.1} cores)", cpu_ms as f64 / self.wall_ms as f64)
+        } else {
+            String::new()
+        };
+        format!(
+            "CPU {}{cores} · peak memory {:.0} MB · ran {}",
+            secs(cpu_ms),
+            self.max_rss_bytes as f64 / (1 << 20) as f64,
+            secs(self.wall_ms),
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutputStream {
     Stdout,
@@ -98,6 +128,9 @@ pub enum AgentMsg {
     Exited {
         code: Option<i32>,
         timed_out: bool,
+        /// Missing from agents that predate usage reporting, so it needs no protocol bump.
+        #[serde(default)]
+        usage: Option<JobUsage>,
     },
     Failed {
         reason: String,
@@ -170,6 +203,7 @@ mod tests {
             AgentMsg::Exited {
                 code: Some(0),
                 timed_out: false,
+                usage: Some(JobUsage { wall_ms: 1, user_ms: 2, system_ms: 3, max_rss_bytes: 4 }),
             },
         ];
 
@@ -188,6 +222,32 @@ mod tests {
         for m in &agent {
             assert_eq!(&read_frame::<AgentMsg>(&mut r).unwrap(), m);
         }
+    }
+
+    #[test]
+    fn usage_is_compatible_both_ways() {
+        // The message as agents and clients without usage reporting define it.
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        enum OldAgentMsg {
+            Exited { code: Option<i32>, timed_out: bool },
+        }
+        let old = OldAgentMsg::Exited { code: Some(1), timed_out: false };
+        let new: AgentMsg = decode_body(&encode(&old).unwrap()[4..]).unwrap();
+        assert_eq!(new, AgentMsg::Exited { code: Some(1), timed_out: false, usage: None });
+
+        let new = AgentMsg::Exited {
+            code: Some(1),
+            timed_out: false,
+            usage: Some(JobUsage::default()),
+        };
+        let old: OldAgentMsg = decode_body(&encode(&new).unwrap()[4..]).unwrap();
+        assert_eq!(old, OldAgentMsg::Exited { code: Some(1), timed_out: false });
+    }
+
+    #[test]
+    fn summarizes_usage() {
+        let u = JobUsage { wall_ms: 4000, user_ms: 11_000, system_ms: 1_400, max_rss_bytes: 210 << 20 };
+        assert_eq!(u.summary(), "CPU 12.4 s (3.1 cores) · peak memory 210 MB · ran 4.0 s");
     }
 
     #[test]

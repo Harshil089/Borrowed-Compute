@@ -155,8 +155,14 @@ async fn agent_reports_job_events() {
     // The finish event is sent when the connection handler returns, just after the client
     // sees the exit code.
     let finished = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap().unwrap();
-    assert_eq!(
-        finished,
-        AgentEvent::JobFinished { job_id, end: JobEnd::Exited { code: Some(4), timed_out: false } }
+    assert!(
+        matches!(
+            &finished,
+            AgentEvent::JobFinished {
+                job_id: id,
+                end: JobEnd::Exited { code: Some(4), timed_out: false, usage: Some(_) },
+            } if *id == job_id
+        ),
+        "{finished:?}"
     );
 }

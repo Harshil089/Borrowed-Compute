@@ -111,8 +111,8 @@ pub async fn serve_connection(config: &AgentConfig, conn: Connection) -> Result<
             msg = rx.recv() => match msg {
                 Some(msg) => {
                     match &msg {
-                        AgentMsg::Exited { code, timed_out } => {
-                            end.end = JobEnd::Exited { code: *code, timed_out: *timed_out };
+                        AgentMsg::Exited { code, timed_out, usage } => {
+                            end.end = JobEnd::Exited { code: *code, timed_out: *timed_out, usage: *usage };
                         }
                         AgentMsg::Failed { reason } => end.end = JobEnd::Failed { reason: reason.clone() },
                         _ => {}

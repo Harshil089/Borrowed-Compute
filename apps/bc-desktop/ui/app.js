@@ -341,6 +341,11 @@ listen("job-output", (event) => {
 });
 listen("job-phase", (event) => setPhase(event.payload, true));
 
+$("result").addEventListener("click", (event) => {
+  const log = event.target.closest("[data-log]");
+  if (log) invoke("open_log", { path: log.dataset.log }).catch((e) => showError(String(e)));
+});
+
 function setPhase(text, busy) {
   $("phase").innerHTML = `${busy ? '<span class="spinner"></span>' : ""}<span>${esc(text)}</span>`;
 }
@@ -373,7 +378,9 @@ async function runJob() {
     const path = t.via_relay ? "relay" : "direct";
     $("result").innerHTML = `
       <span class="pill ${cls}"><span class="dot ${cls}"></span>${esc(r.message)}</span>
-      <span class="timings">connect ${ms(t.connect_ms)} · upload ${ms(t.upload_ms)} · first output ${ms(t.first_log_ms)} · total ${ms(t.total_ms)} · ${path}</span>`;
+      ${r.usage_text ? `<span class="usage">Mac used ${esc(r.usage_text)}</span>` : ""}
+      <span class="timings">connect ${ms(t.connect_ms)} · upload ${ms(t.upload_ms)} · first output ${ms(t.first_log_ms)} · total ${ms(t.total_ms)} · ${path}</span>
+      <button class="link" data-log="${esc(r.log_path)}">Open log</button>`;
     $("result").classList.remove("hidden");
     setPhase(r.outcome === "rejected" ? "Not paired with this Mac. Click Pair next to it." : "Done.", false);
     if (r.outcome === "rejected") loadDevices();
