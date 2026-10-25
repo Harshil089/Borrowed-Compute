@@ -33,7 +33,7 @@ BC_TEST_DATABASE_URL=postgres://bc@127.0.0.1:54329/postgres cargo test --workspa
 
 Without it, those tests are skipped. They use a fake GitHub, so they need no network.
 
-The Windows build of `bc` must run on Windows (or a Windows CI runner). Cross-compiling from macOS fails because `ring` needs the Windows SDK C headers.
+The Windows build of `bc` must run on Windows. Cross-compiling from macOS fails because `ring` needs the Windows SDK C headers. The `windows` GitHub Actions workflow builds `bc.exe` on `windows-latest` for every push to `main` and every pull request, runs the tests that work there, and uploads `bc.exe` as the `bc-windows-x86_64` artifact. The agent runner tests and the end-to-end test are Unix only (they use `sh` and Unix process groups).
 
 ## Run the cloud locally
 
@@ -77,6 +77,13 @@ bc run --timings -- cargo test
 Other commands: `bc devices`, `bc logout`, `bc-agent unpair laptop`. `bc run --relay-only` forces the relay path. Every run appends a line to `timings.jsonl` in the `cli` folder under the config directory (`BC_HOME` overrides it).
 
 Without signing in, the agent's local list still works for development: `bc-agent allow <device id>` on the Mac, and `bc run --to <mac device id>` on the PC.
+
+## Files from Windows
+
+Windows does not record Unix permissions and often checks files out with CRLF line endings. Both break scripts on the Mac, so `bc` fixes them while packing:
+
+- **Executable bit:** a file is executable if the file system says so, or git records it as executable (`100755`, as with `git update-index --chmod=+x`). A file git does not track is executable if it starts with `#!`.
+- **Line endings:** CRLF becomes LF in scripts only: executable files, files starting with `#!`, and `.sh`, `.bash` and `.zsh` files. Binary files and other text files (`.bat`, data, fixtures) are sent unchanged.
 
 ## How sign-in and pairing work
 

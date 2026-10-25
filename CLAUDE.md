@@ -43,13 +43,15 @@ Run the cloud: `BC_DATABASE_URL=... BC_GITHUB_CLIENT_ID=... cargo run -p bc-clou
 - **Device registration requires a signature** over `register_message` (bound to the session hash). Do not add a registration path without it.
 - **Every cloud query is scoped by `account_id`.** v1 pairs only devices on the same account (Foundation decision; Q6).
 - **The agent checks the paired list on every connection.** It must never run a job from an unpaired device.
+- **Packing fixes Windows files** (`apps/bc-cli/src/pack.rs`): executable bit from file system, git index (`100755`) or shebang for untracked files; CRLF to LF only in scripts. Do not normalize other text files.
+- **Tests that need `sh` or the Mac agent are `cfg(unix)`**, so `cargo test --workspace` still runs on Windows CI.
 - **Workspaces are deleted after every job**, and the job's process group is killed on exit and timeout. Keep both guarantees.
 - Cloud SQL uses runtime `sqlx::query`/`query_as`, not compile-time macros, so builds need no database.
 - Write code comments and docs in plain prose: why, not what.
 
 ## Known gaps (Phase one)
 
-- `bc` cannot cross-compile for Windows from macOS (`ring` needs Windows SDK headers). Build and test on Windows or a Windows CI runner. A real Windows run is still untested.
+- `bc` cannot cross-compile for Windows from macOS (`ring` needs Windows SDK headers). `.github/workflows/windows.yml` builds `bc.exe` and runs the Windows-capable tests on `windows-latest`. A real job from a Windows PC to a Mac is still untested.
 - No sandbox yet: jobs run as the agent's user. The `_bcjob` user plus a Seatbelt profile is Phase two (Q4).
 - The whole project is uploaded per run (up to 2 GiB). Content-addressed chunked sync is Phase two (Q2).
 - Keys and session tokens are owner-only files, not yet in the OS keychain.
