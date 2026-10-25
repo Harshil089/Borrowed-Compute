@@ -25,7 +25,10 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg"],
+    "targets": [
+      "app",
+      "dmg"
+    ],
     "category": "DeveloperTool",
     "shortDescription": "Run jobs from your paired devices on this Mac.",
     "icon": [
@@ -37,6 +40,17 @@
     ],
     "macOS": {
       "minimumSystemVersion": "13.0"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFCNzRCRENCRTYyRUI0MjcKUldRbnRDN215NzEwcStGSDVoT3piNWdKcGo4UEFqbHY4VWRDVHVucDdaNDE4QW95RVdlUi9zeTgK",
+      "endpoints": [
+        "https://github.com/Harshil089/Borrowed-Compute-releases/releases/latest/download/agent.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

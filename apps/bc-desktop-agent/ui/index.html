@@ -49,6 +49,21 @@
 
       <div class="section-head"><h2>Recent jobs</h2><button id="open-logs" class="link">Open logs</button></div>
       <div id="jobs" class="list card"></div>
+
+      <div class="section-head"><h2>App</h2></div>
+      <div class="card pad">
+        <label class="check">
+          <input id="run-bg" type="checkbox">
+          <span>Run in background
+            <span class="muted hint">Quitting (⌘Q) hides the app and it keeps accepting jobs. Reopen it from the menu-bar icon.</span>
+          </span>
+        </label>
+        <div class="row update-row">
+          <span id="version" class="muted"></span>
+          <button id="check-update">Check for updates</button>
+        </div>
+        <div id="update-status" class="hidden"></div>
+      </div>
     </section>
   </main>
 

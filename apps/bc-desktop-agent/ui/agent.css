@@ -60,3 +60,10 @@ footer .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   overflow-wrap: anywhere;
 }
 .address span { flex: 1; min-width: 0; }
+
+.check { display: flex; align-items: flex-start; gap: 8px; cursor: pointer; }
+.check input { margin-top: 3px; }
+.check .hint { display: block; font-size: 12px; margin-top: 2px; }
+.update-row { justify-content: space-between; }
+.banner.ok { background: var(--ok-soft); color: var(--ok); }
+#update-status.banner { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }

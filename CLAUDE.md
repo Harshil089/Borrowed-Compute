@@ -14,7 +14,7 @@ Product and design docs live outside this repo, in the parent folder `../`: `Bor
 | `apps/bc-agent` | Mac agent: `runner.rs` (workspace, process, output), `server.rs` (per-connection protocol), `paired.rs` (allowlist), `cloud_sync.rs` (heartbeat + paired list), `service.rs` (the running agent, shared by `bc-agent serve` and the menu-bar app), `events.rs` (job and sync events for a UI) |
 | `apps/bc-cli` | `bc` binary: `pack.rs` (tar of project), `run.rs` (client side of a job), `flows.rs` (steps shared with the desktop app: resolve Mac, load spec, split command, wait for pairing), `main.rs` (commands) |
 | `apps/bc-desktop` | Tauri 2 client app ("Borrowed Compute"): `src/main.rs` commands, `ui/` plain HTML/CSS/JS. Shares the CLI's home dir, so it is the same device as `bc`. |
-| `apps/bc-desktop-agent` | Tauri 2 menu-bar app on the Mac ("Borrowed Compute Agent"): runs `bc_agent::service::Agent`, hosts `bc-cloud` on SQLite when the Mac's cloud address is the default, shares it with `tailscale serve` (`src/tailscale.rs`), pairing approval, recent jobs |
+| `apps/bc-desktop-agent` | Tauri 2 app on the Mac ("Borrowed Compute Agent"): a normal Dock app; with Run in background on, quitting only hides it (`src/quit_guard.rs` adds `applicationShouldTerminate:`, which Tauri lacks) and a menu-bar icon reopens it. Runs `bc_agent::service::Agent`, hosts `bc-cloud` on SQLite when the Mac's cloud address is the default, shares it with `tailscale serve` (`src/tailscale.rs`), pairing approval, recent jobs |
 | `design/` | Icon sources (SVG). Regenerate with `npx @tauri-apps/cli@2.12.4 icon design/icon-client.svg -o apps/bc-desktop/icons` |
 | `apps/bc-cloud` | axum + sqlx `Any`: GitHub device-flow sign-in, devices, pairings, presence. Runs on SQLite (inside the Mac app) or Postgres. Migrations in `migrations/sqlite` and `migrations/postgres` |
 
@@ -36,6 +36,10 @@ Throwaway local Postgres (Homebrew): `initdb -D <dir> -U bc --auth=trust`, then 
 Desktop apps: `cargo run -p bc-desktop` or `cargo run -p bc-desktop-agent` for development (the UI is static files in `ui/`, no bundler). Bundles: `npx @tauri-apps/cli@2.12.4 build` inside the app's folder (`--debug --bundles app` for a quick macOS `.app`). The UI is embedded at compile time, so rebuild after editing `ui/`. For a `.dmg`, run with `CI=true` so the bundler skips its Finder AppleScript styling, which times out without automation permission. Release builds rely on `[profile.release.build-override] strip = false` in `Cargo.toml`; without it, macOS 27 fails every release build with "mis-aligned LINKEDIT string pool".
 
 Run the cloud on its own: `BC_DATABASE_URL=postgres://… or sqlite://<file>?mode=rwc BC_GITHUB_CLIENT_ID=... cargo run -p bc-cloud` (listens on `127.0.0.1:8080`). Normally the Mac app hosts it. A device's cloud address is `BC_CLOUD_URL`, else the `cloud-url` file in its home folder (set by the apps or `bc cloud <address>`), else `http://127.0.0.1:8080`. `BC_HOME` relocates keys, sessions, the cloud address and the Mac app's `cloud/cloud.db`.
+
+## Releases and updates
+
+Every merge to `main` runs `.github/workflows/release.yml`: it builds the Mac agent (macOS runner) and the Windows client (NSIS), versions them `0.1.<run number>`, signs the update packages, and publishes release `v0.1.<n>` to the public repo `Harshil089/Borrowed-Compute-releases` (source stays private). Each app's Check for updates reads `agent.json` or `client.json` from that repo's latest release and installs only packages signed by the key whose public half is `plugins.updater.pubkey` in its `tauri.conf.json`. The private key is the `TAURI_SIGNING_PRIVATE_KEY` secret (local copy `~/.tauri/borrowed-compute-updater.key`); publishing uses the `RELEASES_TOKEN` secret. Losing the key means installed apps can never update again; reinstall by hand with a new key. Local builds stay `0.1.0`, so any release counts as newer.
 
 ## Rules
 

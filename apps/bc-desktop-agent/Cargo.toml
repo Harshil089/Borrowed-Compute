@@ -21,10 +21,14 @@ serde_json.workspace = true
 humantime.workspace = true
 tauri = { workspace = true, features = ["tray-icon", "image-png"] }
 tauri-plugin-opener.workspace = true
+tauri-plugin-updater.workspace = true
 tokio = { workspace = true, features = ["sync", "macros", "time", "process", "io-util", "net"] }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -29,6 +29,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
+use tauri_plugin_updater::UpdaterExt;
 use tokio::sync::oneshot;
 
 impl AppState {
@@ -452,6 +453,37 @@ fn cancel_job(state: State<'_, AppState>) {
     }
 }
 
+#[derive(Serialize)]
+struct UpdateInfo {
+    current: String,
+    /// The newer version, or `None` when this one is the latest.
+    available: Option<String>,
+}
+
+#[tauri::command]
+async fn check_update(app: AppHandle) -> CmdResult<UpdateInfo> {
+    let update = app.updater().map_err(err)?.check().await.map_err(err)?;
+    Ok(UpdateInfo {
+        current: app.package_info().version.to_string(),
+        available: update.map(|u| u.version),
+    })
+}
+
+/// Downloads, verifies and installs the latest version, then restarts into it. On Windows
+/// the installer closes the app itself.
+#[tauri::command]
+async fn install_update(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+    if state.job.lock().unwrap().is_some() {
+        return Err("A job is running. Update when it finishes.".into());
+    }
+    let update = app.updater().map_err(err)?.check().await.map_err(err)?;
+    let Some(update) = update else {
+        return Err("Already up to date.".into());
+    };
+    update.download_and_install(|_, _| {}, || {}).await.map_err(err)?;
+    app.restart();
+}
+
 /// Opens a run's log. Only files in the logs folder can be opened this way.
 #[tauri::command]
 fn open_log(app: AppHandle, state: State<'_, AppState>, path: String) -> CmdResult<()> {
@@ -530,6 +562,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState { home, job: StdMutex::new(None) })
         .invoke_handler(tauri::generate_handler![
             get_status,
@@ -545,6 +578,8 @@ fn main() {
             run_job,
             cancel_job,
             open_log,
+            check_update,
+            install_update,
             open_url,
             test_cloud_url,
             set_cloud_url

@@ -221,6 +221,52 @@ $("cloud-save").addEventListener("click", async () => {
   await loadStatus();
 });
 
+// ---- Updates ----
+
+function updateMessage(cls, text) {
+  $("update-msg").className = `banner ${cls}`;
+  $("update-msg").textContent = text;
+}
+
+async function checkUpdate() {
+  $("update-check").disabled = true;
+  $("update-install").classList.add("hidden");
+  updateMessage("", "Checking…");
+  try {
+    const u = await invoke("check_update");
+    $("update-version").textContent = `This is version ${u.current}.`;
+    if (u.available) {
+      updateMessage("warn", `Version ${u.available} is available.`);
+      $("update-install").classList.remove("hidden");
+    } else {
+      updateMessage("ok", "You have the latest version.");
+    }
+  } catch (e) {
+    updateMessage("bad", `Could not check for updates: ${e}`);
+  } finally {
+    $("update-check").disabled = false;
+  }
+}
+
+$("updates").addEventListener("click", () => {
+  $("update-dialog").classList.remove("hidden");
+  checkUpdate();
+});
+$("update-check").addEventListener("click", checkUpdate);
+$("update-close").addEventListener("click", () => $("update-dialog").classList.add("hidden"));
+$("update-install").addEventListener("click", async () => {
+  $("update-install").disabled = true;
+  $("update-check").disabled = true;
+  updateMessage("", "Downloading and installing… The app restarts when it is done.");
+  try {
+    await invoke("install_update");
+  } catch (e) {
+    updateMessage("bad", `Could not install the update: ${e}`);
+    $("update-install").disabled = false;
+    $("update-check").disabled = false;
+  }
+});
+
 $("signout").addEventListener("click", async () => {
   if (!(await ask("Sign out of Borrowed Compute on this computer?", "Sign out", true))) return;
   await invoke("logout");

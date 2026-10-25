@@ -1,7 +1,9 @@
-//! Borrowed Compute Agent: menu-bar app on the Mac.
+//! Borrowed Compute Agent: the Mac app.
 //!
 //! Runs the same agent service as `bc-agent serve`, plus sign-in, pairing approval and a
-//! list of recent jobs. Closing the window keeps the agent running; Quit stops it.
+//! list of recent jobs. It is a normal app with a Dock icon. With "Run in background" on,
+//! quitting it (⌘Q) only hides it: it leaves the Dock, keeps accepting jobs, and shows a
+//! menu-bar icon to reopen it or quit for real.
 //!
 //! It also hosts the cloud (accounts, devices, pairing) in a SQLite file on this Mac, and
 //! shares it with the user's PC through `tailscale serve`, so no server is needed. When a
@@ -10,9 +12,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod logs;
+#[cfg(target_os = "macos")]
+mod quit_guard;
 mod tailscale;
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -28,8 +33,9 @@ use logs::{log, Logs};
 use serde::{Deserialize, Serialize};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
 use tauri_plugin_opener::OpenerExt;
+use tauri_plugin_updater::UpdaterExt;
 use tokio::sync::{Mutex, OnceCell};
 use tokio::task::JoinHandle;
 
@@ -105,6 +111,14 @@ struct AppState {
     jobs: StdMutex<VecDeque<JobRecord>>,
     cloud_state: StdMutex<CloudState>,
     logs: Logs,
+    /// Quitting only hides the app while this is on. Saved in `<home>/run-in-background`.
+    run_in_background: AtomicBool,
+    /// Set by the menu-bar Quit and by update installs, which must really exit.
+    quitting: AtomicBool,
+}
+
+fn background_flag(home: &std::path::Path) -> std::path::PathBuf {
+    home.join("run-in-background")
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -393,21 +407,92 @@ fn open_logs(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
     app.opener().open_path(state.logs.dir.to_string_lossy(), None::<&str>).map_err(err)
 }
 
+#[derive(Serialize)]
+struct Settings {
+    run_in_background: bool,
+    version: String,
+}
+
+#[tauri::command]
+fn get_settings(app: AppHandle, state: State<'_, AppState>) -> Settings {
+    Settings {
+        run_in_background: state.run_in_background.load(Ordering::Relaxed),
+        version: app.package_info().version.to_string(),
+    }
+}
+
+#[tauri::command]
+fn set_run_in_background(state: State<'_, AppState>, enabled: bool) -> CmdResult<()> {
+    let flag = background_flag(&state.paths.home);
+    if enabled {
+        std::fs::write(&flag, "on\n").map_err(err)?;
+    } else if flag.exists() {
+        std::fs::remove_file(&flag).map_err(err)?;
+    }
+    state.run_in_background.store(enabled, Ordering::Relaxed);
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct UpdateInfo {
+    current: String,
+    /// The newer version, or `None` when this one is the latest.
+    available: Option<String>,
+}
+
+#[tauri::command]
+async fn check_update(app: AppHandle) -> CmdResult<UpdateInfo> {
+    let update = app.updater().map_err(err)?.check().await.map_err(err)?;
+    Ok(UpdateInfo {
+        current: app.package_info().version.to_string(),
+        available: update.map(|u| u.version),
+    })
+}
+
+/// Downloads, verifies and installs the latest version, then restarts into it.
+#[tauri::command]
+async fn install_update(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+    let running = state.jobs.lock().unwrap().iter().any(|j| j.end.is_none() && j.rejected.is_none());
+    if running {
+        return Err("A job is running. Update when it finishes; restarting now would stop it.".into());
+    }
+    let update = app.updater().map_err(err)?.check().await.map_err(err)?;
+    let Some(update) = update else {
+        return Err("Already up to date.".into());
+    };
+    log(format_args!("installing update {}", update.version));
+    update.download_and_install(|_, _| {}, || {}).await.map_err(err)?;
+    state.quitting.store(true, Ordering::Relaxed);
+    app.restart();
+}
+
+/// Hides the app from the Dock and the app switcher and shows the menu-bar icon, so the
+/// agent keeps serving with nothing on screen.
+fn go_to_background(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+    if let Some(tray) = app.tray_by_id("main") {
+        let _ = tray.set_visible(true);
+    }
+}
+
+fn come_to_foreground(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+    if let Some(tray) = app.tray_by_id("main") {
+        let _ = tray.set_visible(false);
+    }
+    show_window(app);
+}
+
 fn show_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
-    }
-}
-
-fn toggle_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        if window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false) {
-            let _ = window.hide();
-        } else {
-            show_window(app);
-        }
     }
 }
 
@@ -417,7 +502,7 @@ fn main() {
     let paths = AgentPaths::new(home.clone());
     let cloud_url = cloud_url_for(&home);
     let hosting = cloud_url == DEFAULT_CLOUD_URL;
-    let signed_in = load_session(&home).is_some();
+    let run_in_background = background_flag(&home).exists();
     let logs = Logs::new(root.join("logs"), root.join("agent").join("job-history.jsonl"));
     if let Err(e) = logs.capture_stderr() {
         eprintln!("could not open agent.log: {e}");
@@ -436,6 +521,8 @@ fn main() {
             jobs: StdMutex::new(jobs),
             cloud_state: StdMutex::new(CloudState::default()),
             logs,
+            run_in_background: AtomicBool::new(run_in_background),
+            quitting: AtomicBool::new(false),
         })
         .invoke_handler(tauri::generate_handler![
             get_status,
@@ -450,25 +537,29 @@ fn main() {
             open_url,
             tailscale_status,
             tailscale_share,
-            tailscale_stop
+            tailscale_stop,
+            get_settings,
+            set_run_in_background,
+            check_update,
+            install_update
         ])
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
-            // A menu-bar app: no Dock icon.
-            #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
-
             let open = MenuItem::with_id(app, "open", "Open Borrowed Compute Agent", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit (stops accepting jobs)", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&open, &quit])?;
-            TrayIconBuilder::with_id("main")
+            let tray = TrayIconBuilder::with_id("main")
                 .icon(tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))?)
                 .icon_as_template(true)
                 .tooltip("Borrowed Compute Agent")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
-                    "open" => show_window(app),
-                    "quit" => app.exit(0),
+                    "open" => come_to_foreground(app),
+                    "quit" => {
+                        app.state::<AppState>().quitting.store(true, Ordering::Relaxed);
+                        app.exit(0);
+                    }
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
@@ -478,10 +569,27 @@ fn main() {
                         ..
                     } = event
                     {
-                        toggle_window(tray.app_handle());
+                        come_to_foreground(tray.app_handle());
                     }
                 })
                 .build(app)?;
+            // The menu-bar icon is only for when the app runs in the background.
+            tray.set_visible(false)?;
+
+            #[cfg(target_os = "macos")]
+            {
+                let handle = app.handle().clone();
+                quit_guard::install(move || {
+                    let state = handle.state::<AppState>();
+                    let stay = state.run_in_background.load(Ordering::Relaxed)
+                        && !state.quitting.load(Ordering::Relaxed);
+                    if stay {
+                        go_to_background(&handle);
+                        log("quit while Run in background is on: still accepting jobs");
+                    }
+                    !stay
+                });
+            }
 
             if hosting {
                 let handle = app.handle().clone();
@@ -555,20 +663,32 @@ fn main() {
                 }
             });
 
-            if !signed_in {
-                show_window(app.handle());
-            }
+            show_window(app.handle());
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Closing the window only hides it; the agent keeps serving from the menu bar.
+            // As in other Mac apps, closing the window leaves the app running in the Dock.
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Borrowed Compute Agent");
+        .build(tauri::generate_context!())
+        .expect("error while building Borrowed Compute Agent")
+        .run(|app, event| match event {
+            RunEvent::ExitRequested { api, .. } => {
+                let state = app.state::<AppState>();
+                if state.run_in_background.load(Ordering::Relaxed) && !state.quitting.load(Ordering::Relaxed) {
+                    api.prevent_exit();
+                    go_to_background(app);
+                    log("quit while Run in background is on: still accepting jobs");
+                }
+            }
+            // Clicking the Dock icon brings back the window.
+            #[cfg(target_os = "macos")]
+            RunEvent::Reopen { .. } => come_to_foreground(app),
+            _ => {}
+        });
 }
 
 #[cfg(test)]
