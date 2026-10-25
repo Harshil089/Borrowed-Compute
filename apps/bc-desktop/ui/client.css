@@ -29,6 +29,11 @@
   font: 600 12.5px/1 var(--cond); letter-spacing: 0.12em;
   border-bottom: 1.5px solid transparent; border-radius: 0;
 }
+.segmented.on-bar { border-color: rgba(255, 255, 255, 0.35); }
+.segmented.on-bar button { color: var(--bar-ink-2); }
+.segmented.on-bar button + button { border-left-color: rgba(255, 255, 255, 0.35); }
+.segmented.on-bar button[aria-pressed="true"] { background: var(--bar-ink); color: #0d1b3d; }
+.segmented.on-bar button:hover:not([aria-pressed="true"]) { background: rgba(255, 255, 255, 0.1); color: var(--bar-ink); }
 .bar-link:hover:not(:disabled) { background: none; color: var(--bar-ink); border-bottom-color: var(--red); }
 
 /* ---- Rail of Macs ---- */

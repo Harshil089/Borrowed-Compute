@@ -25,26 +25,26 @@ colors:
   warn-tint: "#f8edd4"
   bad: "#c0141c"
   bad-tint: "#fbe4e4"
-  night-stock: "#08102a"
-  night-paper: "#101b3f"
-  night-paper-2: "#0c1636"
-  night-bar: "#040a1e"
-  night-bar-ink-2: "#a3aecb"
-  night-ink: "#f1f2f6"
-  night-ink-2: "#b4bdd5"
-  night-ink-3: "#95a0bf"
-  night-rule: "#4d5f96"
-  night-rule-2: "#26346a"
+  night-stock: "#0b0b0c"
+  night-paper: "#161618"
+  night-paper-2: "#111113"
+  night-bar: "#000000"
+  night-bar-ink-2: "#a8a8ad"
+  night-ink: "#f3f3f4"
+  night-ink-2: "#b8b8bd"
+  night-ink-3: "#929298"
+  night-rule: "#4a4a50"
+  night-rule-2: "#2a2a2e"
   night-red-ink: "#ff6b70"
   night-carbon: "#c4b1f5"
-  night-copy: "#241a4d"
-  night-copy-rule: "#6d58b0"
+  night-copy: "#1e1a28"
+  night-copy-rule: "#5a4f78"
   night-ok: "#5fd39a"
-  night-ok-tint: "#0f2e2a"
+  night-ok-tint: "#0e2318"
   night-warn: "#f2bd57"
-  night-warn-tint: "#2e2510"
+  night-warn-tint: "#2a2110"
   night-bad: "#ff6b70"
-  night-bad-tint: "#3a1424"
+  night-bad-tint: "#2d1316"
 typography:
   display:
     fontFamily: "Barlow Condensed, Arial Narrow, sans-serif"
@@ -196,7 +196,7 @@ components:
 
 A job is a flight from the PC to the Mac and back, so both windows are printed airline stationery rather than developer chrome. The client is the passenger's wallet: the run is a coupon you fill in, its phases are route legs that stamp themselves as they fly, and the result tears off as a carbon copy with the measured numbers on it. The agent is the station's operations board: boarding requests, departures, the manifest of who is cleared to fly here. The same world serves both because the two apps describe one trip from either end.
 
-The material is paper on a wallet: coupon-white stock with printed carrier-navy hairlines, die-cut corners, chamfered tab heads and perforations where a stub tears off. Colour is spent like ink on a ticket, sparingly and with a job each: navy prints the structure, jet red marks the route and the one thing to press, carbon purple is the pressure-copy ink that every measured figure and every code you must match is struck in. Dark mode is a night flight, the same stationery printed on navy with white ink, not an inverted theme.
+The material is paper on a wallet: coupon-white stock with printed carrier-navy hairlines, die-cut corners, chamfered tab heads and perforations where a stub tears off. Colour is spent like ink on a ticket, sparingly and with a job each: navy prints the structure, jet red marks the route and the one thing to press, carbon purple is the pressure-copy ink that every measured figure and every code you must match is struck in. Dark mode is the same stationery printed on black with white ink, not an inverted theme. Light is the default; the Appearance setting (Light, Dark, System) picks the theme, and System follows the operating system.
 
 Density is operational: the client is used many times a day and must stay keyboard-first, the agent is glanced at and must read in one look. Big condensed codes (WPC, HMA, MAC) carry identity at a distance; everything else stays small, caps-set and ruled. The system refuses the default dev-tool look of graphite panels, neon accents and a generic sidebar over a console, and the default settings look of stacked grey cards with toggles.
 
@@ -240,7 +240,7 @@ Coupon paper and carrier navy carry nearly every surface; jet red and carbon pur
 
 **The Carbon Ink Rule.** Carbon purple is for what was measured or must be matched exactly. If a value did not come off the Mac, the clock or a code, it is not set in carbon.
 
-**The Night Flight Rule.** Dark mode reprints the same roles on navy stock. Never invent a dark-only colour role; change the ink, keep the job.
+**The Night Flight Rule.** Dark mode reprints the same roles on black stock. Never invent a dark-only colour role; change the ink, keep the job.
 
 ## Typography
 
@@ -368,7 +368,7 @@ One easing (cubic-bezier(0.16, 1, 0.3, 1)), short durations, and only motion tha
 - **Do** label fields, tabs and statuses in Barlow Condensed caps at 11px with 0.12em tracking.
 - **Do** prefix section headings with the red triple-slash carrier mark in the same line.
 - **Do** name states in the flight vocabulary: Next run, In flight, Landed, Exit N, Void, Refused, Lost contact.
-- **Do** keep base.css identical in both apps and check every text colour at 4.5:1 in light and night flight.
+- **Do** keep base.css identical in both apps and check every text colour at 4.5:1 in light and dark.
 - **Do** re-render polled regions only when their markup changes, and respect reduced motion.
 
 ### Don't:
