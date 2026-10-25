@@ -4,9 +4,8 @@ name: windows
 # can run there. Cross-compiling from macOS does not work because `ring` needs the Windows
 # SDK headers.
 
+# Runs on pull requests; merges to main are built by release.yml.
 on:
-  push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
 

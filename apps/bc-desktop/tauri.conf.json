@@ -39,5 +39,16 @@
         "installMode": "currentUser"
       }
     }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFCNzRCRENCRTYyRUI0MjcKUldRbnRDN215NzEwcStGSDVoT3piNWdKcGo4UEFqbHY4VWRDVHVucDdaNDE4QW95RVdlUi9zeTgK",
+      "endpoints": [
+        "https://github.com/Harshil089/Borrowed-Compute-releases/releases/latest/download/client.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

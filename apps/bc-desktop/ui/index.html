@@ -51,6 +51,7 @@
         <div id="account" class="muted"></div>
         <div class="foot-actions">
           <button id="settings" class="link">Mac address</button>
+          <button id="updates" class="link">Updates</button>
           <button id="signout" class="link">Sign out</button>
         </div>
       </div>
@@ -97,7 +98,7 @@
   <div id="pair-dialog" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="pair-title">
     <div class="card pad dialog">
       <h1 id="pair-title">Pair with <span id="pair-mac"></span></h1>
-      <p class="muted">On the Mac, open <strong>Borrowed Compute Agent</strong> from the menu bar and approve the request that shows this code:</p>
+      <p class="muted">On the Mac, open <strong>Borrowed Compute Agent</strong> and approve the request that shows this code:</p>
       <div id="pair-code" class="code"></div>
       <div id="pair-wait" class="row"><span class="spinner"></span><span class="muted">Waiting for approval on the Mac…</span></div>
       <div id="pair-msg" class="banner hidden"></div>
@@ -118,6 +119,20 @@
       <div class="dialog-actions">
         <button id="cloud-cancel">Cancel</button>
         <button id="cloud-save" class="primary">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Updates dialog -->
+  <div id="update-dialog" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="update-title">
+    <div class="card pad dialog">
+      <h1 id="update-title">Updates</h1>
+      <p id="update-version" class="muted"></p>
+      <div id="update-msg" class="banner hidden"></div>
+      <div class="dialog-actions">
+        <button id="update-close">Close</button>
+        <button id="update-check">Check for updates</button>
+        <button id="update-install" class="primary hidden">Install and restart</button>
       </div>
     </div>
   </div>

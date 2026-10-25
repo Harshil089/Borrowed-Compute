@@ -289,6 +289,60 @@ $("reopen").addEventListener("click", () => {
   if (verificationUri) invoke("open_url", { url: verificationUri }).catch((e) => showError(String(e)));
 });
 
+async function loadSettings() {
+  try {
+    const st = await invoke("get_settings");
+    $("run-bg").checked = st.run_in_background;
+    $("version").textContent = `Version ${st.version}`;
+  } catch (e) {
+    showError(String(e));
+  }
+}
+
+$("run-bg").addEventListener("change", async (event) => {
+  try {
+    await invoke("set_run_in_background", { enabled: event.target.checked });
+  } catch (e) {
+    event.target.checked = !event.target.checked;
+    showError(String(e));
+  }
+});
+
+function updateStatus(html, cls = "") {
+  const box = $("update-status");
+  box.className = cls ? `banner ${cls}` : "muted";
+  box.innerHTML = html;
+}
+
+$("check-update").addEventListener("click", async () => {
+  const button = $("check-update");
+  button.disabled = true;
+  updateStatus("Checking…");
+  try {
+    const u = await invoke("check_update");
+    if (!u.available) {
+      updateStatus(`You have the latest version (${esc(u.current)}).`, "ok");
+    } else {
+      updateStatus(`Version ${esc(u.available)} is available. <button id="install-update" class="primary">Install and restart</button>`, "warn");
+    }
+  } catch (e) {
+    updateStatus(`Could not check for updates: ${esc(String(e))}`, "bad");
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$("update-status").addEventListener("click", async (event) => {
+  if (!event.target.closest("#install-update")) return;
+  if (!(await ask("Install the update and restart? The agent stops accepting jobs for a few seconds.", "Install and restart"))) return;
+  updateStatus("Downloading and installing… The app restarts when it is done.");
+  try {
+    await invoke("install_update");
+  } catch (e) {
+    updateStatus(`Could not install the update: ${esc(String(e))}`, "bad");
+  }
+});
+
 $("open-logs").addEventListener("click", () => {
   invoke("open_logs").catch((e) => showError(String(e)));
 });
@@ -362,5 +416,6 @@ listen("status-changed", refresh);
 
 // Pairing requests come from the cloud, so poll while the window is open.
 setInterval(() => { if (document.visibilityState === "visible") refresh(); }, 5000);
+loadSettings();
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") refresh(); });
 refresh();

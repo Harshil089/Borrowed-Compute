@@ -1,0 +1,138 @@
+name: release
+
+# On every merge to main: builds the Mac agent app and the Windows client app, signs their
+# updates, and publishes them as release v0.1.<run number> in the public releases repo.
+# The apps' Check for updates reads `agent.json` and `client.json` from its latest release.
+#
+# Secrets:
+# - TAURI_SIGNING_PRIVATE_KEY: signs updates; the apps only install updates signed by it.
+#   Its public half is `plugins.updater.pubkey` in both apps' tauri.conf.json.
+# - RELEASES_TOKEN: fine-grained token with Contents read and write on the releases repo.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  VERSION: 0.1.${{ github.run_number }}
+  RELEASES_REPO: Harshil089/Borrowed-Compute-releases
+  TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+  TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+  # Only release builds make update packages, so local builds need no signing key.
+  UPDATER_CONFIG: '{"bundle":{"createUpdaterArtifacts":true}}'
+
+jobs:
+  mac:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (matches rust-toolchain.toml)
+        run: rustup toolchain install 1.91 --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Set version
+        run: node .github/set-version.mjs apps/bc-desktop-agent/tauri.conf.json "$VERSION"
+
+      # CI=true skips the bundler's Finder AppleScript styling of the dmg, which needs a
+      # logged-in desktop.
+      - name: Build Borrowed Compute Agent
+        working-directory: apps/bc-desktop-agent
+        env:
+          CI: "true"
+        run: npx --yes @tauri-apps/cli@2.12.4 build --bundles app,dmg --config "$UPDATER_CONFIG"
+
+      - name: Collect
+        run: |
+          mkdir dist
+          cp "target/release/bundle/macos/Borrowed Compute Agent.app.tar.gz" dist/BorrowedComputeAgent.app.tar.gz
+          cp "target/release/bundle/macos/Borrowed Compute Agent.app.tar.gz.sig" dist/BorrowedComputeAgent.app.tar.gz.sig
+          cp target/release/bundle/dmg/*.dmg dist/BorrowedComputeAgent.dmg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac
+          path: dist/*
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (matches rust-toolchain.toml)
+        run: rustup toolchain install 1.91 --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Set version
+        shell: bash
+        run: node .github/set-version.mjs apps/bc-desktop/tauri.conf.json "$VERSION"
+
+      - name: Build Borrowed Compute
+        working-directory: apps/bc-desktop
+        shell: bash
+        run: npx --yes @tauri-apps/cli@2.12.4 build --bundles nsis --config "$UPDATER_CONFIG"
+
+      - name: Collect
+        shell: bash
+        run: |
+          mkdir dist
+          cp target/release/bundle/nsis/*-setup.exe dist/BorrowedCompute-setup.exe
+          cp target/release/bundle/nsis/*-setup.exe.sig dist/BorrowedCompute-setup.exe.sig
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: [mac, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Write update manifests
+        run: |
+          base="https://github.com/$RELEASES_REPO/releases/download/v$VERSION"
+          node .github/update-manifest.mjs "$VERSION" darwin-aarch64 \
+            "$base/BorrowedComputeAgent.app.tar.gz" dist/BorrowedComputeAgent.app.tar.gz.sig > dist/agent.json
+          node .github/update-manifest.mjs "$VERSION" windows-x86_64 \
+            "$base/BorrowedCompute-setup.exe" dist/BorrowedCompute-setup.exe.sig > dist/client.json
+          cat dist/agent.json dist/client.json
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          gh release create "v$VERSION" --repo "$RELEASES_REPO" \
+            --title "Borrowed Compute $VERSION" \
+            --notes "Built from ${GITHUB_SHA::7}. Mac: BorrowedComputeAgent.dmg. Windows: BorrowedCompute-setup.exe. Installed apps update themselves with Check for updates." \
+            dist/BorrowedComputeAgent.dmg \
+            dist/BorrowedComputeAgent.app.tar.gz \
+            dist/BorrowedCompute-setup.exe \
+            dist/agent.json \
+            dist/client.json

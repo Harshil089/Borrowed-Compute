@@ -21,6 +21,7 @@ humantime.workspace = true
 tauri.workspace = true
 tauri-plugin-dialog.workspace = true
 tauri-plugin-opener.workspace = true
+tauri-plugin-updater.workspace = true
 tokio = { workspace = true, features = ["sync", "macros", "time", "rt"] }
 
 [dev-dependencies]
