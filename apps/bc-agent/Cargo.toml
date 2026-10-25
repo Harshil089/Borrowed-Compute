@@ -1,0 +1,20 @@
+[package]
+name = "bc-agent"
+description = "Mac agent: accepts jobs from paired devices and runs them."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bc-proto.workspace = true
+bc-net.workspace = true
+bc-auth.workspace = true
+serde_json.workspace = true
+iroh.workspace = true
+anyhow.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "process", "io-util", "time", "sync", "fs"] }
+tar.workspace = true
+tempfile.workspace = true
+libc.workspace = true
+clap.workspace = true

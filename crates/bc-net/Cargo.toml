@@ -1,0 +1,22 @@
+[package]
+name = "bc-net"
+description = "Device-to-device connections for Borrowed Compute, built on iroh."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bc-proto.workspace = true
+iroh.workspace = true
+iroh-relay.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+dirs.workspace = true
+
+[features]
+test-utils = ["iroh/test-utils", "iroh-relay/test-utils"]
+
+[dev-dependencies]
+bc-net = { path = ".", features = ["test-utils"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

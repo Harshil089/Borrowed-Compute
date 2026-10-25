@@ -1,0 +1,26 @@
+[package]
+name = "bc-cloud"
+description = "Cloud API: GitHub sign-in, device registry, pairing and presence."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bc-proto.workspace = true
+iroh-base.workspace = true
+anyhow.workspace = true
+axum.workspace = true
+sqlx.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+rand.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
+
+[dev-dependencies]
+bc-auth.workspace = true
+axum = { workspace = true, features = ["form"] }
+reqwest.workspace = true

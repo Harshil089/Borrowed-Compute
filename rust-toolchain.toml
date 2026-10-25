@@ -1,0 +1,4 @@
+[toolchain]
+# iroh 1.x needs Rust 1.91 or newer.
+channel = "1.91"
+components = ["rustfmt", "clippy"]

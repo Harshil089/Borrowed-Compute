@@ -1,0 +1,30 @@
+[package]
+name = "bc-cli"
+description = "The `bc` command: send jobs to a paired Mac and stream the results."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "bc"
+path = "src/main.rs"
+
+[dependencies]
+bc-proto.workspace = true
+bc-net.workspace = true
+bc-auth.workspace = true
+serde_json.workspace = true
+iroh.workspace = true
+anyhow.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "time"] }
+tar.workspace = true
+ignore.workspace = true
+globset.workspace = true
+clap.workspace = true
+
+[dev-dependencies]
+bc-agent = { path = "../bc-agent" }
+bc-net = { path = "../../crates/bc-net", features = ["test-utils"] }
+tempfile.workspace = true
+iroh-relay = { workspace = true, features = ["server"] }

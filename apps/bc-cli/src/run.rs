@@ -1,0 +1,164 @@
+//! Runs one job on a Mac and streams its output to local writers.
+
+use std::io::Write;
+use std::time::{Duration, Instant};
+
+use anyhow::{bail, Context, Result};
+use bc_net::{recv_msg, send_msg, EndpointAddr, JOB_ALPN};
+use bc_proto::wire::{AgentMsg, ClientMsg, JobRequest, OutputStream, PROTOCOL_VERSION};
+use bc_proto::JobSpec;
+use iroh::Endpoint;
+
+const UPLOAD_CHUNK: usize = 1 << 20;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Exit {
+    Code(i32),
+    TimedOut,
+    /// Ended by a signal, or the agent could not report a code.
+    Killed,
+    Failed(String),
+    Rejected(String),
+    Cancelled,
+}
+
+impl Exit {
+    /// Exit status for the local `bc` process. 124 matches the `timeout` command.
+    pub fn status(&self) -> i32 {
+        match self {
+            Exit::Code(c) => *c,
+            Exit::TimedOut => 124,
+            Exit::Killed => 137,
+            Exit::Cancelled => 130,
+            Exit::Failed(_) | Exit::Rejected(_) => 1,
+        }
+    }
+}
+
+/// Time spent in each phase, measured from the start of the run.
+#[derive(Debug, Clone, Default)]
+pub struct Timings {
+    pub connect: Duration,
+    pub upload: Duration,
+    pub start: Option<Duration>,
+    pub first_log: Option<Duration>,
+    pub total: Duration,
+    pub via_relay: bool,
+    pub archive_bytes: u64,
+}
+
+impl Timings {
+    /// One JSON object per line, for the local timing log.
+    pub fn to_json(&self, job_id: &str, exit: &Exit) -> String {
+        let ms = |d: Duration| d.as_millis().to_string();
+        let opt = |d: Option<Duration>| d.map(ms).unwrap_or_else(|| "null".into());
+        format!(
+            "{{\"job\":\"{job_id}\",\"connect_ms\":{},\"upload_ms\":{},\"start_ms\":{},\"first_log_ms\":{},\"total_ms\":{},\"via_relay\":{},\"archive_bytes\":{},\"exit\":{}}}",
+            ms(self.connect),
+            ms(self.upload),
+            opt(self.start),
+            opt(self.first_log),
+            ms(self.total),
+            self.via_relay,
+            self.archive_bytes,
+            exit.status(),
+        )
+    }
+}
+
+pub struct RunOutcome {
+    pub job_id: String,
+    pub exit: Exit,
+    pub timings: Timings,
+}
+
+pub fn new_job_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    format!("{nanos:x}-{:x}", std::process::id())
+}
+
+/// Sends the job and writes its output as it arrives. Resolves when the job ends or
+/// `cancel` fires, in which case the agent is told to stop.
+pub async fn run_remote(
+    endpoint: &Endpoint,
+    mac: EndpointAddr,
+    spec: &JobSpec,
+    archive: Vec<u8>,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+    cancel: impl std::future::Future<Output = ()>,
+) -> Result<RunOutcome> {
+    let t0 = Instant::now();
+    let job_id = new_job_id();
+    let mut timings = Timings {
+        archive_bytes: archive.len() as u64,
+        ..Default::default()
+    };
+
+    let conn = endpoint
+        .connect(mac, JOB_ALPN)
+        .await
+        .context("connecting to the Mac")?;
+    let (mut send, mut recv) = conn.open_bi().await?;
+    send_msg(&mut send, &ClientMsg::Hello { protocol: PROTOCOL_VERSION }).await?;
+    match recv_msg::<AgentMsg>(&mut recv).await? {
+        AgentMsg::Hello { protocol } if protocol == PROTOCOL_VERSION => {}
+        AgentMsg::Rejected { reason } => return Ok(done(job_id, Exit::Rejected(reason), timings, t0)),
+        other => bail!("unexpected handshake reply {other:?}"),
+    }
+    timings.connect = t0.elapsed();
+
+    let req = JobRequest::from_spec(job_id.clone(), spec, archive.len() as u64);
+    send_msg(&mut send, &ClientMsg::Submit(req)).await?;
+    match recv_msg::<AgentMsg>(&mut recv).await? {
+        AgentMsg::Accepted { .. } => {}
+        AgentMsg::Rejected { reason } => return Ok(done(job_id, Exit::Rejected(reason), timings, t0)),
+        other => bail!("unexpected reply to Submit {other:?}"),
+    }
+    for chunk in archive.chunks(UPLOAD_CHUNK) {
+        send_msg(&mut send, &ClientMsg::Upload { data: chunk.to_vec() }).await?;
+    }
+    send_msg(&mut send, &ClientMsg::UploadDone).await?;
+    timings.upload = t0.elapsed();
+
+    tokio::pin!(cancel);
+    let exit = loop {
+        let msg = tokio::select! {
+            msg = recv_msg::<AgentMsg>(&mut recv) => msg.context("connection to the Mac lost")?,
+            _ = &mut cancel => {
+                let _ = send_msg(&mut send, &ClientMsg::Cancel).await;
+                break Exit::Cancelled;
+            }
+        };
+        match msg {
+            AgentMsg::Started => timings.start = Some(t0.elapsed()),
+            AgentMsg::Output { stream, data, .. } => {
+                timings.first_log.get_or_insert_with(|| t0.elapsed());
+                let out: &mut dyn Write = match stream {
+                    OutputStream::Stdout => stdout,
+                    OutputStream::Stderr => stderr,
+                };
+                out.write_all(&data)?;
+                out.flush()?;
+            }
+            AgentMsg::Exited { timed_out: true, .. } => break Exit::TimedOut,
+            AgentMsg::Exited { code: Some(c), .. } => break Exit::Code(c),
+            AgentMsg::Exited { code: None, .. } => break Exit::Killed,
+            AgentMsg::Failed { reason } => break Exit::Failed(reason),
+            other => bail!("unexpected message during job {other:?}"),
+        }
+    };
+
+    timings.via_relay = bc_net::via_relay(&conn);
+    let _ = send.finish();
+    conn.close(0u32.into(), b"done");
+    Ok(done(job_id, exit, timings, t0))
+}
+
+fn done(job_id: String, exit: Exit, mut timings: Timings, t0: Instant) -> RunOutcome {
+    timings.total = t0.elapsed();
+    RunOutcome { job_id, exit, timings }
+}

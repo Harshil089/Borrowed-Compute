@@ -1,0 +1,17 @@
+[package]
+name = "bc-proto"
+description = "Job spec and wire messages shared by the Borrowed Compute client, agent and cloud."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_bytes.workspace = true
+ciborium.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+humantime.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
