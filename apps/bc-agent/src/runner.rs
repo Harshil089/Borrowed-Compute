@@ -207,7 +207,7 @@ fn kill_group(pid: Option<u32>) {
     let _ = pid;
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;

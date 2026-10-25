@@ -1,0 +1,38 @@
+name: windows
+
+# Builds `bc.exe` on real Windows and runs the tests that can run there. Cross-compiling
+# from macOS does not work because `ring` needs the Windows SDK headers.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (matches rust-toolchain.toml)
+        run: rustup toolchain install 1.91 --profile minimal --component clippy,rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build bc.exe
+        run: cargo build --release -p bc-cli
+
+      # Cloud API tests skip themselves without BC_TEST_DATABASE_URL; Unix-only tests
+      # (the agent runner and end-to-end run) are compiled out.
+      - name: Test
+        run: cargo test --workspace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bc-windows-x86_64
+          path: target/release/bc.exe
+          if-no-files-found: error

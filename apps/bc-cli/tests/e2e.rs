@@ -1,5 +1,8 @@
 //! End to end: the `bc` client runs a job on an in-process agent, through a local relay
 //! with direct paths disabled.
+//!
+//! Unix only: the agent runs jobs with `sh` and Unix process groups.
+#![cfg(unix)]
 
 use std::time::Duration;
 
