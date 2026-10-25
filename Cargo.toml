@@ -53,3 +53,9 @@ tauri = "2.12"
 tauri-build = "2.7"
 tauri-plugin-dialog = "2.8"
 tauri-plugin-opener = "2"
+
+# On macOS 27, stripping proc-macro dylibs leaves them unloadable ("mis-aligned LINKEDIT
+# string pool"), which breaks every release build. Only build-time code is affected; the
+# shipped binaries are still stripped.
+[profile.release.build-override]
+strip = false

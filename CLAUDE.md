@@ -33,7 +33,7 @@ BC_TEST_DATABASE_URL=postgres://bc@127.0.0.1:54329/postgres cargo test --workspa
 
 Throwaway local Postgres (Homebrew): `initdb -D <dir> -U bc --auth=trust`, then start with `LC_ALL=en_US.UTF-8 pg_ctl -D <dir> -o "-p 54329 -k /tmp/bcpg -h 127.0.0.1" start`. Postgres refuses to start without `LC_ALL`, and Unix socket paths over 103 bytes fail, hence `-k /tmp/bcpg`.
 
-Desktop apps: `cargo run -p bc-desktop` or `cargo run -p bc-desktop-agent` for development (the UI is static files in `ui/`, no bundler). Bundles: `npx @tauri-apps/cli@2.12.4 build` inside the app's folder (`--debug --bundles app` for a quick macOS `.app`). The UI is embedded at compile time, so rebuild after editing `ui/`.
+Desktop apps: `cargo run -p bc-desktop` or `cargo run -p bc-desktop-agent` for development (the UI is static files in `ui/`, no bundler). Bundles: `npx @tauri-apps/cli@2.12.4 build` inside the app's folder (`--debug --bundles app` for a quick macOS `.app`). The UI is embedded at compile time, so rebuild after editing `ui/`. For a `.dmg`, run with `CI=true` so the bundler skips its Finder AppleScript styling, which times out without automation permission. Release builds rely on `[profile.release.build-override] strip = false` in `Cargo.toml`; without it, macOS 27 fails every release build with "mis-aligned LINKEDIT string pool".
 
 Run the cloud: `BC_DATABASE_URL=... BC_GITHUB_CLIENT_ID=... cargo run -p bc-cloud` (listens on `127.0.0.1:8080`). Devices use `BC_CLOUD_URL`; `BC_HOME` relocates keys, sessions and the timing log.
 
