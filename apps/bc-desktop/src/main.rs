@@ -20,6 +20,7 @@ use bc_cli::flows::{
     split_command, wait_for_pairing,
 };
 use bc_cli::pack::pack;
+use bc_cli::route::RouteMemory;
 use bc_cli::run::{run_on_mac, Exit};
 use bc_net::{load_or_create_key, NetConfig};
 use bc_proto::cloud::{DeviceInfo, DeviceKind, PairingInfo};
@@ -397,10 +398,11 @@ async fn run_job_inner(
             let _ = cancel.await;
             phase(&started_phase, "Cancelling…");
         },
+        &RouteMemory::at(&state.home),
         move |text: &str| {
             let _ = writeln!(notice_log.lock().unwrap(), "\n{text}");
             let _ = notice_app.emit("job-output", OutputChunk { stream: "notice", text: format!("{text}\n") });
-            phase(&notice_app, "Retrying through the relay…");
+            phase(&notice_app, "Switching route…");
         },
     )
     .await;

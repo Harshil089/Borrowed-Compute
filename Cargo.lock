@@ -538,6 +538,7 @@ dependencies = [
  "ignore",
  "iroh",
  "iroh-relay",
+ "serde",
  "serde_json",
  "tar",
  "tempfile",

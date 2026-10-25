@@ -9,6 +9,8 @@ use bc_proto::wire::{AgentMsg, ClientMsg, JobRequest, JobUsage, OutputStream, PR
 use bc_proto::JobSpec;
 use iroh::{Endpoint, SecretKey};
 
+use crate::route::RouteMemory;
+
 const UPLOAD_CHUNK: usize = 1 << 20;
 
 /// How long the Mac has to answer before a direct attempt counts as stuck.
@@ -109,7 +111,9 @@ pub async fn run_remote(
 /// Runs the job, trying a direct path first. Some networks (a VPN on the Mac, for one)
 /// let a direct connection open and then drop it mid-upload; when that happens before
 /// the job starts on the Mac, the run is retried once through the relay, which works
-/// wherever HTTPS does. `notice` explains the retry to the person watching.
+/// wherever HTTPS does. `memory` records the failure so the next runs to that Mac go
+/// through the relay first and skip the wait. `notice` explains each switch to the person
+/// watching.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_on_mac(
     key: &SecretKey,
@@ -120,30 +124,51 @@ pub async fn run_on_mac(
     stdout: &mut impl Write,
     stderr: &mut impl Write,
     cancel: impl std::future::Future<Output = ()>,
+    memory: &RouteMemory,
     notice: impl Fn(&str),
 ) -> Result<RunOutcome> {
     tokio::pin!(cancel);
-    let relay_only = net.relay_only;
-    let endpoint = bind(key.clone(), net.clone()).await?;
-    let mut started = false;
-    let first = run_attempt(
-        &endpoint, mac.clone(), spec, archive.clone(), stdout, stderr, cancel.as_mut(), &mut started,
-    )
-    .await;
-    endpoint.close().await;
-    let error = match first {
-        Ok(outcome) => return Ok(outcome),
-        Err(e) if relay_only || started => return Err(e),
-        Err(e) => e,
-    };
+    if net.relay_only {
+        let endpoint = bind(key.clone(), net).await?;
+        let mut started = false;
+        let outcome = run_attempt(&endpoint, mac, spec, archive, stdout, stderr, cancel.as_mut(), &mut started).await;
+        endpoint.close().await;
+        return outcome;
+    }
 
-    notice(&format!("Direct connection failed ({error:#}). Retrying through the relay…"));
-    let endpoint = bind(key.clone(), NetConfig { relay_only: true, ..net }).await?;
-    let mut started = false;
-    let second =
-        run_attempt(&endpoint, mac, spec, archive, stdout, stderr, cancel.as_mut(), &mut started).await;
-    endpoint.close().await;
-    second
+    let relay_first = memory.relay_first(&mac);
+    if relay_first {
+        notice("Using the relay: the direct path to this Mac failed within the last hour.");
+    }
+    // Each attempt is "relay only" or not; the second is the fallback for the first.
+    let order = if relay_first { [true, false] } else { [false, true] };
+    let mut last_error = None;
+    for (i, relay_only) in order.into_iter().enumerate() {
+        let endpoint = bind(key.clone(), NetConfig { relay_only, ..net.clone() }).await?;
+        let mut started = false;
+        let attempt = run_attempt(
+            &endpoint, mac.clone(), spec, archive.clone(), stdout, stderr, cancel.as_mut(), &mut started,
+        )
+        .await;
+        endpoint.close().await;
+        match attempt {
+            Ok(outcome) => {
+                if !relay_only && !outcome.timings.via_relay {
+                    memory.direct_worked(&mac);
+                }
+                return Ok(outcome);
+            }
+            // A job that started on the Mac must not run twice.
+            Err(e) if started || i == 1 => return Err(e),
+            Err(e) if relay_only => notice(&format!("The relay failed ({e:#}). Trying a direct connection…")),
+            Err(e) => {
+                memory.direct_failed(&mac);
+                notice(&format!("Direct connection failed ({e:#}). Retrying through the relay…"));
+                last_error = Some(e);
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no attempt ran")))
 }
 
 /// One attempt over `endpoint`. Sets `started` once the job is running on the Mac, after
