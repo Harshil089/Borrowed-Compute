@@ -293,16 +293,15 @@ fn record(state: &AppState, event: &AgentEvent) {
                 rejected: None,
             });
             jobs.truncate(MAX_JOBS);
-            log(format_args!("job {job_id} started for {}: {}", short(client), argv.join(" ")));
         }
         AgentEvent::JobFinished { job_id, end } => {
             let mut jobs = state.jobs.lock().unwrap();
             if let Some(job) = jobs.iter_mut().find(|j| j.job_id.as_deref() == Some(job_id)) {
                 job.end = Some(end.clone());
                 job.finished_ms = Some(now_ms());
-                state.logs.append_job(job);
+                state.logs.append_history(job);
+                state.logs.write_job_file(&job_file_name(job), &job_file_text(job));
             }
-            log(format_args!("job {job_id} {}", describe_end(end)));
         }
         AgentEvent::JobRejected { client, reason } => {
             let mut jobs = state.jobs.lock().unwrap();
@@ -317,9 +316,9 @@ fn record(state: &AppState, event: &AgentEvent) {
             });
             jobs.truncate(MAX_JOBS);
             if let Some(job) = jobs.front() {
-                state.logs.append_job(job);
+                state.logs.append_history(job);
+                state.logs.write_job_file(&job_file_name(job), &job_file_text(job));
             }
-            log(format_args!("rejected a job from {}: {reason}", short(client)));
         }
         AgentEvent::CloudSync { ok, error } => {
             *state.cloud_state.lock().unwrap() = CloudState {
@@ -335,23 +334,58 @@ fn short(id: &str) -> &str {
     id.get(..10).unwrap_or(id)
 }
 
-fn describe_end(end: &JobEnd) -> String {
-    match end {
-        JobEnd::Exited { code, timed_out, usage } => {
-            let how = match (timed_out, code) {
-                (true, _) => "timed out".to_string(),
-                (false, Some(c)) => format!("exited with code {c}"),
-                (false, None) => "was stopped by a signal".to_string(),
-            };
-            match usage {
-                Some(u) => format!("{how} · {}", u.summary()),
-                None => how,
-            }
-        }
-        JobEnd::Failed { reason } => format!("failed: {reason}"),
-        JobEnd::Cancelled => "was cancelled by the client".to_string(),
-        JobEnd::Disconnected => "ended: the client disconnected".to_string(),
+fn timestamp(ms: u64) -> String {
+    humantime::format_rfc3339_seconds(UNIX_EPOCH + std::time::Duration::from_millis(ms)).to_string()
+}
+
+/// `<start time>-<job id>.log`; the time comes first so files sort oldest first. Colons
+/// are left out because Finder shows them as slashes.
+fn job_file_name(job: &JobRecord) -> String {
+    let id = match &job.job_id {
+        Some(id) => id.clone(),
+        None => format!("rejected-{}", short(&job.client)),
+    };
+    format!("{}-{id}.log", timestamp(job.started_ms).replace(':', "-"))
+}
+
+/// The job's own log: what ran, for whom, how it ended and what it used. Never its output.
+fn job_file_text(job: &JobRecord) -> String {
+    let mut text = format!(
+        "Job: {}\nClient device: {}\nStarted: {}\n",
+        job.job_id.as_deref().unwrap_or("none (rejected before it ran)"),
+        job.client,
+        timestamp(job.started_ms),
+    );
+    if let Some(reason) = &job.rejected {
+        text += &format!("Result: rejected: {reason}\n");
+        return text;
     }
+    text += &format!("Command: {}\n", job.argv.join(" "));
+    if let Some(ms) = job.finished_ms {
+        text += &format!("Finished: {}\n", timestamp(ms));
+    }
+    let result = match &job.end {
+        Some(JobEnd::Exited { timed_out: true, .. }) => "timed out".to_string(),
+        Some(JobEnd::Exited { code: Some(c), .. }) => format!("exited with code {c}"),
+        Some(JobEnd::Exited { code: None, .. }) => "stopped by a signal".to_string(),
+        Some(JobEnd::Failed { reason }) => format!("could not run: {reason}"),
+        Some(JobEnd::Cancelled) => "cancelled by the client".to_string(),
+        Some(JobEnd::Disconnected) => "the client disconnected".to_string(),
+        None => "still running".to_string(),
+    };
+    text += &format!("Result: {result}\n");
+    if let Some(JobEnd::Exited { usage: Some(u), .. }) = &job.end {
+        let ms = |v: u64| if v < 1000 { format!("{v} ms") } else { format!("{:.1} s", v as f64 / 1000.0) };
+        text += &format!(
+            "Usage: {}\nCPU time: {} user, {} system\nPeak memory: {} bytes\nRun time: {}\n",
+            u.summary(),
+            ms(u.user_ms),
+            ms(u.system_ms),
+            u.max_rss_bytes,
+            ms(u.wall_ms),
+        );
+    }
+    text
 }
 
 #[tauri::command]
@@ -384,7 +418,7 @@ fn main() {
     let cloud_url = cloud_url_for(&home);
     let hosting = cloud_url == DEFAULT_CLOUD_URL;
     let signed_in = load_session(&home).is_some();
-    let logs = Logs::new(root.join("logs"));
+    let logs = Logs::new(root.join("logs"), root.join("agent").join("job-history.jsonl"));
     if let Err(e) = logs.capture_stderr() {
         eprintln!("could not open agent.log: {e}");
     }
@@ -535,4 +569,33 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error while running Borrowed Compute Agent");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bc_proto::wire::JobUsage;
+
+    #[test]
+    fn job_file_has_command_result_and_usage() {
+        let job = JobRecord {
+            job_id: Some("18e1c-352c".into()),
+            client: "b0551e4a8e580888".into(),
+            argv: vec!["python3".into(), "palindrome_checker.py".into()],
+            started_ms: 1_792_931_958_660,
+            finished_ms: Some(1_792_931_958_746),
+            end: Some(JobEnd::Exited {
+                code: Some(0),
+                timed_out: false,
+                usage: Some(JobUsage { wall_ms: 70, user_ms: 23, system_ms: 17, max_rss_bytes: 14_729_216 }),
+            }),
+            rejected: None,
+        };
+        assert_eq!(job_file_name(&job), "2026-10-25T12-39-18Z-18e1c-352c.log");
+        let text = job_file_text(&job);
+        assert!(text.contains("Command: python3 palindrome_checker.py\n"), "{text}");
+        assert!(text.contains("Result: exited with code 0\n"), "{text}");
+        assert!(text.contains("CPU time: 23 ms user, 17 ms system\n"), "{text}");
+        assert!(text.contains("Peak memory: 14729216 bytes\n"), "{text}");
+    }
 }
