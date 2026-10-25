@@ -179,10 +179,13 @@ async fn main() -> Result<()> {
             .await?;
             endpoint.close().await;
 
-            let line = outcome.timings.to_json(&outcome.job_id, &outcome.exit);
+            let line = outcome.timings.to_json(&outcome.job_id, &outcome.exit, outcome.usage.as_ref());
             append_timing(&home, &line);
             if timings {
                 eprintln!("bc: {line}");
+                if let Some(usage) = &outcome.usage {
+                    eprintln!("bc: {}", usage.summary());
+                }
             }
             match &outcome.exit {
                 Exit::Rejected(reason) => {

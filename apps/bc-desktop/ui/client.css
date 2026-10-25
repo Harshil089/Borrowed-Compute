@@ -82,6 +82,7 @@ main { display: flex; flex-direction: column; gap: 14px; padding: 16px 18px 18px
   font-size: 12.5px;
 }
 .result .timings { color: var(--muted); font-family: var(--mono); font-size: 11.5px; }
+.result .usage { font-family: var(--mono); font-size: 12px; }
 
 .overlay {
   position: fixed; inset: 0;

@@ -37,7 +37,7 @@ async fn job_messages_flow_through_relay() -> anyhow::Result<()> {
             },
         )
         .await?;
-        send_msg(&mut send, &AgentMsg::Exited { code: Some(0), timed_out: false }).await?;
+        send_msg(&mut send, &AgentMsg::Exited { code: Some(0), timed_out: false, usage: None }).await?;
         send.finish()?;
         conn.closed().await;
         mac.close().await;
@@ -54,7 +54,7 @@ async fn job_messages_flow_through_relay() -> anyhow::Result<()> {
     let out: AgentMsg = recv_msg(&mut recv).await?;
     assert!(matches!(out, AgentMsg::Output { seq: 0, .. }));
     let exit: AgentMsg = recv_msg(&mut recv).await?;
-    assert_eq!(exit, AgentMsg::Exited { code: Some(0), timed_out: false });
+    assert_eq!(exit, AgentMsg::Exited { code: Some(0), timed_out: false, usage: None });
 
     assert!(via_relay(&conn), "direct paths are disabled, so traffic must use the relay");
 

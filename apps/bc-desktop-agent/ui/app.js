@@ -150,7 +150,7 @@ function render() {
             <span class="dot ${cls}"></span>
             <div class="main">
               <span class="name ${j.rejected ? "" : "argv"}">${what}</span>
-              <span class="sub">${esc(clientName(j.client))} · ${ago(j.started_ms)}</span>
+              <span class="sub">${esc(clientName(j.client))} · ${ago(j.started_ms)}${usageText(j)}</span>
             </div>
             <span class="pill ${cls}">${label}</span>
           </div>`;
@@ -222,6 +222,15 @@ function renderConnect() {
   box.innerHTML = body;
 }
 
+// CPU time and peak memory the job used on this Mac, when the job reported them.
+function usageText(j) {
+  const u = j.end && j.end.usage;
+  if (!u) return "";
+  const t = (ms) => (ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`);
+  const mb = Math.round(u.max_rss_bytes / 1048576);
+  return ` · CPU ${t(u.user_ms + u.system_ms)} · ${mb} MB · ran ${t(u.wall_ms)}`;
+}
+
 function jobState(j) {
   if (j.rejected) return ["bad", "Rejected"];
   if (!j.end) return ["warn", "Running"];
@@ -278,6 +287,10 @@ $("signin-btn").addEventListener("click", async () => {
 
 $("reopen").addEventListener("click", () => {
   if (verificationUri) invoke("open_url", { url: verificationUri }).catch((e) => showError(String(e)));
+});
+
+$("open-logs").addEventListener("click", () => {
+  invoke("open_logs").catch((e) => showError(String(e)));
 });
 
 $("signout").addEventListener("click", async () => {

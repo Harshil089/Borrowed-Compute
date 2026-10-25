@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use bc_net::{recv_msg, send_msg, EndpointAddr, JOB_ALPN};
-use bc_proto::wire::{AgentMsg, ClientMsg, JobRequest, OutputStream, PROTOCOL_VERSION};
+use bc_proto::wire::{AgentMsg, ClientMsg, JobRequest, JobUsage, OutputStream, PROTOCOL_VERSION};
 use bc_proto::JobSpec;
 use iroh::Endpoint;
 
@@ -49,11 +49,14 @@ pub struct Timings {
 
 impl Timings {
     /// One JSON object per line, for the local timing log.
-    pub fn to_json(&self, job_id: &str, exit: &Exit) -> String {
+    pub fn to_json(&self, job_id: &str, exit: &Exit, usage: Option<&JobUsage>) -> String {
         let ms = |d: Duration| d.as_millis().to_string();
         let opt = |d: Option<Duration>| d.map(ms).unwrap_or_else(|| "null".into());
+        let usage = usage
+            .map(|u| serde_json::to_string(u).unwrap_or_else(|_| "null".into()))
+            .unwrap_or_else(|| "null".into());
         format!(
-            "{{\"job\":\"{job_id}\",\"connect_ms\":{},\"upload_ms\":{},\"start_ms\":{},\"first_log_ms\":{},\"total_ms\":{},\"via_relay\":{},\"archive_bytes\":{},\"exit\":{}}}",
+            "{{\"job\":\"{job_id}\",\"connect_ms\":{},\"upload_ms\":{},\"start_ms\":{},\"first_log_ms\":{},\"total_ms\":{},\"via_relay\":{},\"archive_bytes\":{},\"exit\":{},\"usage\":{usage}}}",
             ms(self.connect),
             ms(self.upload),
             opt(self.start),
@@ -70,6 +73,8 @@ pub struct RunOutcome {
     pub job_id: String,
     pub exit: Exit,
     pub timings: Timings,
+    /// What the job used on the Mac; `None` if it never ran or the agent is too old to say.
+    pub usage: Option<JobUsage>,
 }
 
 pub fn new_job_id() -> String {
@@ -106,7 +111,7 @@ pub async fn run_remote(
     send_msg(&mut send, &ClientMsg::Hello { protocol: PROTOCOL_VERSION }).await?;
     match recv_msg::<AgentMsg>(&mut recv).await? {
         AgentMsg::Hello { protocol } if protocol == PROTOCOL_VERSION => {}
-        AgentMsg::Rejected { reason } => return Ok(done(job_id, Exit::Rejected(reason), timings, t0)),
+        AgentMsg::Rejected { reason } => return Ok(done(job_id, Exit::Rejected(reason), timings, t0, None)),
         other => bail!("unexpected handshake reply {other:?}"),
     }
     timings.connect = t0.elapsed();
@@ -115,7 +120,7 @@ pub async fn run_remote(
     send_msg(&mut send, &ClientMsg::Submit(req)).await?;
     match recv_msg::<AgentMsg>(&mut recv).await? {
         AgentMsg::Accepted { .. } => {}
-        AgentMsg::Rejected { reason } => return Ok(done(job_id, Exit::Rejected(reason), timings, t0)),
+        AgentMsg::Rejected { reason } => return Ok(done(job_id, Exit::Rejected(reason), timings, t0, None)),
         other => bail!("unexpected reply to Submit {other:?}"),
     }
     for chunk in archive.chunks(UPLOAD_CHUNK) {
@@ -125,6 +130,7 @@ pub async fn run_remote(
     timings.upload = t0.elapsed();
 
     tokio::pin!(cancel);
+    let mut usage = None;
     let exit = loop {
         let msg = tokio::select! {
             msg = recv_msg::<AgentMsg>(&mut recv) => msg.context("connection to the Mac lost")?,
@@ -144,9 +150,14 @@ pub async fn run_remote(
                 out.write_all(&data)?;
                 out.flush()?;
             }
-            AgentMsg::Exited { timed_out: true, .. } => break Exit::TimedOut,
-            AgentMsg::Exited { code: Some(c), .. } => break Exit::Code(c),
-            AgentMsg::Exited { code: None, .. } => break Exit::Killed,
+            AgentMsg::Exited { code, timed_out, usage: used } => {
+                usage = used;
+                break match (timed_out, code) {
+                    (true, _) => Exit::TimedOut,
+                    (false, Some(c)) => Exit::Code(c),
+                    (false, None) => Exit::Killed,
+                };
+            }
             AgentMsg::Failed { reason } => break Exit::Failed(reason),
             other => bail!("unexpected message during job {other:?}"),
         }
@@ -155,10 +166,11 @@ pub async fn run_remote(
     timings.via_relay = bc_net::via_relay(&conn);
     let _ = send.finish();
     conn.close(0u32.into(), b"done");
-    Ok(done(job_id, exit, timings, t0))
+    Ok(done(job_id, exit, timings, t0, usage))
 }
 
-fn done(job_id: String, exit: Exit, mut timings: Timings, t0: Instant) -> RunOutcome {
+fn done(job_id: String, exit: Exit, mut timings: Timings, t0: Instant, usage: Option<JobUsage>) -> RunOutcome {
     timings.total = t0.elapsed();
-    RunOutcome { job_id, exit, timings }
+    RunOutcome { job_id, exit, timings, usage }
 }
+

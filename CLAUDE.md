@@ -50,6 +50,8 @@ Run the cloud on its own: `BC_DATABASE_URL=postgres://… or sqlite://<file>?mod
 - **The agent checks the paired list on every connection.** It must never run a job from an unpaired device.
 - **Packing fixes Windows files** (`apps/bc-cli/src/pack.rs`): executable bit from file system, git index (`100755`) or shebang for untracked files; CRLF to LF only in scripts. Do not normalize other text files.
 - **Tests that need `sh` or the Mac agent are `cfg(unix)`**, so `cargo test --workspace` still runs on Windows CI.
+- **Logs.** The Mac app writes `<home>/logs/agent.log` (its own stderr, unless run from a terminal) and one file per job in `<home>/logs/jobs/` (command, result, usage; newest 500 kept). The recent-jobs list is reloaded at startup from `<home>/agent/job-history.jsonl`. It never writes job output on the Mac. The client app writes each run's output and result to `<client home>/logs/job-<time>.log`, keeping the newest 200.
+- **Job usage comes from `wait4`** in `runner.rs`: CPU time and peak memory of the job's process plus every process it waited for. `AgentMsg::Exited.usage` is `#[serde(default)]`, so old and new clients and agents still talk without a protocol bump.
 - **Workspaces are deleted after every job**, and the job's process group is killed on exit, timeout and cancel (`GroupGuard` in `runner.rs`). Keep both guarantees.
 - **Desktop apps call the libraries, never the CLI binaries.** New client or agent behavior goes in `bc_cli::flows` or `bc_agent::service` first, then both the CLI and the app use it.
 - **Never use `confirm()`, `alert()` or `prompt()` in the desktop UIs.** The web view has no native handler for them on macOS (the Mac app's `confirm()` returned "no" without showing anything). Use `ask()` in each `ui/app.js`.

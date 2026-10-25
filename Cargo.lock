@@ -566,12 +566,14 @@ dependencies = [
  "bc-cli",
  "bc-net",
  "bc-proto",
+ "humantime",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
+ "tempfile",
  "tokio",
 ]
 
@@ -585,11 +587,14 @@ dependencies = [
  "bc-cloud",
  "bc-net",
  "bc-proto",
+ "humantime",
+ "libc",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
+ "tempfile",
  "tokio",
 ]
 

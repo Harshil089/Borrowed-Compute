@@ -7,8 +7,8 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex as StdMutex;
-use std::time::Duration;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::{Duration, SystemTime};
 
 use anyhow::Context;
 use bc_auth::{
@@ -23,6 +23,7 @@ use bc_cli::pack::pack;
 use bc_cli::run::{run_remote, Exit};
 use bc_net::{bind, load_or_create_key, NetConfig};
 use bc_proto::cloud::{DeviceInfo, DeviceKind, PairingInfo};
+use bc_proto::wire::JobUsage;
 use bc_proto::JobSpec;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
@@ -107,6 +108,47 @@ struct JobResult {
     outcome: &'static str,
     message: String,
     timings: TimingsView,
+    usage: Option<JobUsage>,
+    /// `JobUsage::summary`, so the window shows the same text as the log.
+    usage_text: Option<String>,
+    log_path: String,
+}
+
+/// Each run's output and result go to `<home>/logs/job-<time>.log`; the oldest beyond this
+/// many are deleted.
+const MAX_JOB_LOGS: usize = 200;
+
+type SharedLog = Arc<StdMutex<std::fs::File>>;
+
+fn logs_dir(home: &Path) -> PathBuf {
+    home.join("logs")
+}
+
+/// Creates the log for one run, headed with what is being run where.
+fn open_job_log(home: &Path, mac: &str, folder: &str, argv: &[String]) -> anyhow::Result<(PathBuf, SharedLog)> {
+    let dir = logs_dir(home);
+    std::fs::create_dir_all(&dir)?;
+    prune_job_logs(&dir);
+    let now = humantime::format_rfc3339_seconds(SystemTime::now()).to_string();
+    // Colons are not allowed in Windows file names.
+    let path = dir.join(format!("job-{}.log", now.replace(':', "-")));
+    let mut file = std::fs::File::create(&path)?;
+    writeln!(file, "Started {now}\nMac: {mac}\nFolder: {folder}\nCommand: {}\n", join_command(argv))?;
+    Ok((path, Arc::new(StdMutex::new(file))))
+}
+
+fn prune_job_logs(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut logs: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("job-")))
+        .collect();
+    // Names start with the time, so they sort oldest first.
+    logs.sort();
+    let excess = logs.len().saturating_sub(MAX_JOB_LOGS - 1);
+    for old in &logs[..excess] {
+        let _ = std::fs::remove_file(old);
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -337,8 +379,9 @@ async fn run_job_inner(
     phase(app, format!("Connecting and uploading {}…", human_bytes(archive.len() as u64)));
     let key = load_or_create_key(&key_path(&state.home))?;
     let endpoint = bind(key, NetConfig { relay_only, ..Default::default() }).await?;
-    let mut stdout = EmitWriter::new(app.clone(), "stdout");
-    let mut stderr = EmitWriter::new(app.clone(), "stderr");
+    let (log_path, log) = open_job_log(&state.home, mac, folder, &spec.job.argv)?;
+    let mut stdout = EmitWriter::new(app.clone(), "stdout", log.clone());
+    let mut stderr = EmitWriter::new(app.clone(), "stderr", log.clone());
     let started_phase = app.clone();
     let outcome = run_remote(
         &endpoint,
@@ -354,11 +397,18 @@ async fn run_job_inner(
     )
     .await;
     endpoint.close().await;
-    let outcome = outcome?;
     stdout.flush()?;
     stderr.flush()?;
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            let _ = writeln!(log.lock().unwrap(), "\nCould not finish the run: {e:#}");
+            return Err(e);
+        }
+    };
 
-    append_timing(&state.home, &outcome.timings.to_json(&outcome.job_id, &outcome.exit));
+    let timing = outcome.timings.to_json(&outcome.job_id, &outcome.exit, outcome.usage.as_ref());
+    append_timing(&state.home, &timing);
     let (kind, message) = match &outcome.exit {
         Exit::Code(0) => ("success", "Finished with exit code 0".to_string()),
         Exit::Code(c) => ("failure", format!("Finished with exit code {c}")),
@@ -368,11 +418,21 @@ async fn run_job_inner(
         Exit::Rejected(r) => ("rejected", format!("The Mac rejected the job: {r}")),
         Exit::Cancelled => ("cancelled", "Cancelled".to_string()),
     };
+    let usage_text = outcome.usage.as_ref().map(JobUsage::summary);
+    let _ = writeln!(
+        log.lock().unwrap(),
+        "\n{message}\nUsed on the Mac: {}\nJob {}: {timing}",
+        usage_text.as_deref().unwrap_or("not reported"),
+        outcome.job_id,
+    );
     let t = &outcome.timings;
     Ok(JobResult {
         status: outcome.exit.status(),
         outcome: kind,
         message,
+        usage: outcome.usage,
+        usage_text,
+        log_path: log_path.to_string_lossy().into_owned(),
         timings: TimingsView {
             connect_ms: t.connect.as_millis(),
             upload_ms: t.upload.as_millis(),
@@ -390,6 +450,16 @@ fn cancel_job(state: State<'_, AppState>) {
     if let Some(cancel) = state.job.lock().unwrap().take() {
         let _ = cancel.send(());
     }
+}
+
+/// Opens a run's log. Only files in the logs folder can be opened this way.
+#[tauri::command]
+fn open_log(app: AppHandle, state: State<'_, AppState>, path: String) -> CmdResult<()> {
+    let path = PathBuf::from(path);
+    if path.parent() != Some(logs_dir(&state.home).as_path()) {
+        return Err("not a job log".into());
+    }
+    app.opener().open_path(path.to_string_lossy(), None::<&str>).map_err(err)
 }
 
 #[tauri::command]
@@ -415,11 +485,13 @@ struct EmitWriter {
     app: AppHandle,
     stream: &'static str,
     pending: Vec<u8>,
+    /// The run's log file, shared by stdout and stderr so it keeps their order.
+    log: SharedLog,
 }
 
 impl EmitWriter {
-    fn new(app: AppHandle, stream: &'static str) -> Self {
-        EmitWriter { app, stream, pending: Vec::new() }
+    fn new(app: AppHandle, stream: &'static str, log: SharedLog) -> Self {
+        EmitWriter { app, stream, pending: Vec::new(), log }
     }
 
     fn emit(&self, text: String) {
@@ -431,6 +503,8 @@ impl EmitWriter {
 
 impl Write for EmitWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // A full disk must not stop the job's output reaching the window.
+        let _ = self.log.lock().unwrap().write_all(buf);
         self.pending.extend_from_slice(buf);
         let valid = match std::str::from_utf8(&self.pending) {
             Ok(_) => self.pending.len(),
@@ -470,6 +544,7 @@ fn main() {
             project_info,
             run_job,
             cancel_job,
+            open_log,
             open_url,
             test_cloud_url,
             set_cloud_url
@@ -493,6 +568,25 @@ mod tests {
             let argv: Vec<String> = argv.into_iter().map(String::from).collect();
             assert_eq!(split_command(&join_command(&argv)).unwrap(), argv);
         }
+    }
+
+    #[test]
+    fn prunes_oldest_job_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..MAX_JOB_LOGS + 5 {
+            std::fs::write(dir.path().join(format!("job-{i:04}.log")), "").unwrap();
+        }
+        std::fs::write(dir.path().join("other.txt"), "").unwrap();
+        prune_job_logs(dir.path());
+        let mut left: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        // Room for the run about to start.
+        assert_eq!(left.len(), MAX_JOB_LOGS);
+        assert_eq!(left[0], "job-0006.log");
+        assert!(left.contains(&"other.txt".to_string()));
     }
 
     #[test]
