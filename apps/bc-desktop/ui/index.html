@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Borrowed Compute</title>
+  <link rel="stylesheet" href="base.css">
+  <link rel="stylesheet" href="client.css">
+</head>
+<body>
+  <!-- Signed out -->
+  <div id="signin-view" class="center hidden">
+    <section class="card pad signin">
+      <h1>Borrowed Compute</h1>
+      <p class="muted">Run builds, tests and scripts on your Mac from this computer. Sign in with the same GitHub account you use on the Mac.</p>
+      <label class="field">
+        <span>Name for this computer</span>
+        <input id="pc-name" type="text" placeholder="laptop" maxlength="64" autocomplete="off" spellcheck="false">
+      </label>
+      <button id="signin-btn" class="primary wide">Sign in with GitHub</button>
+      <div id="signin-code" class="codebox hidden">
+        <p class="muted">Enter this code on the GitHub page that just opened:</p>
+        <div id="user-code" class="code"></div>
+        <div class="row">
+          <span class="spinner"></span><span class="muted">Waiting for GitHub…</span>
+          <button id="reopen" class="link">Open the page again</button>
+        </div>
+      </div>
+      <div id="signin-error" class="banner bad hidden"></div>
+    </section>
+  </div>
+
+  <!-- Signed in -->
+  <div id="app-view" class="layout hidden">
+    <aside>
+      <div class="side-head">
+        <h2>Your Macs</h2>
+        <button id="refresh" class="link" title="Refresh">Refresh</button>
+      </div>
+      <div id="macs" class="macs"></div>
+      <div class="side-foot">
+        <div id="account" class="muted"></div>
+        <button id="signout" class="link">Sign out</button>
+      </div>
+    </aside>
+
+    <main>
+      <div id="error" class="banner bad hidden"></div>
+
+      <section class="card pad form">
+        <div class="form-row">
+          <label for="folder">Project folder</label>
+          <div class="inline">
+            <input id="folder" type="text" class="mono" placeholder="Choose the folder to send" spellcheck="false">
+            <button id="choose">Choose…</button>
+          </div>
+        </div>
+        <div class="form-row">
+          <label for="command">Command</label>
+          <div class="inline">
+            <input id="command" type="text" class="mono" placeholder="cargo test" spellcheck="false" autocomplete="off">
+            <button id="run" class="primary">Run on Mac</button>
+            <button id="cancel" class="hidden">Cancel</button>
+          </div>
+          <div id="hint" class="hint muted"></div>
+        </div>
+        <label class="check">
+          <input id="relay-only" type="checkbox">
+          <span>Send everything through the relay <span class="faint">(for testing strict networks)</span></span>
+        </label>
+      </section>
+
+      <section class="console-wrap">
+        <div class="console-head">
+          <span id="phase" class="muted">Output appears here as the Mac produces it.</span>
+          <button id="clear" class="link">Clear</button>
+        </div>
+        <pre id="console" class="console selectable" aria-live="polite"></pre>
+        <div id="result" class="result hidden"></div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Pairing dialog -->
+  <div id="pair-dialog" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="pair-title">
+    <div class="card pad dialog">
+      <h1 id="pair-title">Pair with <span id="pair-mac"></span></h1>
+      <p class="muted">On the Mac, open <strong>Borrowed Compute Agent</strong> from the menu bar and approve the request that shows this code:</p>
+      <div id="pair-code" class="code"></div>
+      <div id="pair-wait" class="row"><span class="spinner"></span><span class="muted">Waiting for approval on the Mac…</span></div>
+      <div id="pair-msg" class="banner hidden"></div>
+      <div class="dialog-actions"><button id="pair-close">Close</button></div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

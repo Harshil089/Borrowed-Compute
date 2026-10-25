@@ -7,6 +7,8 @@ members = [
     "apps/bc-cli",
     "apps/bc-cloud",
     "crates/bc-auth",
+    "apps/bc-desktop",
+    "apps/bc-desktop-agent",
 ]
 
 [workspace.package]
@@ -19,6 +21,8 @@ publish = false
 bc-proto = { path = "crates/bc-proto" }
 bc-net = { path = "crates/bc-net" }
 bc-auth = { path = "crates/bc-auth" }
+bc-agent = { path = "apps/bc-agent" }
+bc-cli = { path = "apps/bc-cli" }
 
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"
@@ -45,3 +49,7 @@ iroh-base = { version = "1.4.1", features = ["key"] }
 axum = "0.8"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "migrate", "json", "macros"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tauri = "2.12"
+tauri-build = "2.7"
+tauri-plugin-dialog = "2.8"
+tauri-plugin-opener = "2"

@@ -6,6 +6,7 @@ use bc_proto::wire::{AgentMsg, ClientMsg, PROTOCOL_VERSION};
 use iroh::endpoint::Connection;
 use tokio::sync::mpsc;
 
+use crate::events::{AgentEvent, EventSender, JobEnd};
 use crate::paired::PairedDevices;
 use crate::runner::{run_job, RunnerConfig};
 
@@ -16,6 +17,20 @@ pub const MAX_ARCHIVE: u64 = 2 << 30;
 pub struct AgentConfig {
     pub runner: RunnerConfig,
     pub paired: PairedDevices,
+    /// Job activity for a UI. `None` when nobody is watching.
+    pub events: Option<EventSender>,
+}
+
+impl AgentConfig {
+    pub fn new(runner: RunnerConfig, paired: PairedDevices) -> Self {
+        AgentConfig { runner, paired, events: None }
+    }
+
+    fn emit(&self, event: AgentEvent) {
+        if let Some(tx) = &self.events {
+            let _ = tx.send(event);
+        }
+    }
 }
 
 pub async fn serve_connection(config: &AgentConfig, conn: Connection) -> Result<()> {
@@ -40,6 +55,7 @@ pub async fn serve_connection(config: &AgentConfig, conn: Connection) -> Result<
     // Checked after the handshake so an unpaired device gets a clear message.
     if !config.paired.contains(&peer) {
         let reason = format!("device {peer} is not paired with this Mac");
+        config.emit(AgentEvent::JobRejected { client: peer.to_string(), reason: reason.clone() });
         send_msg(&mut send, &AgentMsg::Rejected { reason: reason.clone() }).await?;
         send.finish()?;
         conn.closed().await;
@@ -70,6 +86,15 @@ pub async fn serve_connection(config: &AgentConfig, conn: Connection) -> Result<
         bail!("upload is {} bytes, declared {}", archive.len(), req.archive_bytes);
     }
 
+    let job_id = req.job_id.clone();
+    config.emit(AgentEvent::JobStarted {
+        job_id: job_id.clone(),
+        client: peer.to_string(),
+        argv: req.argv.clone(),
+    });
+    // Reports how the job ended on every return path, including a lost connection.
+    let mut end = JobEndGuard { config, job_id, end: JobEnd::Disconnected };
+
     let (tx, mut rx) = mpsc::channel(256);
     let runner = config.runner.clone();
     // Any early return (Cancel, lost connection) aborts the job; kill_on_drop stops it.
@@ -84,11 +109,21 @@ pub async fn serve_connection(config: &AgentConfig, conn: Connection) -> Result<
     loop {
         tokio::select! {
             msg = rx.recv() => match msg {
-                Some(msg) => send_msg(&mut send, &msg).await.context("streaming to client")?,
+                Some(msg) => {
+                    match &msg {
+                        AgentMsg::Exited { code, timed_out } => {
+                            end.end = JobEnd::Exited { code: *code, timed_out: *timed_out };
+                        }
+                        AgentMsg::Failed { reason } => end.end = JobEnd::Failed { reason: reason.clone() },
+                        _ => {}
+                    }
+                    send_msg(&mut send, &msg).await.context("streaming to client")?
+                }
                 None => break,
             },
             msg = &mut cancel.0, if !client_done => {
                 if matches!(msg, Ok(Ok(ClientMsg::Cancel)) | Ok(Err(_))) {
+                    end.end = JobEnd::Cancelled;
                     return Ok(());
                 }
                 client_done = true;
@@ -99,6 +134,21 @@ pub async fn serve_connection(config: &AgentConfig, conn: Connection) -> Result<
     send.finish()?;
     conn.closed().await;
     Ok(())
+}
+
+struct JobEndGuard<'a> {
+    config: &'a AgentConfig,
+    job_id: String,
+    end: JobEnd,
+}
+
+impl Drop for JobEndGuard<'_> {
+    fn drop(&mut self) {
+        self.config.emit(AgentEvent::JobFinished {
+            job_id: std::mem::take(&mut self.job_id),
+            end: self.end.clone(),
+        });
+    }
 }
 
 struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);

@@ -8,12 +8,18 @@ use bc_auth::CloudClient;
 use bc_net::EndpointId;
 use iroh::Endpoint;
 
+use crate::events::{AgentEvent, EventSender};
 use crate::paired::PairedDevices;
 
 /// Revoking a pairing in the cloud takes effect within this interval.
 pub const SYNC_INTERVAL: Duration = Duration::from_secs(15);
 
-pub async fn run(cloud: CloudClient, endpoint: Endpoint, paired: PairedDevices) {
+pub async fn run(
+    cloud: CloudClient,
+    endpoint: Endpoint,
+    paired: PairedDevices,
+    events: Option<EventSender>,
+) {
     let me = endpoint.id().to_string();
     let mut failing = false;
     loop {
@@ -24,6 +30,12 @@ pub async fn run(cloud: CloudClient, endpoint: Endpoint, paired: PairedDevices) 
             _ => {}
         }
         failing = result.is_err();
+        if let Some(tx) = &events {
+            let _ = tx.send(AgentEvent::CloudSync {
+                ok: result.is_ok(),
+                error: result.err().map(|e| format!("{e:#}")),
+            });
+        }
         tokio::time::sleep(SYNC_INTERVAL).await;
     }
 }
