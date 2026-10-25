@@ -8,131 +8,195 @@
   <link rel="stylesheet" href="client.css">
 </head>
 <body>
-  <!-- Signed out -->
-  <div id="signin-view" class="center hidden">
-    <section class="card pad signin">
-      <h1>Borrowed Compute</h1>
-      <p class="muted">Run builds, tests and scripts on your Mac from this computer. Sign in with the same GitHub account you use on the Mac.</p>
-      <label class="field">
-        <span>Your Mac's address</span>
-        <div class="inline">
-          <input id="signin-cloud" type="text" class="mono" placeholder="https://your-mac.tailnet-name.ts.net" spellcheck="false" autocomplete="off">
-          <button id="signin-test">Test</button>
+  <svg class="sprite" aria-hidden="true">
+    <symbol id="i-mark" viewBox="0 0 32 32">
+      <path d="M1.5 16h3.2M7.6 16h3.2M13.7 16h2.6" stroke="#d7262d" stroke-width="2.6" stroke-linecap="round"/>
+      <path d="M24 5.2c.9 0 1.5 1 1.5 2.2v5.1l6 3.6v2.4l-6-1.9v4.7l2.2 1.6v2.2L24 23.9l-3.7 1.2v-2.2l2.2-1.6v-4.7l-6 1.9v-2.4l6-3.6V7.4c0-1.2.6-2.2 1.5-2.2z" fill="currentColor" transform="rotate(90 24 15.6)"/>
+    </symbol>
+    <symbol id="i-plane" viewBox="0 0 16 16"><path d="M8 1.3c.6 0 .95.6.95 1.35v3.1l5.05 2.95v1.55l-5.05-1.5v3.05l1.6 1.15v1.45L8 13.7l-2.55.7v-1.45l1.6-1.15V9.75L2 11.25V9.7l5.05-2.95v-3.1C7.05 1.9 7.4 1.3 8 1.3z" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2.5v3.2h-3.2"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 16 16"><path d="M1.75 4.25c0-.7.55-1.25 1.25-1.25h3.2l1.5 1.6H13c.7 0 1.25.55 1.25 1.25v6.4c0 .7-.55 1.25-1.25 1.25H3c-.7 0-1.25-.55-1.25-1.25z"/></symbol>
+    <symbol id="i-doc" viewBox="0 0 16 16"><path d="M4 1.75h5.5l3 3v9.5H4z"/><path d="M9.5 1.75v3h3M6 8.5h4.5M6 11h4.5"/></symbol>
+  </svg>
+
+  <!-- Signed out: check-in -->
+  <div id="signin-view" class="checkin hidden">
+    <div class="pass">
+      <section class="pass-main coupon">
+        <div class="pass-head">
+          <div class="brand on-paper"><svg><use href="#i-mark"/></svg><span class="wordmark">Borrowed Compute</span></div>
         </div>
-        <span class="hint muted">Shown in Borrowed Compute Agent on your Mac, under Connect your PC.</span>
-      </label>
-      <div id="signin-cloud-msg" class="banner hidden"></div>
-      <label class="field">
-        <span>Name for this computer</span>
-        <input id="pc-name" type="text" placeholder="laptop" maxlength="64" autocomplete="off" spellcheck="false">
-      </label>
-      <button id="signin-btn" class="primary wide">Sign in with GitHub</button>
-      <div id="signin-code" class="codebox hidden">
-        <p class="muted">Enter this code on the GitHub page that just opened:</p>
-        <div id="user-code" class="code"></div>
-        <div class="row">
-          <span class="spinner"></span><span class="muted">Waiting for GitHub…</span>
+        <h1 class="pass-title">Run it on your Mac.</h1>
+        <p class="muted pass-lede">Builds, tests and scripts from this PC run on your Mac's Apple silicon, with output streaming back here. Sign in with the GitHub account you use on the Mac.</p>
+        <label class="field">
+          <span class="label">Your Mac's address</span>
+          <div class="inline">
+            <input id="signin-cloud" type="text" placeholder="https://your-mac.tailnet-name.ts.net" spellcheck="false" autocomplete="off">
+            <button id="signin-test">Test</button>
+          </div>
+          <span class="hint">Shown in Borrowed Compute Agent on your Mac, under Route.</span>
+        </label>
+        <div id="signin-cloud-msg" class="banner hidden"></div>
+        <label class="field">
+          <span class="label">Name for this PC</span>
+          <input id="pc-name" type="text" placeholder="laptop" maxlength="64" autocomplete="off" spellcheck="false">
+        </label>
+        <button id="signin-btn" class="primary wide">Sign in with GitHub</button>
+        <div id="signin-error" class="banner bad hidden"></div>
+      </section>
+      <aside class="pass-stub">
+        <div id="signin-code" class="stub-code hidden">
+          <span class="label">Enter on GitHub</span>
+          <div id="user-code" class="code"></div>
+          <div class="row"><span class="spinner"></span><span>Waiting for GitHub…</span></div>
           <button id="reopen" class="link">Open the page again</button>
         </div>
-      </div>
-      <div id="signin-error" class="banner bad hidden"></div>
-    </section>
+        <div class="stub-route" aria-hidden="true">
+          <div><span class="label">From</span><strong>PC</strong></div>
+          <svg class="icon plane"><use href="#i-plane"/></svg>
+          <div><span class="label">To</span><strong>MAC</strong></div>
+        </div>
+        <p class="stub-note">Nothing from a job stays on the Mac. Its workspace is deleted when the job ends.</p>
+      </aside>
+    </div>
   </div>
 
   <!-- Signed in -->
-  <div id="app-view" class="layout hidden">
-    <aside>
-      <div class="side-head">
-        <h2>Your Macs</h2>
-        <button id="refresh" class="link" title="Refresh">Refresh</button>
+  <div id="app-view" class="app hidden">
+    <header class="bar">
+      <div class="brand"><svg><use href="#i-mark"/></svg><span class="wordmark">Borrowed Compute</span></div>
+      <div class="bar-right">
+        <span id="account" class="bar-account"></span>
+        <button id="settings" class="bar-link">Mac address</button>
+        <button id="updates" class="bar-link">Updates</button>
+        <button id="signout" class="bar-link">Sign out</button>
+      </div>
+    </header>
+
+    <aside class="rail">
+      <div class="rail-head">
+        <h2 class="heading">Your Macs</h2>
+        <button id="refresh" class="icon-btn" title="Refresh" aria-label="Refresh"><svg class="icon"><use href="#i-refresh"/></svg></button>
       </div>
       <div id="macs" class="macs"></div>
-      <div class="side-foot">
-        <div id="account" class="muted"></div>
-        <div class="foot-actions">
-          <button id="settings" class="link">Mac address</button>
-          <button id="updates" class="link">Updates</button>
-          <button id="signout" class="link">Sign out</button>
-        </div>
-      </div>
     </aside>
 
-    <main>
+    <main class="deck">
       <div id="error" class="banner bad hidden"></div>
 
-      <section class="card pad form">
-        <div class="form-row">
-          <label for="folder">Project folder</label>
-          <div class="inline">
-            <input id="folder" type="text" class="mono" placeholder="Choose the folder to send" spellcheck="false">
-            <button id="choose">Choose…</button>
+      <section class="ticket">
+        <div class="tabs"><span id="run-tab" class="tab red">Next run</span><span id="date-tab" class="tab"></span></div>
+        <div class="coupon run die-cut">
+          <div class="route">
+            <div class="port">
+              <span class="label">From</span>
+              <strong id="route-from" class="port-code">PC</strong>
+              <span id="route-from-name" class="port-name">This PC</span>
+            </div>
+            <ol id="legs" class="legs" aria-label="Run progress">
+              <li data-leg="pack"><span>Pack</span></li>
+              <li data-leg="upload"><span>Upload</span></li>
+              <li data-leg="run"><span>Run</span></li>
+              <li data-leg="return"><span>Return</span></li>
+              <svg class="icon jet"><use href="#i-plane"/></svg>
+            </ol>
+            <div class="port to">
+              <span class="label">To</span>
+              <strong id="route-to" class="port-code">MAC</strong>
+              <span id="route-to-name" class="port-name">Choose a Mac</span>
+            </div>
+          </div>
+
+          <div class="cells">
+            <label class="cell folder" for="folder">
+              <span class="label">Project folder</span>
+              <div class="inline">
+                <input id="folder" type="text" placeholder="Choose the folder to send" spellcheck="false">
+                <button id="choose" type="button"><svg class="icon"><use href="#i-folder"/></svg>Choose</button>
+              </div>
+            </label>
+            <label class="cell command" for="command">
+              <span class="label">Command</span>
+              <input id="command" type="text" placeholder="cargo test" spellcheck="false" autocomplete="off">
+            </label>
+          </div>
+
+          <div class="run-foot">
+            <div class="run-notes">
+              <span id="hint" class="hint"></span>
+              <label class="check relay">
+                <input id="relay-only" type="checkbox">
+                <span>Relay only <span class="faint">for testing strict networks</span></span>
+              </label>
+            </div>
+            <button id="cancel" class="danger hidden">Cancel run</button>
+            <button id="run" class="primary run-btn">Run on Mac</button>
           </div>
         </div>
-        <div class="form-row">
-          <label for="command">Command</label>
-          <div class="inline">
-            <input id="command" type="text" class="mono" placeholder="cargo test" spellcheck="false" autocomplete="off">
-            <button id="run" class="primary">Run on Mac</button>
-            <button id="cancel" class="hidden">Cancel</button>
-          </div>
-          <div id="hint" class="hint muted"></div>
-        </div>
-        <label class="check">
-          <input id="relay-only" type="checkbox">
-          <span>Send everything through the relay <span class="faint">(for testing strict networks)</span></span>
-        </label>
       </section>
 
-      <section class="console-wrap">
-        <div class="console-head">
-          <span id="phase" class="muted">Output appears here as the Mac produces it.</span>
+      <section class="log">
+        <div class="log-head">
+          <h2 class="heading">Flight log</h2>
+          <span id="phase" class="phase">Output appears here as the Mac produces it.</span>
           <button id="clear" class="link">Clear</button>
         </div>
-        <pre id="console" class="console selectable" aria-live="polite"></pre>
-        <div id="result" class="result hidden"></div>
+        <div class="log-body">
+          <pre id="console" class="console selectable" aria-live="polite"></pre>
+          <div id="result" class="result hidden"></div>
+        </div>
       </section>
     </main>
   </div>
 
-  <!-- Pairing dialog -->
+  <!-- Pairing: a boarding pass for the PC -->
   <div id="pair-dialog" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="pair-title">
-    <div class="card pad dialog">
-      <h1 id="pair-title">Pair with <span id="pair-mac"></span></h1>
-      <p class="muted">On the Mac, open <strong>Borrowed Compute Agent</strong> and approve the request that shows this code:</p>
-      <div id="pair-code" class="code"></div>
-      <div id="pair-wait" class="row"><span class="spinner"></span><span class="muted">Waiting for approval on the Mac…</span></div>
-      <div id="pair-msg" class="banner hidden"></div>
-      <div class="dialog-actions"><button id="pair-close">Close</button></div>
+    <div class="dialog coupon">
+      <div class="dialog-body">
+        <h1 id="pair-title" class="dialog-title">Pair with <span id="pair-mac"></span></h1>
+        <p class="muted">On the Mac, open <strong>Borrowed Compute Agent</strong> and approve the request that shows this code.</p>
+      </div>
+      <div class="perf"></div>
+      <div class="dialog-stub">
+        <div id="pair-code" class="code big"></div>
+        <div id="pair-wait" class="row"><span class="spinner"></span><span class="muted">Waiting for approval on the Mac…</span></div>
+        <div id="pair-msg" class="banner hidden"></div>
+        <div class="dialog-actions"><button id="pair-close">Close</button></div>
+      </div>
     </div>
   </div>
 
-  <!-- Cloud address dialog -->
+  <!-- Cloud address -->
   <div id="cloud-dialog" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="cloud-title">
-    <div class="card pad dialog">
-      <h1 id="cloud-title">Your Mac's address</h1>
-      <p class="muted">The address Borrowed Compute Agent shows on your Mac under Connect your PC. Changing it signs you out, because a different address is a different account list.</p>
-      <div class="inline">
-        <input id="cloud-input" type="text" class="mono" spellcheck="false" autocomplete="off">
-        <button id="cloud-test">Test</button>
-      </div>
-      <div id="cloud-msg" class="banner hidden"></div>
-      <div class="dialog-actions">
-        <button id="cloud-cancel">Cancel</button>
-        <button id="cloud-save" class="primary">Save</button>
+    <div class="dialog coupon">
+      <div class="dialog-body">
+        <h1 id="cloud-title" class="dialog-title">Your Mac's address</h1>
+        <p class="muted">The address Borrowed Compute Agent shows on your Mac under Route. Changing it signs you out, because a different address is a different account list.</p>
+        <div class="inline">
+          <input id="cloud-input" type="text" spellcheck="false" autocomplete="off">
+          <button id="cloud-test">Test</button>
+        </div>
+        <div id="cloud-msg" class="banner hidden"></div>
+        <div class="dialog-actions">
+          <button id="cloud-cancel">Cancel</button>
+          <button id="cloud-save" class="primary">Save</button>
+        </div>
       </div>
     </div>
   </div>
 
-  <!-- Updates dialog -->
+  <!-- Updates -->
   <div id="update-dialog" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="update-title">
-    <div class="card pad dialog">
-      <h1 id="update-title">Updates</h1>
-      <p id="update-version" class="muted"></p>
-      <div id="update-msg" class="banner hidden"></div>
-      <div class="dialog-actions">
-        <button id="update-close">Close</button>
-        <button id="update-check">Check for updates</button>
-        <button id="update-install" class="primary hidden">Install and restart</button>
+    <div class="dialog coupon">
+      <div class="dialog-body">
+        <h1 id="update-title" class="dialog-title">Updates</h1>
+        <p id="update-version" class="muted"></p>
+        <div id="update-msg" class="banner hidden"></div>
+        <div class="dialog-actions">
+          <button id="update-close">Close</button>
+          <button id="update-check">Check for updates</button>
+          <button id="update-install" class="primary hidden">Install and restart</button>
+        </div>
       </div>
     </div>
   </div>
