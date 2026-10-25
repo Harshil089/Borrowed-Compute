@@ -11,8 +11,11 @@ Product and design docs live outside this repo, in the parent folder `../`: `Bor
 | `crates/bc-proto` | `bc.toml` spec (`spec.rs`), device-to-device CBOR frames (`wire.rs`), cloud JSON bodies (`cloud.rs`). No networking. |
 | `crates/bc-net` | iroh endpoint setup, device key files, `send_msg`/`recv_msg` over QUIC streams |
 | `crates/bc-auth` | HTTP client for `bc-cloud`, session file storage |
-| `apps/bc-agent` | Mac agent: `runner.rs` (workspace, process, output), `server.rs` (per-connection protocol), `paired.rs` (allowlist), `cloud_sync.rs` (heartbeat + paired list) |
-| `apps/bc-cli` | `bc` binary: `pack.rs` (tar of project), `run.rs` (client side of a job), `main.rs` (commands) |
+| `apps/bc-agent` | Mac agent: `runner.rs` (workspace, process, output), `server.rs` (per-connection protocol), `paired.rs` (allowlist), `cloud_sync.rs` (heartbeat + paired list), `service.rs` (the running agent, shared by `bc-agent serve` and the menu-bar app), `events.rs` (job and sync events for a UI) |
+| `apps/bc-cli` | `bc` binary: `pack.rs` (tar of project), `run.rs` (client side of a job), `flows.rs` (steps shared with the desktop app: resolve Mac, load spec, split command, wait for pairing), `main.rs` (commands) |
+| `apps/bc-desktop` | Tauri 2 client app ("Borrowed Compute"): `src/main.rs` commands, `ui/` plain HTML/CSS/JS. Shares the CLI's home dir, so it is the same device as `bc`. |
+| `apps/bc-desktop-agent` | Tauri 2 menu-bar app on the Mac ("Borrowed Compute Agent"): runs `bc_agent::service::Agent`, pairing approval, recent jobs |
+| `design/` | Icon sources (SVG). Regenerate with `npx @tauri-apps/cli@2.12.4 icon design/icon-client.svg -o apps/bc-desktop/icons` |
 | `apps/bc-cloud` | axum + Postgres: GitHub device-flow sign-in, devices, pairings, presence. Migrations in `migrations/` |
 
 ## Commands
@@ -30,6 +33,8 @@ BC_TEST_DATABASE_URL=postgres://bc@127.0.0.1:54329/postgres cargo test --workspa
 
 Throwaway local Postgres (Homebrew): `initdb -D <dir> -U bc --auth=trust`, then start with `LC_ALL=en_US.UTF-8 pg_ctl -D <dir> -o "-p 54329 -k /tmp/bcpg -h 127.0.0.1" start`. Postgres refuses to start without `LC_ALL`, and Unix socket paths over 103 bytes fail, hence `-k /tmp/bcpg`.
 
+Desktop apps: `cargo run -p bc-desktop` or `cargo run -p bc-desktop-agent` for development (the UI is static files in `ui/`, no bundler). Bundles: `npx @tauri-apps/cli@2.12.4 build` inside the app's folder (`--debug --bundles app` for a quick macOS `.app`). The UI is embedded at compile time, so rebuild after editing `ui/`. For a `.dmg`, run with `CI=true` so the bundler skips its Finder AppleScript styling, which times out without automation permission. Release builds rely on `[profile.release.build-override] strip = false` in `Cargo.toml`; without it, macOS 27 fails every release build with "mis-aligned LINKEDIT string pool".
+
 Run the cloud: `BC_DATABASE_URL=... BC_GITHUB_CLIENT_ID=... cargo run -p bc-cloud` (listens on `127.0.0.1:8080`). Devices use `BC_CLOUD_URL`; `BC_HOME` relocates keys, sessions and the timing log.
 
 ## Rules
@@ -45,7 +50,9 @@ Run the cloud: `BC_DATABASE_URL=... BC_GITHUB_CLIENT_ID=... cargo run -p bc-clou
 - **The agent checks the paired list on every connection.** It must never run a job from an unpaired device.
 - **Packing fixes Windows files** (`apps/bc-cli/src/pack.rs`): executable bit from file system, git index (`100755`) or shebang for untracked files; CRLF to LF only in scripts. Do not normalize other text files.
 - **Tests that need `sh` or the Mac agent are `cfg(unix)`**, so `cargo test --workspace` still runs on Windows CI.
-- **Workspaces are deleted after every job**, and the job's process group is killed on exit and timeout. Keep both guarantees.
+- **Workspaces are deleted after every job**, and the job's process group is killed on exit, timeout and cancel (`GroupGuard` in `runner.rs`). Keep both guarantees.
+- **Desktop apps call the libraries, never the CLI binaries.** New client or agent behavior goes in `bc_cli::flows` or `bc_agent::service` first, then both the CLI and the app use it.
+- **Keep `ui/base.css` identical** in both desktop apps. Text colors must pass WCAG AA (4.5:1) in light and dark mode.
 - Cloud SQL uses runtime `sqlx::query`/`query_as`, not compile-time macros, so builds need no database.
 - Write code comments and docs in plain prose: why, not what.
 
@@ -56,4 +63,5 @@ Run the cloud: `BC_DATABASE_URL=... BC_GITHUB_CLIENT_ID=... cargo run -p bc-clou
 - The whole project is uploaded per run (up to 2 GiB). Content-addressed chunked sync is Phase two (Q2).
 - Keys and session tokens are owner-only files, not yet in the OS keychain.
 - Without sign-in, discovery uses iroh's public relays (dev only). Our own `iroh-relay` deployment is not written.
-- On cancel, background processes started by a job may survive.
+- The desktop apps are verified on macOS only. CI builds the Windows installers, but nobody has run them on a Windows PC yet.
+- The Mac agent app is not signed or notarized, and does not start at login yet.

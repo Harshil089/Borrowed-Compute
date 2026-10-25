@@ -25,6 +25,10 @@ struct Setup {
 }
 
 async fn setup() -> Setup {
+    setup_with(None).await
+}
+
+async fn setup_with(events: Option<bc_agent::events::EventSender>) -> Setup {
     let (relay_map, _url, relay) = iroh::test_utils::run_relay_server().await.unwrap();
     let config = NetConfig {
         relays: Some(relay_map),
@@ -40,13 +44,15 @@ async fn setup() -> Setup {
     let state = tempfile::tempdir().unwrap();
     let paired = PairedDevices::new(state.path().join("paired"));
     let work_root = tempfile::tempdir().unwrap();
-    let agent_config = AgentConfig {
-        runner: RunnerConfig {
+    let agent_config = AgentConfig::new(
+        RunnerConfig {
             work_root: work_root.path().to_path_buf(),
             default_timeout: Duration::from_secs(30),
         },
-        paired: paired.clone(),
-    };
+        paired.clone(),
+    );
+    let mut agent_config = agent_config;
+    agent_config.events = events;
     let accept = agent.clone();
     tokio::spawn(async move {
         while let Some(incoming) = accept.accept().await {
@@ -121,4 +127,36 @@ async fn unpaired_device_is_rejected() {
     let (exit, out, _, _) = run(&s, &["sh", "-c", "echo should-not-run"]).await;
     assert!(matches!(exit, Exit::Rejected(ref r) if r.contains("not paired")), "{exit:?}");
     assert!(out.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn agent_reports_job_events() {
+    use bc_agent::events::{AgentEvent, JobEnd};
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let s = setup_with(Some(tx)).await;
+
+    let (exit, ..) = run(&s, &["sh", "-c", "echo nope"]).await;
+    assert!(matches!(exit, Exit::Rejected(_)));
+    let client = s.client.id().to_string();
+    match rx.recv().await.unwrap() {
+        AgentEvent::JobRejected { client: c, .. } => assert_eq!(c, client),
+        other => panic!("expected JobRejected, got {other:?}"),
+    }
+
+    s.paired.add(s.client.id()).unwrap();
+    let (exit, ..) = run(&s, &["sh", "-c", "exit 4"]).await;
+    assert_eq!(exit, Exit::Code(4));
+    let AgentEvent::JobStarted { job_id, client: c, argv } = rx.recv().await.unwrap() else {
+        panic!("expected JobStarted");
+    };
+    assert_eq!(c, client);
+    assert_eq!(argv, ["sh", "-c", "exit 4"]);
+    // The finish event is sent when the connection handler returns, just after the client
+    // sees the exit code.
+    let finished = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap().unwrap();
+    assert_eq!(
+        finished,
+        AgentEvent::JobFinished { job_id, end: JobEnd::Exited { code: Some(4), timed_out: false } }
+    );
 }

@@ -1,0 +1,22 @@
+[package]
+name = "bc-desktop-agent"
+description = "Borrowed Compute Agent: the Mac menu-bar app that runs jobs from paired devices."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dependencies]
+bc-agent.workspace = true
+bc-auth.workspace = true
+bc-net.workspace = true
+bc-proto.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tauri = { workspace = true, features = ["tray-icon", "image-png"] }
+tauri-plugin-opener.workspace = true
+tokio = { workspace = true, features = ["sync", "macros", "time"] }

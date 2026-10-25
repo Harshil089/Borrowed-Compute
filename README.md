@@ -15,6 +15,9 @@ See `../Borrowed Compute Foundation.md` for decisions, scope and the first miles
 | `apps/bc-cli` | `bc` command: sign-in, pairing, packing the project, running jobs |
 | `apps/bc-cloud` | Cloud API: GitHub sign-in, device registry, pairing, presence (axum + Postgres) |
 
+| `apps/bc-desktop` | Desktop app "Borrowed Compute" for the PC (Tauri 2) |
+| `apps/bc-desktop-agent` | Menu-bar app "Borrowed Compute Agent" for the Mac (Tauri 2) |
+
 Not built yet: `bc-sync` (chunked sync), the `_bcjob` user and Seatbelt sandbox, our own relay deployment.
 
 ## Build and test
@@ -44,6 +47,25 @@ BC_DATABASE_URL=postgres://bc@127.0.0.1:54329/bc_cloud BC_GITHUB_CLIENT_ID=<clie
 ```
 
 It listens on `127.0.0.1:8080` (`BC_LISTEN` to change). Devices find it through `BC_CLOUD_URL`, which defaults to `http://127.0.0.1:8080`.
+
+## Desktop apps
+
+- **Borrowed Compute** (`apps/bc-desktop`, for the PC): sign in with GitHub, see your Macs and whether they are online, pair with a code, choose a project folder, type a command and run it with live output, cancel and timings. If the folder has a `bc.toml`, its command is used unless you type another.
+- **Borrowed Compute Agent** (`apps/bc-desktop-agent`, for the Mac): lives in the menu bar, runs the agent, signs in, shows pairing requests with the code to compare and an Approve button, paired devices with Remove, and recent jobs. Closing the window keeps it running; Quit in the menu-bar menu stops it.
+
+The apps share keys and sessions with `bc` and `bc-agent`, so signing in once covers both.
+
+Build installers with the Tauri CLI (needs Node):
+
+```bash
+cd apps/bc-desktop && npx @tauri-apps/cli@2.12.4 build
+```
+
+```bash
+cd apps/bc-desktop-agent && npx @tauri-apps/cli@2.12.4 build
+```
+
+The Windows installers (`.exe` and `.msi`) come from the `windows` workflow as the `borrowed-compute-windows-installers` artifact.
 
 ## Use it
 
@@ -99,5 +121,5 @@ Windows does not record Unix permissions and often checks files out with CRLF li
 - The whole project is uploaded on every run (up to 2 GiB). Chunked sync comes in Phase two.
 - Jobs run as the agent's own user, with no sandbox. Use only with your own devices.
 - Session tokens and device keys are files readable only by their owner, not yet in the OS keychain.
-- If a job is cancelled, its own process is killed, but background processes it started may survive. On normal exit and on timeout the whole process group is killed.
+- The desktop apps are tested on macOS only. The Windows installers are built in CI but not yet run on a Windows PC. The Mac app is not signed or notarized.
 - Without signing in, devices are found through iroh's public relays and address lookup, which is for development only.

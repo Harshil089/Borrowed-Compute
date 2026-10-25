@@ -1,9 +1,8 @@
 use anyhow::{bail, Context, Result};
 use bc_agent::paired::PairedDevices;
-use bc_agent::runner::RunnerConfig;
-use bc_agent::server::{serve_connection, AgentConfig};
+use bc_agent::service::{Agent, AgentPaths};
 use bc_auth::{cloud_url, default_device_name, save_session, CloudClient};
-use bc_net::{bind, home_dir, load_or_create_key, EndpointId, NetConfig};
+use bc_net::{home_dir, load_or_create_key, EndpointId};
 use bc_proto::cloud::{DeviceKind, PairingStatus};
 use clap::{Parser, Subcommand};
 
@@ -136,26 +135,15 @@ async fn main() -> Result<()> {
             }
         }
         Command::Serve { relay_only } => {
-            let key = load_or_create_key(&key_path)?;
-            let endpoint = bind(key, NetConfig { relay_only, ..Default::default() }).await?;
-            endpoint.online().await;
-            eprintln!("bc-agent ready, device id {}", endpoint.id());
+            let agent = Agent::start(&AgentPaths::new(home.clone()), relay_only, None).await?;
+            eprintln!("bc-agent ready, device id {}", agent.endpoint.id());
             if cloud.token().is_some() {
                 eprintln!("signed in: syncing presence and pairings with {}", cloud_url());
-                tokio::spawn(bc_agent::cloud_sync::run(cloud, endpoint.clone(), paired.clone()));
+                agent.spawn_cloud_sync(cloud);
             } else {
                 eprintln!("not signed in: using the local paired list only");
             }
-            let config = AgentConfig { runner: RunnerConfig::default(), paired };
-            while let Some(incoming) = endpoint.accept().await {
-                let config = config.clone();
-                tokio::spawn(async move {
-                    let result = async { serve_connection(&config, incoming.await?).await }.await;
-                    if let Err(e) = result {
-                        eprintln!("job connection ended: {e:#}");
-                    }
-                });
-            }
+            agent.accept_loop().await;
         }
     }
     Ok(())

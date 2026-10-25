@@ -133,6 +133,7 @@ async fn execute(
         .spawn()
         .with_context(|| format!("starting {program:?}"))?;
     let pid = child.id();
+    let group = GroupGuard(pid);
     let _ = tx.send(AgentMsg::Started).await;
 
     let seq = Arc::new(AtomicU64::new(0));
@@ -161,7 +162,7 @@ async fn execute(
         }
     };
     // Background processes left by the job would keep its output pipes open.
-    kill_group(pid);
+    drop(group);
     let _ = stdout.await;
     let _ = stderr.await;
 
@@ -192,6 +193,17 @@ async fn pump(
                 }
             }
         }
+    }
+}
+
+/// Kills the job's process group when dropped: at the normal end of a job, and also when
+/// the job is abandoned mid-run (cancelled, or the client went away), so processes it
+/// started never outlive it.
+struct GroupGuard(Option<u32>);
+
+impl Drop for GroupGuard {
+    fn drop(&mut self) {
+        kill_group(self.0.take());
     }
 }
 
@@ -303,6 +315,35 @@ mod tests {
             })
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn abandoned_job_kills_its_process_group() {
+        let root = tempfile::tempdir().unwrap();
+        let config = RunnerConfig {
+            work_root: root.path().to_path_buf(),
+            default_timeout: Duration::from_secs(30),
+        };
+        let req = request(&["sh", "-c", "sleep 4711 & sleep 4712"], None);
+        let (tx, mut rx) = mpsc::channel(64);
+        let job = tokio::spawn(async move { run_job(&config, &req, archive(&[]), tx).await });
+        assert_eq!(rx.recv().await, Some(AgentMsg::Started));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // What the server does when the client cancels or disconnects.
+        job.abort();
+        let _ = job.await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let left = std::process::Command::new("pgrep")
+            .args(["-f", "sleep 471[12]"])
+            .output()
+            .unwrap();
+        assert!(
+            left.stdout.is_empty(),
+            "processes outlived the job: {}",
+            String::from_utf8_lossy(&left.stdout)
+        );
     }
 
     #[tokio::test]

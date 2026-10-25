@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Borrowed Compute Agent</title>
+  <link rel="stylesheet" href="base.css">
+  <link rel="stylesheet" href="agent.css">
+</head>
+<body>
+  <header class="top">
+    <div class="title">
+      <h1>Borrowed Compute Agent</h1>
+      <span id="account" class="muted"></span>
+    </div>
+    <span id="status" class="pill"><span class="dot"></span><span>Starting</span></span>
+  </header>
+
+  <main>
+    <div id="error" class="banner bad hidden"></div>
+
+    <section id="signin" class="card pad hidden">
+      <h1>Let devices run jobs on this Mac</h1>
+      <p class="muted">Sign in with the GitHub account you use on your other devices. Only devices on that account can ask to pair.</p>
+      <label class="field">
+        <span>Name for this Mac</span>
+        <input id="mac-name" type="text" placeholder="studio" maxlength="64" autocomplete="off" spellcheck="false">
+      </label>
+      <button id="signin-btn" class="primary wide">Sign in with GitHub</button>
+      <div id="signin-code" class="codebox hidden">
+        <p class="muted">Enter this code on the GitHub page that just opened:</p>
+        <div id="user-code" class="code"></div>
+        <div class="row">
+          <span class="spinner"></span><span class="muted">Waiting for GitHub…</span>
+          <button id="reopen" class="link">Open the page again</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="home" class="hidden">
+      <div class="section-head"><h2>Pairing requests</h2></div>
+      <div id="requests" class="list card"></div>
+
+      <div class="section-head"><h2>Paired devices</h2></div>
+      <div id="paired" class="list card"></div>
+
+      <div class="section-head"><h2>Recent jobs</h2></div>
+      <div id="jobs" class="list card"></div>
+    </section>
+  </main>
+
+  <footer id="footer" class="hidden">
+    <span class="muted mono selectable" id="device-id" title="This Mac's device id"></span>
+    <button id="signout" class="link">Sign out</button>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

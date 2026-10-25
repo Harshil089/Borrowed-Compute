@@ -1,14 +1,17 @@
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use bc_auth::{cloud_url, default_device_name, save_session, CloudClient};
+use bc_cli::flows::{
+    append_timing, client_home, default_mac, key_path, load_spec, resolve_mac, set_default_mac,
+    wait_for_pairing,
+};
 use bc_cli::pack::pack;
 use bc_cli::run::{run_remote, Exit};
-use bc_net::{bind, home_dir, load_or_create_key, EndpointAddr, EndpointId, NetConfig};
+use bc_net::{bind, load_or_create_key, NetConfig};
 use bc_proto::cloud::{DeviceKind, PairingStatus};
-use bc_proto::JobSpec;
 use clap::{Parser, Subcommand};
 
 /// Run code jobs on a paired Mac.
@@ -60,8 +63,8 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let home = home_dir()?.join("cli");
-    let key_path = home.join("device.key");
+    let home = client_home()?;
+    let key_path = key_path(&home);
     let mut cloud = CloudClient::from_home(cloud_url(), &home);
 
     match cli.command {
@@ -112,44 +115,37 @@ async fn main() -> Result<()> {
             );
             print!("Waiting for approval");
             std::io::stdout().flush()?;
-            let deadline = Duration::from_secs(request.expires_in_secs.unwrap_or(600).max(0) as u64);
-            let started = std::time::Instant::now();
-            loop {
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                let now = cloud.pairings(&me).await?;
-                match now.iter().find(|p| p.id == request.id).map(|p| p.status) {
-                    Some(PairingStatus::Approved) => {
-                        println!("\nPaired with {:?}.", request.mac_name);
-                        break;
-                    }
-                    Some(PairingStatus::Pending) if started.elapsed() < deadline => {
-                        print!(".");
-                        std::io::stdout().flush()?;
-                    }
-                    _ => bail!("\nthe pairing code expired; run `bc pair {mac}` again"),
-                }
+            let expires = Duration::from_secs(request.expires_in_secs.unwrap_or(600).max(0) as u64);
+            let approved = wait_for_pairing(cloud, &me, request.id, expires, || {
+                print!(".");
+                let _ = std::io::stdout().flush();
+            })
+            .await?;
+            if !approved {
+                bail!("\nthe pairing code expired; run `bc pair {mac}` again");
             }
+            println!("\nPaired with {:?}.", request.mac_name);
         }
         Command::Id => {
             let key = load_or_create_key(&key_path)?;
             println!("{}", key.public());
         }
         Command::Use { mac } => {
-            std::fs::create_dir_all(&home)?;
-            std::fs::write(home.join("default-mac"), format!("{mac}\n"))?;
+            set_default_mac(&home, &mac)?;
             println!("bc run will use {mac}");
         }
         Command::Run { to, spec, relay_only, timings, argv } => {
             let target = match to {
                 Some(mac) => mac,
-                None => std::fs::read_to_string(home.join("default-mac"))
-                    .context("no Mac chosen; pass --to <name> or run `bc use <name>`")?
-                    .trim()
-                    .to_string(),
+                None => default_mac(&home)
+                    .context("no Mac chosen; pass --to <name> or run `bc use <name>`")?,
             };
             let mac = resolve_mac(&cloud, &target).await?;
-            let spec = load_spec(spec, argv)?;
+            if let Some(warning) = &mac.offline_warning {
+                eprintln!("bc: warning: {warning}");
+            }
             let root = std::env::current_dir()?;
+            let spec = load_spec(&root, spec, argv)?;
             let archive = pack(&root, &spec.files.exclude)?;
 
             let key = load_or_create_key(&key_path)?;
@@ -159,7 +155,7 @@ async fn main() -> Result<()> {
             };
             let outcome = run_remote(
                 &endpoint,
-                mac,
+                mac.addr,
                 &spec,
                 archive,
                 &mut std::io::stdout(),
@@ -196,70 +192,11 @@ fn signed_in(cloud: &CloudClient) -> Result<&CloudClient> {
     Ok(cloud)
 }
 
-/// Finds the Mac's address through the cloud when signed in, else treats `target` as a
-/// device id and relies on public address lookup (development only).
-async fn resolve_mac(cloud: &CloudClient, target: &str) -> Result<EndpointAddr> {
-    let raw_id = target.parse::<EndpointId>().ok();
-    if cloud.token().is_some() {
-        match cloud.find_device(target).await {
-            Ok(device) => {
-                let id: EndpointId = device.endpoint_id.parse()?;
-                if !device.online {
-                    eprintln!("bc: warning: {:?} has not checked in recently; it may be offline", device.name);
-                }
-                // Trust the cloud's address only for the key it claims to belong to.
-                let addr = device
-                    .addr
-                    .and_then(|a| serde_json::from_value::<EndpointAddr>(a).ok())
-                    .filter(|a| a.id == id);
-                return Ok(addr.unwrap_or_else(|| id.into()));
-            }
-            Err(e) if raw_id.is_none() => return Err(e),
-            Err(_) => {}
-        }
-    }
-    raw_id
-        .map(Into::into)
-        .with_context(|| format!("{target:?} is not a device id; run `bc login` to use device names"))
-}
-
 fn ago(secs: i64) -> String {
     match secs {
         s if s < 120 => format!("{s}s ago"),
         s if s < 7200 => format!("{}m ago", s / 60),
         s if s < 172_800 => format!("{}h ago", s / 3600),
         s => format!("{}d ago", s / 86_400),
-    }
-}
-
-fn load_spec(path: Option<PathBuf>, argv: Vec<String>) -> Result<JobSpec> {
-    let default = PathBuf::from("bc.toml");
-    let path = path.or_else(|| default.exists().then_some(default));
-    let mut spec = match path {
-        Some(path) => {
-            let text = std::fs::read_to_string(&path)
-                .with_context(|| format!("reading {}", path.display()))?;
-            JobSpec::from_toml(&text)?
-        }
-        None if argv.is_empty() => bail!("nothing to run; pass a command after `--` or add bc.toml"),
-        None => return Ok(JobSpec::from_argv(argv)?),
-    };
-    if !argv.is_empty() {
-        spec.job.argv = argv;
-        spec.validate()?;
-    }
-    Ok(spec)
-}
-
-/// The timing log feeds the milestone's latency numbers. A failure to write it never
-/// fails the job.
-fn append_timing(home: &Path, line: &str) {
-    let _ = std::fs::create_dir_all(home);
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(home.join("timings.jsonl"))
-    {
-        let _ = writeln!(f, "{line}");
     }
 }
