@@ -57,9 +57,19 @@ pub async fn connect(database_url: &str) -> anyhow::Result<AnyPool> {
 }
 
 /// A `sqlite://` URL for a database file, created if missing.
+///
+/// The `Any` driver parses the URL as a standard URL before SQLite sees it, which would
+/// read the `C:` of a Windows path as a host and port. Percent-encoding every character
+/// except unreserved ones makes the whole path pass through unchanged; sqlx decodes it
+/// back to the original path.
 pub fn sqlite_url(path: &std::path::Path) -> String {
-    // sqlx percent-decodes the path, so encode what a URL cannot carry as-is.
-    let encoded = path.to_string_lossy().replace('%', "%25").replace(' ', "%20").replace('?', "%3F");
+    const KEEP: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+        .remove(b'-')
+        .remove(b'.')
+        .remove(b'_')
+        .remove(b'~');
+    let path = path.to_string_lossy();
+    let encoded = percent_encoding::utf8_percent_encode(&path, KEEP);
     format!("sqlite://{encoded}?mode=rwc")
 }
 
@@ -93,4 +103,31 @@ pub fn app(state: AppState) -> Router {
 /// Serves the API on `listener` until the task is dropped.
 pub async fn serve(listener: tokio::net::TcpListener, state: AppState) -> std::io::Result<()> {
     axum::serve(listener, app(state)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::str::FromStr;
+
+    use sqlx::sqlite::SqliteConnectOptions;
+
+    /// What the `Any` driver does: parse as a URL, then hand its text to SQLite.
+    fn filename_after_any(url: &str) -> std::path::PathBuf {
+        let parsed = url::Url::parse(url).unwrap();
+        SqliteConnectOptions::from_str(parsed.as_str()).unwrap().get_filename().to_path_buf()
+    }
+
+    #[test]
+    fn sqlite_url_keeps_windows_and_unix_paths() {
+        for path in [
+            r"C:\Users\me\AppData\Roaming\BorrowedCompute\cloud\cloud.db",
+            r"C:\Users\me\Local Temp\.tmpAb12\cloud test.db",
+            "/Users/me/Library/Application Support/BorrowedCompute/cloud/cloud.db",
+            "/tmp/odd?name#100%.db",
+        ] {
+            let url = super::sqlite_url(Path::new(path));
+            assert_eq!(filename_after_any(&url), Path::new(path), "{url}");
+        }
+    }
 }
