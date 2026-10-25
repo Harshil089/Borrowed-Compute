@@ -4,12 +4,18 @@ use std::io::Write;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use bc_net::{recv_msg, send_msg, EndpointAddr, JOB_ALPN};
+use bc_net::{bind, recv_msg, send_msg, EndpointAddr, NetConfig, JOB_ALPN};
 use bc_proto::wire::{AgentMsg, ClientMsg, JobRequest, JobUsage, OutputStream, PROTOCOL_VERSION};
 use bc_proto::JobSpec;
-use iroh::Endpoint;
+use iroh::{Endpoint, SecretKey};
 
 const UPLOAD_CHUNK: usize = 1 << 20;
+
+/// How long the Mac has to answer before a direct attempt counts as stuck.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+/// An upload chunk that makes no progress for this long means the path is dead, even
+/// though QUIC itself would wait longer before timing out.
+const UPLOAD_STALL: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Exit {
@@ -96,6 +102,63 @@ pub async fn run_remote(
     stderr: &mut impl Write,
     cancel: impl std::future::Future<Output = ()>,
 ) -> Result<RunOutcome> {
+    let mut started = false;
+    run_attempt(endpoint, mac, spec, archive, stdout, stderr, cancel, &mut started).await
+}
+
+/// Runs the job, trying a direct path first. Some networks (a VPN on the Mac, for one)
+/// let a direct connection open and then drop it mid-upload; when that happens before
+/// the job starts on the Mac, the run is retried once through the relay, which works
+/// wherever HTTPS does. `notice` explains the retry to the person watching.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_on_mac(
+    key: &SecretKey,
+    net: NetConfig,
+    mac: EndpointAddr,
+    spec: &JobSpec,
+    archive: Vec<u8>,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+    cancel: impl std::future::Future<Output = ()>,
+    notice: impl Fn(&str),
+) -> Result<RunOutcome> {
+    tokio::pin!(cancel);
+    let relay_only = net.relay_only;
+    let endpoint = bind(key.clone(), net.clone()).await?;
+    let mut started = false;
+    let first = run_attempt(
+        &endpoint, mac.clone(), spec, archive.clone(), stdout, stderr, cancel.as_mut(), &mut started,
+    )
+    .await;
+    endpoint.close().await;
+    let error = match first {
+        Ok(outcome) => return Ok(outcome),
+        Err(e) if relay_only || started => return Err(e),
+        Err(e) => e,
+    };
+
+    notice(&format!("Direct connection failed ({error:#}). Retrying through the relay…"));
+    let endpoint = bind(key.clone(), NetConfig { relay_only: true, ..net }).await?;
+    let mut started = false;
+    let second =
+        run_attempt(&endpoint, mac, spec, archive, stdout, stderr, cancel.as_mut(), &mut started).await;
+    endpoint.close().await;
+    second
+}
+
+/// One attempt over `endpoint`. Sets `started` once the job is running on the Mac, after
+/// which a retry would run it twice.
+#[allow(clippy::too_many_arguments)]
+async fn run_attempt(
+    endpoint: &Endpoint,
+    mac: EndpointAddr,
+    spec: &JobSpec,
+    archive: Vec<u8>,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+    cancel: impl std::future::Future<Output = ()>,
+    started: &mut bool,
+) -> Result<RunOutcome> {
     let t0 = Instant::now();
     let job_id = new_job_id();
     let mut timings = Timings {
@@ -103,9 +166,9 @@ pub async fn run_remote(
         ..Default::default()
     };
 
-    let conn = endpoint
-        .connect(mac, JOB_ALPN)
+    let conn = tokio::time::timeout(CONNECT_TIMEOUT, endpoint.connect(mac, JOB_ALPN))
         .await
+        .map_err(|_| anyhow::anyhow!("the Mac did not answer within {}s", CONNECT_TIMEOUT.as_secs()))?
         .context("connecting to the Mac")?;
     let (mut send, mut recv) = conn.open_bi().await?;
     send_msg(&mut send, &ClientMsg::Hello { protocol: PROTOCOL_VERSION }).await?;
@@ -124,7 +187,9 @@ pub async fn run_remote(
         other => bail!("unexpected reply to Submit {other:?}"),
     }
     for chunk in archive.chunks(UPLOAD_CHUNK) {
-        send_msg(&mut send, &ClientMsg::Upload { data: chunk.to_vec() }).await?;
+        tokio::time::timeout(UPLOAD_STALL, send_msg(&mut send, &ClientMsg::Upload { data: chunk.to_vec() }))
+            .await
+            .map_err(|_| anyhow::anyhow!("upload stalled for {}s", UPLOAD_STALL.as_secs()))??;
     }
     send_msg(&mut send, &ClientMsg::UploadDone).await?;
     timings.upload = t0.elapsed();
@@ -140,7 +205,10 @@ pub async fn run_remote(
             }
         };
         match msg {
-            AgentMsg::Started => timings.start = Some(t0.elapsed()),
+            AgentMsg::Started => {
+                *started = true;
+                timings.start = Some(t0.elapsed());
+            }
             AgentMsg::Output { stream, data, .. } => {
                 timings.first_log.get_or_insert_with(|| t0.elapsed());
                 let out: &mut dyn Write = match stream {
