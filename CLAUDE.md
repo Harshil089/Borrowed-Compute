@@ -74,4 +74,4 @@ Every merge to `main` runs `.github/workflows/release.yml`: it builds the Mac ag
 - Discovery and relays use iroh's public relays (dev only). Our own `iroh-relay` deployment is not written.
 - The Mac app's built-in cloud is reachable from other devices only through Tailscale. Tested on one Mac (share, HTTPS address, sign-in and a job through it); not yet from a second device.
 - The desktop apps are verified on macOS only. CI builds the Windows installers, but nobody has run them on a Windows PC yet.
-- The Mac agent app is not signed or notarized, and does not start at login yet.
+- The Mac agent app is ad-hoc signed (`bundle.macOS.signingIdentity: "-"`), not Developer ID signed or notarized, so a downloaded copy needs System Settings › Privacy & Security › Open Anyway once. Without the bundle signature macOS calls the download "damaged". It does not start at login yet. Updates installed by the app are not quarantined, so they open directly.
