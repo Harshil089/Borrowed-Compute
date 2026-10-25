@@ -1,7 +1,7 @@
 /* Shared by both desktop apps; keep the two copies identical.
    The world is a jet-age ticket wallet: carrier navy, coupon white, jet red for the one
-   action that matters, carbon purple for every measured figure. Dark mode is a night
-   flight: navy paper, white ink. */
+   action that matters, carbon purple for every measured figure. Dark mode is black
+   paper with white ink. */
 
 @font-face { font-family: "Barlow"; src: url("fonts/barlow-400.woff2") format("woff2"); font-weight: 400; font-display: block; }
 @font-face { font-family: "Barlow"; src: url("fonts/barlow-500.woff2") format("woff2"); font-weight: 500; font-display: block; }
@@ -46,33 +46,62 @@
   --radius: 5px;
 }
 
+/* Dark is black, not navy: neutral grounds, the same red, carbon and status colors.
+   The Appearance setting picks it (data-theme="dark"), or System follows the Mac. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --stock: #0b0b0c;
+  --paper: #161618;
+  --paper-2: #111113;
+  --bar: #000000;
+  --bar-ink: #ffffff;
+  --bar-ink-2: #a8a8ad;
+  --ink: #f3f3f4;
+  --ink-2: #b8b8bd;
+  --ink-3: #929298;
+  --rule: #4a4a50;
+  --rule-2: #2a2a2e;
+  --red: #d7262d;
+  --red-ink: #ff6b70;
+  --red-press: #b81d23;
+  --carbon: #c4b1f5;
+  --copy: #1e1a28;
+  --copy-rule: #5a4f78;
+  --ok: #5fd39a;
+  --ok-tint: #0e2318;
+  --warn: #f2bd57;
+  --warn-tint: #2a2110;
+  --bad: #ff6b70;
+  --bad-tint: #2d1316;
+  --shadow: 0 1px 1px rgba(0, 0, 0, 0.5), 0 6px 10px -8px rgba(0, 0, 0, 0.9);
+}
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root[data-theme="system"] {
     color-scheme: dark;
-    --stock: #08102a;
-    --paper: #101b3f;
-    --paper-2: #0c1636;
-    --bar: #040a1e;
+    --stock: #0b0b0c;
+    --paper: #161618;
+    --paper-2: #111113;
+    --bar: #000000;
     --bar-ink: #ffffff;
-    --bar-ink-2: #a3aecb;
-    --ink: #f1f2f6;
-    --ink-2: #b4bdd5;
-    --ink-3: #95a0bf;
-    --rule: #4d5f96;
-    --rule-2: #26346a;
+    --bar-ink-2: #a8a8ad;
+    --ink: #f3f3f4;
+    --ink-2: #b8b8bd;
+    --ink-3: #929298;
+    --rule: #4a4a50;
+    --rule-2: #2a2a2e;
     --red: #d7262d;
     --red-ink: #ff6b70;
     --red-press: #b81d23;
     --carbon: #c4b1f5;
-    --copy: #241a4d;
-    --copy-rule: #6d58b0;
+    --copy: #1e1a28;
+    --copy-rule: #5a4f78;
     --ok: #5fd39a;
-    --ok-tint: #0f2e2a;
+    --ok-tint: #0e2318;
     --warn: #f2bd57;
-    --warn-tint: #2e2510;
+    --warn-tint: #2a2110;
     --bad: #ff6b70;
-    --bad-tint: #3a1424;
-    --shadow: 0 1px 1px rgba(0, 0, 0, 0.35), 0 6px 10px -8px rgba(0, 0, 0, 0.8);
+    --bad-tint: #2d1316;
+    --shadow: 0 1px 1px rgba(0, 0, 0, 0.5), 0 6px 10px -8px rgba(0, 0, 0, 0.9);
   }
 }
 
@@ -303,6 +332,15 @@ input[type="text"]:focus { outline: none; border-color: var(--carbon); box-shado
 @keyframes fade { from { opacity: 0; } }
 
 /* ---- Brand ---- */
+/* Appearance: three printed segments, the chosen one filled. */
+.segmented { display: inline-flex; border: 1.5px solid var(--rule); border-radius: 3px; overflow: hidden; }
+.segmented button {
+  border: none; border-radius: 0; padding: 6px 11px 5px; font-size: 11.5px; background: transparent; color: var(--ink-2);
+}
+.segmented button + button { border-left: 1.5px solid var(--rule); }
+.segmented button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+.segmented button:hover:not([aria-pressed="true"]) { background: var(--paper-2); color: var(--ink); }
+
 .brand { display: flex; align-items: center; gap: 10px; color: var(--bar-ink); }
 .brand svg { width: 30px; height: 30px; flex: none; }
 .wordmark { font: 700 19px/1 var(--cond); letter-spacing: 0.1em; text-transform: uppercase; }
