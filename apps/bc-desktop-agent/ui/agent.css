@@ -45,6 +45,41 @@ main { flex: 1; min-width: 0; padding: 18px 18px 28px; display: flex; flex-direc
 .block-head .link { display: inline-flex; align-items: center; }
 .block-head .link .icon { width: 13px; height: 13px; margin-right: 5px; }
 
+/* ---- Arrivals: the latest run, flown live from the PC to this Mac ---- */
+.arrivals-block { gap: 0; }
+.arrivals-block .tabs { margin-bottom: -1.5px; }
+.arrivals { overflow: hidden; }
+.arrivals .route {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 14px;
+  padding: 16px 16px 14px;
+}
+.arrivals .port { min-width: 0; }
+.arrivals .port-code { font-size: 40px; }
+.arrivals .port-name { max-width: 110px; font-size: 11.5px; }
+.arr-run {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: baseline; gap: 10px;
+  padding: 11px 16px; border-top: 1.5px solid var(--rule-2); background: var(--paper-2);
+}
+.arr-cmd { min-width: 0; font-size: 13px; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.arr-cmd.argv { font: 500 12.5px/1.3 var(--mono); letter-spacing: -0.01em; color: var(--ink); }
+.arr-clock { font: 500 12px/1 var(--mono); color: var(--carbon); font-variant-numeric: tabular-nums; }
+.arr-clock i, .arr-stub i { font: 600 10.5px/1 var(--cond); font-style: normal; letter-spacing: 0.08em; margin-left: 2px; text-transform: uppercase; }
+
+/* The carbon copy of the run that just landed. */
+.arr-stub {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; column-gap: 16px; row-gap: 10px;
+  padding: 14px 16px; background: var(--copy); border-top: 1.5px dashed var(--copy-rule);
+}
+.arr-stub.arrived { animation: tear-down 0.55s var(--ease); }
+@keyframes tear-down { from { transform: translateY(-10px); opacity: 0; } }
+.arr-time { display: flex; flex-direction: column; gap: 5px; }
+.arr-time strong { font: 500 30px/0.9 var(--mono); letter-spacing: -0.05em; color: var(--carbon); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.arr-time strong i { font-size: 11px; }
+.arr-figs { display: grid; grid-template-columns: auto auto; gap: 4px 10px; align-content: center; min-width: 0; }
+.arr-figs b { font: 600 11px/1.3 var(--cond); letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-2); }
+.arr-figs span { font: 500 12px/1.3 var(--mono); color: var(--carbon); text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.arr-stub .stamp { justify-self: end; }
+
 /* ---- Boarding requests: a pass with the code to match ---- */
 .passes { display: flex; flex-direction: column; gap: 12px; }
 .pass {
