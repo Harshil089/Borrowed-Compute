@@ -55,7 +55,7 @@ pub async fn run_job(
         }
     };
     let path = workspace.path().to_path_buf();
-    let last = match execute(config, req, workspace.path(), &tx).await {
+    let last = match execute(config, req, &path.join(PROJECT_DIR), &path.join(CACHE_DIR), &tx).await {
         Ok(exited) => exited,
         Err(e) => AgentMsg::Failed {
             reason: format!("{e:#}"),
@@ -67,6 +67,12 @@ pub async fn run_job(
     path
 }
 
+/// The uploaded project, inside the job's workspace.
+const PROJECT_DIR: &str = "project";
+/// Every cache and temporary file the job's tools write, also inside the workspace, so
+/// deleting the workspace deletes them too.
+const CACHE_DIR: &str = "cache";
+
 async fn prepare(config: &RunnerConfig, archive: Vec<u8>) -> Result<tempfile::TempDir> {
     tokio::fs::create_dir_all(&config.work_root)
         .await
@@ -74,7 +80,9 @@ async fn prepare(config: &RunnerConfig, archive: Vec<u8>) -> Result<tempfile::Te
     let workspace = tempfile::Builder::new()
         .prefix("job-")
         .tempdir_in(&config.work_root)?;
-    let root = workspace.path().to_path_buf();
+    let root = workspace.path().join(PROJECT_DIR);
+    tokio::fs::create_dir_all(workspace.path().join(CACHE_DIR).join("tmp")).await?;
+    tokio::fs::create_dir_all(&root).await?;
     tokio::task::spawn_blocking(move || unpack(&archive, &root)).await??;
     Ok(workspace)
 }
@@ -101,10 +109,95 @@ fn is_inside(path: &Path) -> bool {
         .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
 }
 
+/// Points every common tool's dependency cache and temporary files into `cache`, which
+/// is deleted with the workspace. Nothing a job downloads (crates, npm packages, wheels,
+/// Go modules, Maven artifacts) outlives it: each run starts from empty caches, by the
+/// owner's choice of zero data on the Mac. Installed toolchains are left where they are.
+fn isolated_env(cache: &Path) -> Vec<(&'static str, std::ffi::OsString)> {
+    let dir = |name: &str| cache.join(name).into_os_string();
+    let mut env = vec![
+        ("TMPDIR", dir("tmp")),
+        ("XDG_CACHE_HOME", dir("xdg")),
+        // Rust: downloaded crates and git checkouts. Toolchains stay in RUSTUP_HOME.
+        ("CARGO_HOME", dir("cargo")),
+        // JavaScript package managers.
+        ("npm_config_cache", dir("npm")),
+        ("npm_config_store_dir", dir("pnpm")),
+        ("YARN_CACHE_FOLDER", dir("yarn")),
+        ("BUN_INSTALL_CACHE_DIR", dir("bun")),
+        // Python.
+        ("PIP_CACHE_DIR", dir("pip")),
+        ("UV_CACHE_DIR", dir("uv")),
+        ("POETRY_CACHE_DIR", dir("poetry")),
+        ("PYTHONPYCACHEPREFIX", dir("pycache")),
+        // Go: modules and the build cache.
+        ("GOMODCACHE", dir("go-mod")),
+        ("GOCACHE", dir("go-build")),
+        ("GOPATH", dir("go")),
+        // JVM and .NET.
+        ("GRADLE_USER_HOME", dir("gradle")),
+        ("MAVEN_OPTS", format!("-Dmaven.repo.local={}", cache.join("m2").display()).into()),
+        ("NUGET_PACKAGES", dir("nuget")),
+        ("DOTNET_CLI_HOME", dir("dotnet")),
+    ];
+    // rustup normally finds its toolchains through CARGO_HOME's sibling; moving CARGO_HOME
+    // must not hide them, so name RUSTUP_HOME explicitly.
+    if std::env::var_os("RUSTUP_HOME").is_none() {
+        if let Some(home) = std::env::var_os("HOME") {
+            let rustup = Path::new(&home).join(".rustup");
+            if rustup.is_dir() {
+                env.push(("RUSTUP_HOME", rustup.into_os_string()));
+            }
+        }
+    }
+    env
+}
+
+/// The PATH a job runs with. An app started from Finder gets only the system folders
+/// (`/usr/bin:/bin:/usr/sbin:/sbin`), which hides tools installed by Homebrew, rustup,
+/// nvm and the like. Jobs get the PATH of the user's login shell instead, the one their
+/// terminal uses, asked once and then reused.
+async fn job_path() -> Option<std::ffi::OsString> {
+    static PATH: tokio::sync::OnceCell<Option<std::ffi::OsString>> = tokio::sync::OnceCell::const_new();
+    PATH.get_or_init(login_shell_path).await.clone()
+}
+
+#[cfg(unix)]
+async fn login_shell_path() -> Option<std::ffi::OsString> {
+    const MARK: &str = "__BC_PATH__";
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    // Interactive and login, so both .zprofile and .zshrc (where nvm and the like live)
+    // have run. The marks separate PATH from anything those files print.
+    let mut cmd = tokio::process::Command::new(shell);
+    cmd.args(["-l", "-i", "-c", &format!("printf '{MARK}%s{MARK}' \"$PATH\"")])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let out = tokio::time::timeout(Duration::from_secs(10), cmd.output()).await.ok()?.ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let shell_path = text.split(MARK).nth(1).filter(|p| !p.is_empty())?;
+    // Keep anything the agent itself had that the shell does not.
+    let mut dirs: Vec<std::path::PathBuf> = std::env::split_paths(shell_path).collect();
+    if let Some(own) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&own) {
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
+    }
+    std::env::join_paths(dirs).ok()
+}
+
+#[cfg(not(unix))]
+async fn login_shell_path() -> Option<std::ffi::OsString> {
+    None
+}
+
 async fn execute(
     config: &RunnerConfig,
     req: &JobRequest,
     root: &Path,
+    cache: &Path,
     tx: &mpsc::Sender<AgentMsg>,
 ) -> Result<AgentMsg> {
     let workdir_rel = Path::new(&req.workdir);
@@ -117,10 +210,22 @@ async fn execute(
     }
     let (program, args) = req.argv.split_first().context("empty argv")?;
 
-    let mut cmd = std::process::Command::new(program);
+    let path = job_path().await;
+    // Resolve the program on the job's PATH; Command looks it up on the agent's own.
+    let program_path = path
+        .as_ref()
+        .and_then(|p| std::env::split_paths(p).map(|d| d.join(program)).find(|c| c.is_file()))
+        .filter(|_| !program.contains('/'))
+        .unwrap_or_else(|| PathBuf::from(program));
+    let mut cmd = std::process::Command::new(&program_path);
+    if let Some(path) = &path {
+        cmd.env("PATH", path);
+    }
     cmd.args(args)
         .current_dir(&workdir)
         .envs(&req.env)
+        // After the job's own env, so a job cannot point a cache back outside its workspace.
+        .envs(isolated_env(cache))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -410,6 +515,33 @@ mod tests {
             other => panic!("unexpected end {other:?}"),
         }
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn caches_live_in_the_workspace_and_go_with_it() {
+        // The job writes into every cache it is given and prints where they are.
+        let script = "for d in \"$CARGO_HOME\" \"$npm_config_cache\" \"$PIP_CACHE_DIR\" \"$GOMODCACHE\" \"$TMPDIR\"; \
+                      do mkdir -p \"$d\" && echo x > \"$d/written\" && echo \"$d\"; done";
+        let mut req = request(&["sh", "-c", script], None);
+        // A job trying to keep its cache elsewhere is overridden.
+        req.env.insert("CARGO_HOME".into(), "/tmp/bc-escape".into());
+        let (msgs, ws, root) = run(req, archive(&[])).await;
+        let printed = output(&msgs, OutputStream::Stdout);
+        let dirs: Vec<&str> = printed.lines().collect();
+        assert_eq!(dirs.len(), 5, "{printed}");
+        for dir in &dirs {
+            assert!(Path::new(dir).starts_with(&ws), "{dir} is outside the workspace {}", ws.display());
+        }
+        assert!(!ws.exists(), "the workspace and its caches must be deleted");
+        assert!(!Path::new("/tmp/bc-escape/written").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn jobs_get_the_login_shell_path() {
+        let path = job_path().await.expect("a login shell PATH");
+        let dirs: Vec<_> = std::env::split_paths(&path).collect();
+        assert!(dirs.iter().any(|d| d == Path::new("/usr/bin")), "{path:?}");
     }
 
     #[tokio::test]
