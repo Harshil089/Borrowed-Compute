@@ -81,52 +81,6 @@
   display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 22px;
   padding: 18px 22px 16px;
 }
-.port { display: flex; flex-direction: column; gap: 5px; min-width: 96px; }
-.port.to { text-align: right; align-items: flex-end; }
-.port-code { font: 800 54px/0.85 var(--cond); letter-spacing: 0.02em; color: var(--ink); }
-.port-name {
-  font: 500 13px/1.2 var(--cond); letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-2);
-  max-width: 180px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-
-/* Legs of the route: dashed until flown, solid once done. The jet rides --p (0 to 1). */
-.legs {
-  --p: 0;
-  position: relative; list-style: none; margin: 0; padding: 0 0 18px;
-  display: grid; grid-template-columns: repeat(4, 1fr);
-}
-.legs li { position: relative; height: 26px; }
-.legs li::before {
-  content: ""; position: absolute; left: 0; right: 0; top: 12px; height: 2px;
-  background: repeating-linear-gradient(90deg, var(--red) 0 6px, transparent 6px 11px);
-  opacity: 0.5;
-}
-.legs li::after {
-  content: ""; position: absolute; right: -4px; top: 8px; width: 7px; height: 7px; border-radius: 50%;
-  background: var(--paper); border: 2px solid var(--red);
-}
-.legs li:last-of-type::after { display: none; }
-.legs li span {
-  position: absolute; top: 30px; left: 50%; transform: translateX(-50%);
-  font: 600 11px/1 var(--cond); letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-3);
-  white-space: nowrap; transition: color 0.3s var(--ease);
-}
-.legs li.done::before { background: var(--red); opacity: 1; }
-.legs li.done::after { background: var(--red); }
-.legs li.done span, .legs li.active span { color: var(--ink); }
-.legs li.active::before { opacity: 1; animation: march 0.6s linear infinite; }
-@keyframes march { to { background-position: 11px 0; } }
-.legs .jet {
-  position: absolute; top: 4px; left: calc(var(--p) * 100%);
-  width: 20px; height: 20px; margin-left: -10px;
-  color: var(--red); transform: rotate(90deg);
-  transition: left 0.9s var(--ease);
-  filter: drop-shadow(0 1px 1px rgba(4, 10, 30, 0.25));
-}
-.legs.idle .jet { color: var(--ink-3); }
-.legs.failed li.active::before { animation: none; background: repeating-linear-gradient(90deg, var(--bad) 0 6px, transparent 6px 11px); }
-.legs.failed .jet { color: var(--bad); }
-
 /* Ruled cells: folder and command */
 .cells {
   display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);

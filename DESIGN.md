@@ -251,7 +251,7 @@ Coupon paper and carrier navy carry nearly every surface; jet red and carbon pur
 **Character:** Barlow Condensed in caps is the airline's printed voice: codes, labels, tabs, headings and buttons, all tracked wide. Barlow is the same family set plainly for sentences, so the two never fight. Martian Mono is the machine's voice and appears only where the computer produced the text or the user must type it exactly. All three are self-hosted woff2 in each app's ui/fonts because the CSP allows styles only from the app itself.
 
 ### Hierarchy
-- **Port Code** (800, 54px, 0.85): the three-letter airport codes on the route (WPC, HMA). The same face sets the station code (58px), the gate codes in the Mac rail (30px), the stub route (46px) and the manifest codes (700, 24px, in carbon). Codes are derived from device names so they stay stable.
+- **Port Code** (800, 54px, 0.85): the three-letter airport codes on the route (WPC, HMA). The same face sets the station code (58px), the gate codes in the Mac rail (30px), the agent's arrivals route (40px), the stub route (46px) and the manifest codes (700, 24px, in carbon). Codes are derived from device names so they stay stable.
 - **Display** (800, 48px, 0.95, caps, balanced): the check-in headline on the signed-out pass; 40px in the narrower agent.
 - **Headline** (700, 26px, 1, caps): dialog titles.
 - **Title** (700, 15px, 1, 0.08em, caps): section headings such as Your Macs, Flight log, Departures, Manifest, Route, Station. Each is prefixed in the same line by the carrier mark, a red triple slash.
@@ -338,6 +338,9 @@ The lavender copy sheet, separated from its coupon by a dashed copy-rule edge. O
 
 ### Route legs
 The client's route header: FROM and TO port codes joined by a straight jet-red flight path in four equal legs (Pack, Upload, Run, Return). Straight rather than arced so the four labels align and progress reads at a glance. Unflown legs are dashed at half strength; the active leg's dashes march; flown legs go solid with filled dots. A jet rides the path at the run's progress. Idle, the jet is ink-3; on failure the active leg and jet turn bad.
+
+### Arrivals
+The agent's version of the route, shared with the client through base.css: FROM the sending PC's code TO this Mac's code, in three legs (Upload, Run, Return). The agent hears of a run once its upload is in, so a live run shows Upload flown and Run marching, with a ticking clock in carbon; a landed run flies every leg and tears a carbon-copy stub down beneath it (run time, CPU, cores, memory, and the stamp). A failed run stops on Run in bad. With no runs yet the route waits, dashed and idle. It sits below any boarding request, because an approval outranks a report.
 
 ### Boarding pass
 A pending pairing request on the agent: the requesting device's name in 26px condensed caps on the left, its code in carbon on the copy stub at right with the red Approve beneath. It arrives by rising 8px and fading in once.

@@ -61,6 +61,36 @@
         <div id="requests" class="passes"></div>
       </section>
 
+      <section class="block arrivals-block">
+        <div class="tabs"><span id="arr-tab" class="tab red">Waiting</span><span id="arr-date" class="tab"></span></div>
+        <div class="coupon arrivals die-cut">
+          <div class="route">
+            <div class="port">
+              <span class="label">From</span>
+              <strong id="arr-from" class="port-code">PC</strong>
+              <span id="arr-from-name" class="port-name">Your PC</span>
+            </div>
+            <ol id="arr-legs" class="legs idle" aria-label="Latest run">
+              <li data-leg="upload"><span>Upload</span></li>
+              <li data-leg="run"><span>Run</span></li>
+              <li data-leg="return"><span>Return</span></li>
+              <svg class="icon jet"><use href="#i-plane"/></svg>
+            </ol>
+            <div class="port to">
+              <span class="label">To</span>
+              <strong id="arr-to" class="port-code">MAC</strong>
+              <span id="arr-to-name" class="port-name">This Mac</span>
+            </div>
+          </div>
+          <div class="arr-run">
+            <span class="label">Run</span>
+            <span id="arr-cmd" class="arr-cmd">No runs yet. When your PC sends one, it lands here live.</span>
+            <span id="arr-clock" class="arr-clock"></span>
+          </div>
+          <div id="arr-stub" class="arr-stub hidden"></div>
+        </div>
+      </section>
+
       <section class="block">
         <div class="block-head">
           <h2 class="heading">Departures</h2>

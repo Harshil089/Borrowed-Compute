@@ -55,6 +55,94 @@ let approvalUrl = null;
 // Requests already on screen, so only new ones animate in.
 const seenRequests = new Set();
 
+// ---- Arrivals: the latest run, flown live ----
+
+const ARR_LEGS = ["upload", "run", "return"];
+let arrivalsKey = null;
+let liveSince = null;
+
+function setArrivalLegs(at, failed) {
+  const legs = $("arr-legs");
+  legs.querySelectorAll("li").forEach((li, i) => {
+    li.classList.toggle("done", i < at);
+    li.classList.toggle("active", i === at);
+  });
+  legs.classList.toggle("idle", at < 0);
+  legs.classList.toggle("failed", failed);
+  // The jet sits at the start of the active leg, or at this Mac once the run is home.
+  const p = at < 0 ? 0 : at >= ARR_LEGS.length ? 1 : (at + 0.5) / ARR_LEGS.length;
+  legs.style.setProperty("--p", String(p));
+}
+
+function renderArrivals() {
+  const job = jobs.find((j) => !j.rejected);
+  const me = account?.device_name || "This Mac";
+  $("arr-to").textContent = deviceCode(me);
+  $("arr-to-name").textContent = me;
+  $("arr-date").textContent = new Date().toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  const key = job ? `${job.job_id}:${job.end ? job.end.kind : "live"}` : "none";
+  if (key === arrivalsKey) return;
+  const firstRender = arrivalsKey === null;
+  arrivalsKey = key;
+
+  if (!job) {
+    $("arr-tab").textContent = "Waiting";
+    $("arr-from").textContent = "PC";
+    $("arr-from-name").textContent = "Your PC";
+    $("arr-cmd").className = "arr-cmd";
+    $("arr-cmd").textContent = "No runs yet. When your PC sends one, it lands here live.";
+    $("arr-clock").textContent = "";
+    $("arr-stub").classList.add("hidden");
+    liveSince = null;
+    setArrivalLegs(-1, false);
+    return;
+  }
+  const from = clientName(job.client);
+  $("arr-from").textContent = deviceCode(from);
+  $("arr-from-name").textContent = from;
+  $("arr-cmd").className = "arr-cmd argv";
+  $("arr-cmd").textContent = job.argv.join(" ");
+
+  if (!job.end) {
+    // The agent reports a run once its upload is in, so the upload leg is already flown.
+    $("arr-tab").textContent = "In flight";
+    $("arr-stub").classList.add("hidden");
+    liveSince = job.started_ms;
+    tickClock();
+    setArrivalLegs(1, false);
+    return;
+  }
+
+  liveSince = null;
+  const [cls, word] = jobState(job);
+  $("arr-tab").textContent = word;
+  $("arr-clock").textContent = job.finished_ms ? ago(job.finished_ms) : "";
+  const landed = cls === "ok";
+  setArrivalLegs(landed ? ARR_LEGS.length : 1, !landed);
+  const u = job.end.usage;
+  const cores = u && u.wall_ms > 0 ? ((u.user_ms + u.system_ms) / u.wall_ms).toFixed(1) : null;
+  const stampCls = landed ? "ok" : word === "Void" ? "void" : "bad";
+  const stub = $("arr-stub");
+  stub.innerHTML = `
+    <div class="arr-time"><span class="label">Ran here</span><strong>${u ? fig(u.wall_ms) : "–"}</strong></div>
+    <div class="arr-figs">
+      ${u ? `<b>CPU</b><span>${fig(u.user_ms + u.system_ms)}</span>
+      <b>Cores</b><span>${cores}</span>
+      <b>Memory</b><span>${Math.round(u.max_rss_bytes / 1048576)}<i>MB</i></span>` : `<b>Usage</b><span>not reported</span>`}
+    </div>
+    <span class="stamp ${stampCls}">${esc(word)}</span>`;
+  stub.classList.remove("hidden");
+  // Tear the copy off only for a run that lands while the window is open.
+  stub.classList.toggle("arrived", !firstRender);
+}
+
+function tickClock() {
+  if (liveSince == null) return;
+  const s = Math.max(0, Math.round((Date.now() - liveSince) / 1000));
+  $("arr-clock").innerHTML = s < 60 ? `${s}<i>s</i>` : `${Math.floor(s / 60)}<i>m</i> ${s % 60}<i>s</i>`;
+}
+setInterval(tickClock, 1000);
+
 // Writes HTML only when it differs, so a poll never resets focus or replays animation.
 function setHtml(id, html) {
   const el = $(id);
@@ -183,6 +271,8 @@ function render() {
           <button class="danger" data-unpair="${p.id}" data-name="${esc(p.client_name)}">Remove</button>
         </div>`).join("")
     : `<div class="board-empty">No devices cleared yet. On your PC, choose this Mac and press Pair; the request appears here to approve.</div>`);
+
+  renderArrivals();
 
   setHtml("jobs", jobs.length
     ? `<div class="board-head"><span>Time</span><span>Run</span><span>Status</span></div>` +
