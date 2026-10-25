@@ -49,11 +49,29 @@ jobs:
 
       # CI=true skips the bundler's Finder AppleScript styling of the dmg, which needs a
       # logged-in desktop.
+      #
+      # On GitHub's macOS runners `hdiutil create` sometimes fails with "Resource busy",
+      # usually because a disk image from an earlier attempt is still attached. Retry up to
+      # three times, detaching stale images and removing the half-written dmg in between.
+      # Compiled code is cached, so a retry repeats only the bundling.
       - name: Build Borrowed Compute Agent
         working-directory: apps/bc-desktop-agent
         env:
           CI: "true"
-        run: npx --yes @tauri-apps/cli@2.12.4 build --bundles app,dmg --config "$UPDATER_CONFIG"
+        run: |
+          for attempt in 1 2 3; do
+            if npx --yes @tauri-apps/cli@2.12.4 build --bundles app,dmg --config "$UPDATER_CONFIG"; then
+              exit 0
+            fi
+            echo "::warning::Bundling failed on attempt $attempt; detaching disk images and retrying"
+            hdiutil info | awk '/^\/dev\/disk/ { print $1 }' | while read -r disk; do
+              hdiutil detach -force "$disk" || true
+            done
+            rm -f ../../target/release/bundle/dmg/*.dmg
+            sleep 15
+          done
+          echo "::error::Bundling failed three times"
+          exit 1
 
       - name: Collect
         run: |
