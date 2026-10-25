@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result};
 use bc_proto::wire;
-use iroh::endpoint::{presets, Connection, RecvStream, SendStream};
+use iroh::endpoint::{presets, Connection, QuicTransportConfig, RecvStream, SendStream};
 use iroh::{Endpoint, RelayMap, RelayMode, SecretKey};
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -30,9 +30,18 @@ pub struct NetConfig {
 
 /// Binds an endpoint with this device's key, ready to dial and accept job connections.
 pub async fn bind(secret: SecretKey, config: NetConfig) -> Result<Endpoint> {
+    // QUIC normally probes for bigger packets once a path works. Through stacked tunnels
+    // (a VPN plus Tailscale, say) a probe can succeed and later packets of that size
+    // vanish, which stalls an upload until the connection times out. Staying at QUIC's
+    // 1200-byte minimum fits every tunnel and costs little throughput.
+    let transport = QuicTransportConfig::builder()
+        .initial_mtu(1200)
+        .mtu_discovery_config(None)
+        .build();
     let mut builder = Endpoint::builder(presets::N0)
         .secret_key(secret)
-        .alpns(vec![JOB_ALPN.to_vec()]);
+        .alpns(vec![JOB_ALPN.to_vec()])
+        .transport_config(transport);
     if let Some(relays) = config.relays {
         builder = builder.relay_mode(RelayMode::Custom(relays));
     }

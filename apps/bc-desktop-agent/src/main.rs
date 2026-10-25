@@ -507,7 +507,6 @@ fn main() {
     if let Err(e) = logs.capture_stderr() {
         eprintln!("could not open agent.log: {e}");
     }
-    log(format_args!("Borrowed Compute Agent {} starting", env!("CARGO_PKG_VERSION")));
     let jobs = logs.recent_jobs(MAX_JOBS).into();
 
     tauri::Builder::default()
@@ -545,6 +544,9 @@ fn main() {
         ])
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
+            // The app's version comes from tauri.conf.json, which CI sets for each release;
+            // the crate version stays 0.1.0.
+            log(format_args!("Borrowed Compute Agent {} starting", app.package_info().version));
             let open = MenuItem::with_id(app, "open", "Open Borrowed Compute Agent", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit (stops accepting jobs)", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&open, &quit])?;

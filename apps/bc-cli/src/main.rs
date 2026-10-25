@@ -9,8 +9,8 @@ use bc_cli::flows::{
     wait_for_pairing,
 };
 use bc_cli::pack::pack;
-use bc_cli::run::{run_remote, Exit};
-use bc_net::{bind, load_or_create_key, NetConfig};
+use bc_cli::run::{run_on_mac, Exit};
+use bc_net::{load_or_create_key, NetConfig};
 use bc_proto::cloud::{DeviceKind, PairingStatus};
 use clap::{Parser, Subcommand};
 
@@ -163,21 +163,21 @@ async fn main() -> Result<()> {
             let archive = pack(&root, &spec.files.exclude)?;
 
             let key = load_or_create_key(&key_path)?;
-            let endpoint = bind(key, NetConfig { relay_only, ..Default::default() }).await?;
             let cancel = async {
                 let _ = tokio::signal::ctrl_c().await;
             };
-            let outcome = run_remote(
-                &endpoint,
+            let outcome = run_on_mac(
+                &key,
+                NetConfig { relay_only, ..Default::default() },
                 mac.addr,
                 &spec,
                 archive,
                 &mut std::io::stdout(),
                 &mut std::io::stderr(),
                 cancel,
+                |text| eprintln!("bc: {text}"),
             )
             .await?;
-            endpoint.close().await;
 
             let line = outcome.timings.to_json(&outcome.job_id, &outcome.exit, outcome.usage.as_ref());
             append_timing(&home, &line);

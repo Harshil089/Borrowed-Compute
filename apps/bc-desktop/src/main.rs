@@ -20,8 +20,8 @@ use bc_cli::flows::{
     split_command, wait_for_pairing,
 };
 use bc_cli::pack::pack;
-use bc_cli::run::{run_remote, Exit};
-use bc_net::{bind, load_or_create_key, NetConfig};
+use bc_cli::run::{run_on_mac, Exit};
+use bc_net::{load_or_create_key, NetConfig};
 use bc_proto::cloud::{DeviceInfo, DeviceKind, PairingInfo};
 use bc_proto::wire::JobUsage;
 use bc_proto::JobSpec;
@@ -379,13 +379,15 @@ async fn run_job_inner(
 
     phase(app, format!("Connecting and uploading {}…", human_bytes(archive.len() as u64)));
     let key = load_or_create_key(&key_path(&state.home))?;
-    let endpoint = bind(key, NetConfig { relay_only, ..Default::default() }).await?;
     let (log_path, log) = open_job_log(&state.home, mac, folder, &spec.job.argv)?;
     let mut stdout = EmitWriter::new(app.clone(), "stdout", log.clone());
     let mut stderr = EmitWriter::new(app.clone(), "stderr", log.clone());
     let started_phase = app.clone();
-    let outcome = run_remote(
-        &endpoint,
+    let notice_app = app.clone();
+    let notice_log = log.clone();
+    let outcome = run_on_mac(
+        &key,
+        NetConfig { relay_only, ..Default::default() },
         resolved.addr,
         &spec,
         archive,
@@ -395,9 +397,13 @@ async fn run_job_inner(
             let _ = cancel.await;
             phase(&started_phase, "Cancelling…");
         },
+        move |text: &str| {
+            let _ = writeln!(notice_log.lock().unwrap(), "\n{text}");
+            let _ = notice_app.emit("job-output", OutputChunk { stream: "notice", text: format!("{text}\n") });
+            phase(&notice_app, "Retrying through the relay…");
+        },
     )
     .await;
-    endpoint.close().await;
     stdout.flush()?;
     stderr.flush()?;
     let outcome = match outcome {
