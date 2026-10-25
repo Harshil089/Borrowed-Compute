@@ -15,6 +15,7 @@ bc-proto.workspace = true
 bc-net.workspace = true
 bc-auth.workspace = true
 serde_json.workspace = true
+serde.workspace = true
 iroh.workspace = true
 anyhow.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "time"] }

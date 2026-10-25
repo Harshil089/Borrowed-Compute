@@ -9,6 +9,7 @@ use bc_cli::flows::{
     wait_for_pairing,
 };
 use bc_cli::pack::pack;
+use bc_cli::route::RouteMemory;
 use bc_cli::run::{run_on_mac, Exit};
 use bc_net::{load_or_create_key, NetConfig};
 use bc_proto::cloud::{DeviceKind, PairingStatus};
@@ -175,6 +176,7 @@ async fn main() -> Result<()> {
                 &mut std::io::stdout(),
                 &mut std::io::stderr(),
                 cancel,
+                &RouteMemory::at(&home),
                 |text| eprintln!("bc: {text}"),
             )
             .await?;

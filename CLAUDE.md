@@ -72,7 +72,8 @@ Every merge to `main` runs `.github/workflows/release.yml`: it builds the Mac ag
 
 - `bc` cannot cross-compile for Windows from macOS (`ring` needs Windows SDK headers). `.github/workflows/windows.yml` builds `bc.exe` and runs the Windows-capable tests on `windows-latest`. A real job from a Windows PC to a Mac is still untested.
 - No sandbox yet: jobs run as the agent's user. The `_bcjob` user plus a Seatbelt profile is Phase two (Q4).
-- The whole project is uploaded per run (up to 2 GiB). Content-addressed chunked sync is Phase two (Q2).
+- The whole project is uploaded per run (up to 2 GiB), by design: the owner decided the Mac stores zero project data, so there is no Mac-side cache or chunked sync (Foundation doc, 2026-10-25). Compressed uploads (zstd) are the planned speed-up.
+- **Route memory** (`apps/bc-cli/src/route.rs`): when a direct path to a Mac fails, the client records it in `route-memory.json` and sends that Mac's runs through the relay first for an hour, or until the Mac's IP addresses change, or until a direct run succeeds.
 - Keys and session tokens are owner-only files, not yet in the OS keychain.
 - Discovery and relays use iroh's public relays (dev only). Our own `iroh-relay` deployment is not written.
 - The Mac app's built-in cloud is reachable from other devices only through Tailscale. Tested on one Mac (share, HTTPS address, sign-in and a job through it); not yet from a second device.
