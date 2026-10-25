@@ -52,6 +52,21 @@ let tailscale = null;
 let sharing = false;
 let shareMessage = null;
 let approvalUrl = null;
+// Requests already on screen, so only new ones animate in.
+const seenRequests = new Set();
+
+// Writes HTML only when it differs, so a poll never resets focus or replays animation.
+function setHtml(id, html) {
+  const el = $(id);
+  if (el.dataset.html === html) return;
+  el.dataset.html = html;
+  el.innerHTML = html;
+}
+
+// Line breaks only after "//" and dots, so the address never splits mid-word.
+function breakableUrl(url) {
+  return esc(url).replace(/(\/\/|\.)/g, "$1<wbr>");
+}
 
 function showError(message) {
   const box = $("error");
@@ -67,6 +82,29 @@ function ago(ms) {
   return new Date(ms).toLocaleDateString();
 }
 
+// Three-letter codes, like airport codes: initials of a multi-word name, else its first letters.
+function deviceCode(name) {
+  const words = String(name || "").split(/[^A-Za-z0-9]+/).filter(Boolean);
+  let code;
+  if (words.length >= 3) code = words.slice(0, 3).map((w) => w[0]).join("");
+  else if (words.length === 2) code = words[0][0] + words[1].slice(0, 2);
+  else code = (words[0] || "MAC").slice(0, 3);
+  return code.toUpperCase().padEnd(3, "X");
+}
+
+function clock(ms) {
+  const d = new Date(ms);
+  const sameDay = d.toDateString() === new Date().toDateString();
+  return sameDay
+    ? d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: false })
+    : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+// A measured figure: the number in carbon, the unit set small beside it.
+function fig(v) {
+  return v < 1000 ? `${v}<i>ms</i>` : `${(v / 1000).toFixed(1)}<i>s</i>`;
+}
+
 function clientName(id) {
   const p = pairings.find((p) => p.client_id === id);
   return p ? p.client_name : `${id.slice(0, 10)}…`;
@@ -78,7 +116,7 @@ function renderStatus() {
   if (!status) {
     label = "Starting";
   } else if (status.start_error) {
-    cls = "bad"; label = "Not running";
+    cls = "bad"; label = "Closed";
   } else if (status.host.hosting && status.host.error) {
     cls = "bad"; label = "Cloud stopped";
   } else if (!status.serving) {
@@ -88,12 +126,12 @@ function renderStatus() {
   } else if (status.cloud.ok === false) {
     cls = "warn"; label = "Cloud unreachable";
   } else if (status.cloud.ok === true) {
-    cls = "ok"; label = "Ready for jobs";
+    cls = "ok"; label = "Open for runs";
   } else {
     label = "Connecting";
   }
   pill.className = `pill ${cls}`;
-  pill.innerHTML = `<span class="dot ${cls}"></span><span>${label}</span>`;
+  pill.innerHTML = `<span>${label}</span>`;
   pill.title = status?.cloud?.error || status?.start_error || "";
 }
 
@@ -103,9 +141,9 @@ function render() {
   $("signin").classList.toggle("hidden", signedIn);
   $("home").classList.toggle("hidden", !signedIn);
   $("footer").classList.toggle("hidden", !signedIn);
-  $("account").textContent = signedIn && account
-    ? `${account.login}${account.device_name ? ` · ${account.device_name}` : ""}`
-    : "";
+  $("account").textContent = signedIn && account ? `Signed in as ${account.login}` : "";
+  $("station-name").textContent = account?.device_name || "This Mac";
+  $("station-code").textContent = deviceCode(account?.device_name || "Mac");
   $("device-id").textContent = status?.device_id ? `Device ${status.device_id.slice(0, 16)}…` : "";
   if (status?.start_error) showError(`The agent could not start: ${status.start_error}`);
   else if (status?.host.hosting && status.host.error) showError(`The built-in cloud is not running: ${status.host.error}`);
@@ -114,59 +152,68 @@ function render() {
   renderConnect();
 
   const pending = pairings.filter((p) => p.status === "pending");
-  $("requests").innerHTML = pending.length
-    ? pending.map((p) => `
-        <div class="item request">
-          <div class="main">
-            <span class="name">${esc(p.client_name)}</span>
-            <span class="sub">Approve only if ${esc(p.client_name)} shows this code</span>
-          </div>
-          <span class="code">${esc(p.code)}</span>
-          <div class="actions">
-            <button class="primary" data-approve="${p.id}" data-code="${esc(p.code)}">Approve</button>
-          </div>
-        </div>`).join("")
-    : `<div class="empty">No requests. On your PC, choose this Mac and click Pair.</div>`;
+  $("requests-block").classList.toggle("hidden", !pending.length);
+  const pendingHtml = pending.map((p) => `
+    <div class="pass die-cut ${seenRequests.has(p.id) ? "" : "arrived"}" data-request="${p.id}">
+      <div class="pass-main">
+        <span class="pass-from">${esc(p.client_name)}</span>
+        <p>Asks to run jobs on this Mac. Approve only if ${esc(p.client_name)} shows the same code.</p>
+      </div>
+      <div class="pass-stub">
+        <span class="code">${esc(p.code)}</span>
+        <button class="primary" data-approve="${p.id}" data-code="${esc(p.code)}">Approve</button>
+      </div>
+    </div>`).join("");
+  // Compare without the one-time arrival class, so a repeat poll is a no-op.
+  if ($("requests").dataset.key !== pending.map((p) => `${p.id}:${p.code}`).join()) {
+    $("requests").dataset.key = pending.map((p) => `${p.id}:${p.code}`).join();
+    $("requests").innerHTML = pendingHtml;
+  }
+  pending.forEach((p) => seenRequests.add(p.id));
 
   const approved = pairings.filter((p) => p.status === "approved");
-  $("paired").innerHTML = approved.length
+  setHtml("paired", approved.length
     ? approved.map((p) => `
-        <div class="item">
-          <span class="dot ok"></span>
-          <div class="main">
-            <span class="name">${esc(p.client_name)}</span>
-            <span class="sub mono">${esc(p.client_id.slice(0, 16))}…</span>
-          </div>
+        <div class="cleared">
+          <span class="cleared-code">${esc(deviceCode(p.client_name))}</span>
+          <span class="cleared-meta">
+            <span class="cleared-name">${esc(p.client_name)}</span>
+            <span class="cleared-id">${esc(p.client_id.slice(0, 16))}…</span>
+          </span>
           <button class="danger" data-unpair="${p.id}" data-name="${esc(p.client_name)}">Remove</button>
         </div>`).join("")
-    : `<div class="empty">No paired devices yet.</div>`;
+    : `<div class="board-empty">No devices cleared yet. On your PC, choose this Mac and press Pair; the request appears here to approve.</div>`);
 
-  $("jobs").innerHTML = jobs.length
-    ? jobs.map((j) => {
+  setHtml("jobs", jobs.length
+    ? `<div class="board-head"><span>Time</span><span>Run</span><span>Status</span></div>` +
+      jobs.map((j) => {
         const [cls, label] = jobState(j);
-        const what = j.rejected ? "Rejected: device is not paired" : esc(j.argv.join(" "));
+        const what = j.rejected ? "Refused: device is not paired" : esc(j.argv.join(" "));
         return `
-          <div class="item">
-            <span class="dot ${cls}"></span>
-            <div class="main">
-              <span class="name ${j.rejected ? "" : "argv"}">${what}</span>
-              <span class="sub">${esc(clientName(j.client))} · ${ago(j.started_ms)}${usageText(j)}</span>
-            </div>
+          <div class="dep ${!j.end && !j.rejected ? "live" : ""}">
+            <span class="dep-time">${clock(j.started_ms)}</span>
+            <span class="dep-main">
+              <span class="dep-cmd ${j.rejected ? "refused" : ""}">${what}</span>
+              <span class="dep-sub"><span class="kv"><b>From</b> ${esc(clientName(j.client))}</span>${usageText(j)}</span>
+            </span>
             <span class="pill ${cls}">${label}</span>
           </div>`;
       }).join("")
-    : `<div class="empty">Jobs from paired devices appear here.</div>`;
+    : `<div class="board-empty">Runs from your paired PC depart from here, with what each one used on this Mac.</div>`);
 }
 
-const copyIcon = "Copy";
+const copyIcon = `<svg class="icon"><use href="#i-copy"/></svg>Copy`;
 
 function renderConnect() {
   const box = $("connect");
+  // Until the PC has a way in, the route is the first thing this window asks for.
+  $("home").classList.toggle("needs-route", status.host.hosting && tailscale?.state !== "sharing");
   if (!status.host.hosting) {
-    box.innerHTML = `
+    const html = `
       <p>This Mac uses the cloud at</p>
       <div class="address"><span>${esc(status.host.url)}</span></div>
       <p class="muted">Enter the same address in Borrowed Compute on your PC.</p>`;
+    if (box.dataset.html !== html) { box.dataset.html = html; box.innerHTML = html; }
     return;
   }
   const t = tailscale;
@@ -176,7 +223,7 @@ function renderConnect() {
   } else if (t.state === "sharing") {
     body = `
       <p>Your PC reaches this Mac's cloud at:</p>
-      <div class="address"><span id="share-url">${esc(t.url)}</span><button data-copy="${esc(t.url)}">${copyIcon}</button></div>
+      <div class="address"><span id="share-url">${breakableUrl(t.url)}</span><button data-copy="${esc(t.url)}">${copyIcon}</button></div>
       <p class="muted">In Borrowed Compute on your PC, enter this address. Only devices in your Tailscale network can open it.</p>
       <div class="actions"><button class="link" data-ts="stop">Stop sharing</button></div>`;
   } else if (t.state === "ready") {
@@ -219,28 +266,29 @@ function renderConnect() {
       </div>`;
   }
   if (shareMessage) body += `<div class="banner bad">${esc(shareMessage)}</div>`;
-  box.innerHTML = body;
+  if (box.dataset.html !== body) { box.dataset.html = body; box.innerHTML = body; }
 }
 
 // CPU time and peak memory the job used on this Mac, when the job reported them.
 function usageText(j) {
   const u = j.end && j.end.usage;
   if (!u) return "";
-  const t = (ms) => (ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`);
   const mb = Math.round(u.max_rss_bytes / 1048576);
-  return ` · CPU ${t(u.user_ms + u.system_ms)} · ${mb} MB · ran ${t(u.wall_ms)}`;
+  return ` <span class="kv"><b>CPU</b> <span class="num">${fig(u.user_ms + u.system_ms)}</span></span>` +
+    ` <span class="kv"><b>Mem</b> <span class="num">${mb}<i>MB</i></span></span>` +
+    ` <span class="kv"><b>Ran</b> <span class="num">${fig(u.wall_ms)}</span></span>`;
 }
 
 function jobState(j) {
-  if (j.rejected) return ["bad", "Rejected"];
-  if (!j.end) return ["warn", "Running"];
+  if (j.rejected) return ["bad", "Refused"];
+  if (!j.end) return ["live", "In flight"];
   switch (j.end.kind) {
     case "exited":
       if (j.end.timed_out) return ["bad", "Timed out"];
-      return j.end.code === 0 ? ["ok", "Exit 0"] : ["bad", `Exit ${j.end.code ?? "?"}`];
+      return j.end.code === 0 ? ["ok", "Landed"] : ["bad", `Exit ${j.end.code ?? "?"}`];
     case "failed": return ["bad", "Failed"];
-    case "cancelled": return ["", "Cancelled"];
-    default: return ["", "Disconnected"];
+    case "cancelled": return ["", "Void"];
+    default: return ["", "Lost contact"];
   }
 }
 
@@ -323,7 +371,7 @@ $("check-update").addEventListener("click", async () => {
     if (!u.available) {
       updateStatus(`You have the latest version (${esc(u.current)}).`, "ok");
     } else {
-      updateStatus(`Version ${esc(u.available)} is available. <button id="install-update" class="primary">Install and restart</button>`, "warn");
+      updateStatus(`Version ${esc(u.available)} is ready. <button id="install-update" class="primary">Install and restart</button>`, "warn");
     }
   } catch (e) {
     updateStatus(`Could not check for updates: ${esc(String(e))}`, "bad");
@@ -361,7 +409,7 @@ document.addEventListener("click", async (event) => {
   if (copy) {
     await navigator.clipboard.writeText(copy.dataset.copy).catch(() => {});
     copy.textContent = "Copied";
-    setTimeout(() => { copy.textContent = copyIcon; }, 1500);
+    setTimeout(() => { copy.innerHTML = copyIcon; }, 1500);
     return;
   }
   if (open) {

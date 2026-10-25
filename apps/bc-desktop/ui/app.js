@@ -55,6 +55,39 @@ let selectedMac = null;
 let running = false;
 let verificationUri = null;
 let specCommand = null;
+let myName = null;
+
+// Three-letter codes, like airport codes: initials of a multi-word name, else its first letters.
+function deviceCode(name) {
+  const words = String(name || "").split(/[^A-Za-z0-9]+/).filter(Boolean);
+  let code;
+  if (words.length >= 3) code = words.slice(0, 3).map((w) => w[0]).join("");
+  else if (words.length === 2) code = words[0][0] + words[1].slice(0, 2);
+  else code = (words[0] || "MAC").slice(0, 3);
+  return code.toUpperCase().padEnd(3, "X");
+}
+
+// The route from this PC to the chosen Mac, and how far along it the run is.
+const LEGS = ["pack", "upload", "run", "return"];
+function setRoute() {
+  $("route-from").textContent = deviceCode(myName || "PC");
+  $("route-from-name").textContent = myName || "This PC";
+  $("route-to").textContent = selectedMac ? deviceCode(selectedMac) : "MAC";
+  $("route-to-name").textContent = selectedMac || "Choose a Mac";
+}
+function setLeg(leg, failed = false) {
+  const legs = $("legs");
+  const at = leg === "idle" ? -1 : leg === "done" ? LEGS.length : LEGS.indexOf(leg);
+  legs.querySelectorAll("li").forEach((li, i) => {
+    li.classList.toggle("done", i < at);
+    li.classList.toggle("active", i === at);
+  });
+  legs.classList.toggle("idle", leg === "idle");
+  legs.classList.toggle("failed", failed);
+  // The jet sits at the start of the active leg, or at the Mac once the run is home.
+  const p = leg === "idle" ? 0 : leg === "done" ? 1 : (at + 0.5) / LEGS.length;
+  legs.style.setProperty("--p", String(p));
+}
 
 function showError(message) {
   $("error").textContent = message || "";
@@ -80,7 +113,9 @@ async function loadStatus() {
   selectedMac = selectedMac || status.default_mac;
   try {
     const a = await invoke("get_account");
+    myName = a.device_name || null;
     $("account").textContent = `${a.login}${a.device_name ? ` · ${a.device_name}` : ""}`;
+    setRoute();
   } catch (e) {
     // The session belonged to another cloud; the app signed out, so show sign-in.
     if (String(e) === "signed-out") return loadStatus();
@@ -125,7 +160,8 @@ function pairingFor(mac) {
 function renderMacs() {
   const macs = (devices?.devices || []).filter((d) => d.kind === "mac" && d.endpoint_id !== devices.me);
   if (!macs.length) {
-    $("macs").innerHTML = `<div class="empty">No Macs on this account yet. Install Borrowed Compute Agent on your Mac and sign in there.</div>`;
+    $("macs").innerHTML = `<p class="empty-note">No Macs on this account yet. Install Borrowed Compute Agent on your Mac and sign in there with the same GitHub account.</p>`;
+    setRoute();
     return;
   }
   if (!macs.some((m) => m.name === selectedMac)) {
@@ -135,18 +171,21 @@ function renderMacs() {
   $("macs").innerHTML = macs.map((m) => {
     const pairing = pairingFor(m);
     const paired = pairing?.status === "approved";
-    const dot = m.online ? "ok" : "";
-    const state = m.online ? "Online" : ago(m.last_seen_secs_ago);
-    const pairLine = paired
-      ? `<span class="pill ok">Paired</span>`
-      : `<button data-pair="${esc(m.name)}">${pairing ? "Show pairing code" : "Pair"}</button>`;
+    const state = m.online ? `<span class="pill ok">Online</span>` : `<span class="pill">Offline</span>`;
+    const action = paired
+      ? `<span class="pill">Paired</span>`
+      : `<button data-pair="${esc(m.name)}">${pairing ? "Show code" : "Pair"}</button>`;
     return `
-      <div class="mac ${m.name === selectedMac ? "selected" : ""}" data-mac="${esc(m.name)}" tabindex="0">
-        <div class="top-line"><span class="dot ${dot}"></span><span class="name">${esc(m.name)}</span></div>
-        <div class="sub">${state}</div>
-        <div class="pair-line">${pairLine}</div>
+      <div class="mac ${m.name === selectedMac ? "selected" : ""}" data-mac="${esc(m.name)}" tabindex="0" role="button" aria-pressed="${m.name === selectedMac}">
+        <span class="mac-code">${esc(deviceCode(m.name))}</span>
+        <span class="mac-meta">
+          <span class="mac-name">${esc(m.name)}</span>
+          <span class="mac-seen">${m.online ? "Ready for runs" : esc(ago(m.last_seen_secs_ago))}</span>
+        </span>
+        <span class="mac-foot">${state}${action}</span>
       </div>`;
   }).join("");
+  setRoute();
   updateRunButton();
 }
 
@@ -154,7 +193,7 @@ function updateRunButton() {
   const mac = devices?.devices.find((d) => d.name === selectedMac);
   const paired = mac && pairingFor(mac)?.status === "approved";
   $("run").disabled = running || !selectedMac || !$("folder").value.trim();
-  $("run").textContent = selectedMac ? `Run on ${selectedMac}` : "Run on Mac";
+  $("run").textContent = selectedMac ? `Run on ${deviceCode(selectedMac)}` : "Run on Mac";
   if (selectedMac && mac && !paired) {
     $("run").title = `Pair with ${selectedMac} first`;
   } else {
@@ -382,10 +421,17 @@ listen("job-output", (event) => {
   if (running && !sawOutput && event.payload.stream !== "notice") {
     sawOutput = true;
     setPhase(`Running on ${selectedMac}…`, true);
+    setLeg("run");
   }
   appendOutput(event.payload.stream, event.payload.text);
 });
-listen("job-phase", (event) => setPhase(event.payload, true));
+listen("job-phase", (event) => {
+  setPhase(event.payload, true);
+  // Phase messages come from the Rust side; their opening word says which leg is flying.
+  const text = String(event.payload);
+  if (/^(Finding|Packing)/.test(text)) setLeg("pack");
+  else if (/^Connecting/.test(text)) setLeg("upload");
+});
 
 $("result").addEventListener("click", (event) => {
   const log = event.target.closest("[data-log]");
@@ -397,6 +443,60 @@ function setPhase(text, busy) {
 }
 
 function ms(v) { return v == null ? "–" : v < 1000 ? `${v} ms` : `${(v / 1000).toFixed(1)} s`; }
+// The same figure as HTML: the number in carbon, the unit set small beside it.
+function fig(v) {
+  if (v == null) return "–";
+  return v < 1000 ? `${v}<i>ms</i>` : `${(v / 1000).toFixed(1)}<i>s</i>`;
+}
+function mb(bytes) { return `${Math.round(bytes / 1048576)}<i>MB</i>`; }
+function setRunTab(word) { $("run-tab").textContent = word; }
+
+// The stamp struck on the carbon copy, and its color.
+function stampFor(r) {
+  if (r.outcome === "success") return ["ok", "Landed"];
+  if (r.outcome === "cancelled") return ["void", "Void"];
+  if (r.outcome === "rejected") return ["bad", "Refused"];
+  return ["bad", r.status === 124 ? "Timed out" : `Exit ${r.status}`];
+}
+
+function renderResult(r) {
+  const t = r.timings;
+  const u = r.usage;
+  const [cls, word] = stampFor(r);
+  const cores = u && u.wall_ms > 0 ? ((u.user_ms + u.system_ms) / u.wall_ms).toFixed(1) : null;
+  const row = (label, value) => `<dt>${label}</dt><dd>${value}</dd>`;
+  $("result").innerHTML = `
+    <div class="result-top">
+      <div class="result-time">
+        <span class="label">${u ? "Ran on the Mac" : "Total"}</span>
+        <strong>${fig(u ? u.wall_ms : t.total_ms)}</strong>
+      </div>
+      <span class="stamp ${cls}">${esc(word)}</span>
+    </div>
+    <div class="result-line">
+      <p class="result-msg">${esc(r.message)}</p>
+      <button class="link" data-log="${esc(r.log_path)}"><svg class="icon"><use href="#i-doc"/></svg>Open log</button>
+    </div>
+    <p class="result-trip">
+      <span><b>Door to door</b> <span class="num">${fig(t.total_ms)}</span></span>
+      <span><b>Route</b> ${t.via_relay ? "via relay" : "direct"}</span>
+    </p>
+    <dl class="ledger">
+      ${u ? row("CPU", `${fig(u.user_ms + u.system_ms)}`) : row("CPU", "<small>n/a</small>")}
+      ${u ? row("Cores", `${cores}`) : row("Cores", "<small>n/a</small>")}
+      ${u ? row("Memory", mb(u.max_rss_bytes)) : row("Memory", "<small>n/a</small>")}
+      ${row("Upload", `${fig(t.upload_ms)}`)}
+      ${row("Connect", fig(t.connect_ms))}
+      ${row("First out", fig(t.first_log_ms))}
+    </dl>`;
+  $("result").classList.remove("hidden");
+}
+
+function sizeOf(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1048576) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1048576).toFixed(1)} MB`;
+}
 
 async function runJob() {
   if (running) return;
@@ -412,6 +512,8 @@ async function runJob() {
   $("cancel").classList.remove("hidden");
   $("cancel").disabled = false;
   setPhase("Starting…", true);
+  setLeg("pack");
+  setRunTab("In flight");
   try {
     const r = await invoke("run_job", {
       mac: selectedMac,
@@ -419,19 +521,16 @@ async function runJob() {
       command,
       relayOnly: $("relay-only").checked,
     });
-    const cls = r.outcome === "success" ? "ok" : r.outcome === "cancelled" ? "" : "bad";
-    const t = r.timings;
-    const path = t.via_relay ? "relay" : "direct";
-    $("result").innerHTML = `
-      <span class="pill ${cls}"><span class="dot ${cls}"></span>${esc(r.message)}</span>
-      ${r.usage_text ? `<span class="usage">Mac used ${esc(r.usage_text)}</span>` : ""}
-      <span class="timings">connect ${ms(t.connect_ms)} · upload ${ms(t.upload_ms)} · first output ${ms(t.first_log_ms)} · total ${ms(t.total_ms)} · ${path}</span>
-      <button class="link" data-log="${esc(r.log_path)}">Open log</button>`;
-    $("result").classList.remove("hidden");
+    renderResult(r);
+    setRunTab(stampFor(r)[1]);
+    if (r.outcome === "success") setLeg("done");
+    else $("legs").classList.add("failed");
     setPhase(r.outcome === "rejected" ? "Not paired with this Mac. Click Pair next to it." : "Done.", false);
     if (r.outcome === "rejected") loadDevices();
   } catch (e) {
     setPhase("Could not run the job.", false);
+    $("legs").classList.add("failed");
+    setRunTab("Not sent");
     showError(String(e));
   } finally {
     running = false;
@@ -446,12 +545,16 @@ $("cancel").addEventListener("click", () => { $("cancel").disabled = true; invok
 $("clear").addEventListener("click", () => {
   consoleEl.textContent = "";
   $("result").classList.add("hidden");
+  setLeg("idle");
+  setRunTab("Next run");
   setPhase("Output appears here as the Mac produces it.", false);
 });
 
 // ---- Start ----
 
 $("command").value = store.get("command") || "";
+setLeg("idle");
+$("date-tab").textContent = new Date().toLocaleDateString(undefined, { month: "short", day: "numeric" });
 loadStatus()
   .then(() => setFolder(store.get("folder") || ""))
   .catch((e) => showError(String(e)));

@@ -12,10 +12,10 @@
       {
         "label": "main",
         "title": "Borrowed Compute Agent",
-        "width": 420,
-        "height": 640,
-        "minWidth": 380,
-        "minHeight": 480,
+        "width": 480,
+        "height": 760,
+        "minWidth": 420,
+        "minHeight": 560,
         "visible": false
       }
     ],

@@ -8,67 +8,101 @@
   <link rel="stylesheet" href="agent.css">
 </head>
 <body>
-  <header class="top">
-    <div class="title">
-      <h1>Borrowed Compute Agent</h1>
-      <span id="account" class="muted"></span>
-    </div>
-    <span id="status" class="pill"><span class="dot"></span><span>Starting</span></span>
+  <svg class="sprite" aria-hidden="true">
+    <symbol id="i-mark" viewBox="0 0 32 32">
+      <path d="M1.5 16h3.2M7.6 16h3.2M13.7 16h2.6" stroke="#d7262d" stroke-width="2.6" stroke-linecap="round"/>
+      <path d="M24 5.2c.9 0 1.5 1 1.5 2.2v5.1l6 3.6v2.4l-6-1.9v4.7l2.2 1.6v2.2L24 23.9l-3.7 1.2v-2.2l2.2-1.6v-4.7l-6 1.9v-2.4l6-3.6V7.4c0-1.2.6-2.2 1.5-2.2z" fill="currentColor" transform="rotate(90 24 15.6)"/>
+    </symbol>
+    <symbol id="i-plane" viewBox="0 0 16 16"><path d="M8 1.3c.6 0 .95.6.95 1.35v3.1l5.05 2.95v1.55l-5.05-1.5v3.05l1.6 1.15v1.45L8 13.7l-2.55.7v-1.45l1.6-1.15V9.75L2 11.25V9.7l5.05-2.95v-3.1C7.05 1.9 7.4 1.3 8 1.3z" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 16 16"><rect x="5.25" y="5.25" width="8.5" height="8.5" rx="1.2"/><path d="M10.75 5.25V3.5c0-.7-.55-1.25-1.25-1.25H3.5c-.7 0-1.25.55-1.25 1.25v6c0 .7.55 1.25 1.25 1.25h1.75"/></symbol>
+    <symbol id="i-doc" viewBox="0 0 16 16"><path d="M4 1.75h5.5l3 3v9.5H4z"/><path d="M9.5 1.75v3h3M6 8.5h4.5M6 11h4.5"/></symbol>
+    <symbol id="i-ext" viewBox="0 0 16 16"><path d="M9.5 2.25h4.25V6.5M13.5 2.5 7.75 8.25"/><path d="M12 9.5v3.25c0 .55-.45 1-1 1H3.25c-.55 0-1-.45-1-1V5c0-.55.45-1 1-1H6.5"/></symbol>
+  </svg>
+
+  <header class="bar">
+    <div class="brand"><svg><use href="#i-mark"/></svg><span class="wordmark">Borrowed Compute <em>Agent</em></span></div>
+    <span id="status" class="pill"><span>Starting</span></span>
   </header>
 
   <main>
     <div id="error" class="banner bad hidden"></div>
 
-    <section id="signin" class="card pad hidden">
-      <h1>Let devices run jobs on this Mac</h1>
-      <p class="muted">Sign in with the GitHub account you use on your other devices. Only devices on that account can ask to pair.</p>
-      <label class="field">
-        <span>Name for this Mac</span>
-        <input id="mac-name" type="text" placeholder="studio" maxlength="64" autocomplete="off" spellcheck="false">
-      </label>
-      <button id="signin-btn" class="primary wide">Sign in with GitHub</button>
-      <div id="signin-code" class="codebox hidden">
-        <p class="muted">Enter this code on the GitHub page that just opened:</p>
+    <!-- Signed out: check-in -->
+    <section id="signin" class="checkin hidden">
+      <div class="coupon checkin-main">
+        <h1 class="checkin-title">Open this Mac for runs.</h1>
+        <p class="muted">Sign in with the GitHub account you use on your PC. Only devices on that account can ask to board, and you approve each one here.</p>
+        <label class="field">
+          <span class="label">Name for this Mac</span>
+          <input id="mac-name" type="text" placeholder="studio" maxlength="64" autocomplete="off" spellcheck="false">
+        </label>
+        <button id="signin-btn" class="primary wide">Sign in with GitHub</button>
+      </div>
+      <div id="signin-code" class="checkin-stub hidden">
+        <span class="label">Enter on GitHub</span>
         <div id="user-code" class="code"></div>
-        <div class="row">
-          <span class="spinner"></span><span class="muted">Waiting for GitHub…</span>
-          <button id="reopen" class="link">Open the page again</button>
-        </div>
+        <div class="row"><span class="spinner"></span><span>Waiting for GitHub…</span></div>
+        <button id="reopen" class="link">Open the page again</button>
       </div>
     </section>
 
     <section id="home" class="hidden">
-      <div class="section-head"><h2>Connect your PC</h2></div>
-      <div id="connect" class="card connect"></div>
-
-      <div class="section-head"><h2>Pairing requests</h2></div>
-      <div id="requests" class="list card"></div>
-
-      <div class="section-head"><h2>Paired devices</h2></div>
-      <div id="paired" class="list card"></div>
-
-      <div class="section-head"><h2>Recent jobs</h2><button id="open-logs" class="link">Open logs</button></div>
-      <div id="jobs" class="list card"></div>
-
-      <div class="section-head"><h2>App</h2></div>
-      <div class="card pad">
-        <label class="check">
-          <input id="run-bg" type="checkbox">
-          <span>Run in background
-            <span class="muted hint">Quitting (⌘Q) hides the app and it keeps accepting jobs. Reopen it from the menu-bar icon.</span>
-          </span>
-        </label>
-        <div class="row update-row">
-          <span id="version" class="muted"></span>
-          <button id="check-update">Check for updates</button>
+      <div class="station">
+        <strong id="station-code" class="station-code">MAC</strong>
+        <div class="station-meta">
+          <span id="station-name" class="station-name"></span>
+          <span id="account" class="station-account"></span>
         </div>
-        <div id="update-status" class="hidden"></div>
       </div>
+
+      <section id="requests-block" class="block hidden">
+        <h2 class="heading">Boarding requests</h2>
+        <div id="requests" class="passes"></div>
+      </section>
+
+      <section class="block">
+        <div class="block-head">
+          <h2 class="heading">Departures</h2>
+          <button id="open-logs" class="link"><svg class="icon"><use href="#i-doc"/></svg>Logs</button>
+        </div>
+        <div id="jobs" class="board coupon die-cut"></div>
+      </section>
+
+      <section class="block">
+        <h2 class="heading">Manifest</h2>
+        <div id="paired" class="manifest coupon"></div>
+      </section>
+
+      <section id="route-block" class="block">
+        <h2 class="heading">Route</h2>
+        <div id="connect" class="route coupon"></div>
+      </section>
+
+      <section class="block">
+        <h2 class="heading">Station</h2>
+        <div class="coupon settings">
+          <label class="setting">
+            <span class="setting-text">
+              <strong>Run in background</strong>
+              <span>Quitting (⌘Q) hides the app and it keeps accepting runs. Reopen it from the menu-bar icon.</span>
+            </span>
+            <span class="switch"><input id="run-bg" type="checkbox"><span></span></span>
+          </label>
+          <div class="setting">
+            <span class="setting-text">
+              <strong>Updates</strong>
+              <span id="version"></span>
+            </span>
+            <button id="check-update">Check</button>
+          </div>
+          <div id="update-status" class="hidden"></div>
+        </div>
+      </section>
     </section>
   </main>
 
   <footer id="footer" class="hidden">
-    <span class="muted mono selectable" id="device-id" title="This Mac's device id"></span>
+    <span class="mono selectable" id="device-id" title="This Mac's device id"></span>
     <button id="signout" class="link">Sign out</button>
   </footer>
 

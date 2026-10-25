@@ -59,7 +59,9 @@ Every merge to `main` runs `.github/workflows/release.yml`: it builds the Mac ag
 - **Workspaces are deleted after every job**, and the job's process group is killed on exit, timeout and cancel (`GroupGuard` in `runner.rs`). Keep both guarantees.
 - **Desktop apps call the libraries, never the CLI binaries.** New client or agent behavior goes in `bc_cli::flows` or `bc_agent::service` first, then both the CLI and the app use it.
 - **Never use `confirm()`, `alert()` or `prompt()` in the desktop UIs.** The web view has no native handler for them on macOS (the Mac app's `confirm()` returned "no" without showing anything). Use `ask()` in each `ui/app.js`.
-- **Keep `ui/base.css` identical** in both desktop apps. Text colors must pass WCAG AA (4.5:1) in light and dark mode.
+- **Keep `ui/base.css` and `ui/fonts/` identical** in both desktop apps. Text colors must pass WCAG AA (4.5:1) in light and dark mode.
+- **The visual system is in `DESIGN.md`** (product context in `PRODUCT.md`): a jet-age ticket wallet. Fonts are self-hosted in `ui/fonts` because the CSP allows no external styles. Carbon purple is only for measured figures and codes to match; at most one filled red button per coupon; no label lines above headings.
+- **The agent window re-renders only what changed** (`setHtml` in its `app.js`), so the 5-second poll never resets focus or replays animations. Keep new lists on that path.
 - Cloud SQL uses runtime `sqlx::query`/`query_as`, not compile-time macros, so builds need no database.
 - **Cloud SQL must run on SQLite and Postgres.** No database-side time (`now()`, intervals): pass Unix seconds from `bc_cloud::now()`. Number `$N` parameters in order of first use. Keep both migration folders describing the same schema. Tests run every API test on SQLite.
 - **The apps read the session from disk on every call** (`AppState::cloud()`), so the CLI and the app stay one device. A 401 means the session belongs to another cloud: sign out locally and show sign-in.
