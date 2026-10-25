@@ -94,17 +94,29 @@ fn rust(f: &RootFiles) -> Option<Detected> {
     ])
 }
 
+/// SwiftPM and Xcode keep their caches in ~/Library no matter what the environment says,
+/// so their commands name a folder inside the project instead. The project is deleted
+/// with the job's workspace, so these caches are too.
+const SWIFTPM_CACHE: &str = ".bc/swiftpm-cache";
+const XCODE_DERIVED_DATA: &str = ".bc/DerivedData";
+const XCODE_PACKAGES: &str = ".bc/SourcePackages";
+
 fn swift(f: &RootFiles) -> Option<Detected> {
     f.has("Package.swift").then_some(())?;
     found("Swift", "Package.swift", vec![
-        s("Build", &["swift", "build", "-c", "release"]),
-        s("Test", &["swift", "test"]),
+        s("Build", &["swift", "build", "-c", "release", "--cache-path", SWIFTPM_CACHE]),
+        s("Test", &["swift", "test", "--cache-path", SWIFTPM_CACHE]),
     ])
 }
 
 fn xcode(f: &RootFiles) -> Option<Detected> {
     let project = f.with_ext(".xcodeproj").next()?;
-    found("Xcode", project, vec![s("Build", &["xcodebuild", "-project", project, "build"])])
+    found("Xcode", project, vec![s("Build", &[
+        "xcodebuild", "-project", project,
+        "-derivedDataPath", XCODE_DERIVED_DATA,
+        "-clonedSourcePackagesDirPath", XCODE_PACKAGES,
+        "build",
+    ])])
 }
 
 fn node(root: &Path, f: &RootFiles) -> Option<Detected> {
@@ -320,8 +332,12 @@ mod tests {
     fn other_toolchains() {
         let kind = |files: &[(&str, &str)]| detect(project(files).path()).map(|d| (d.kind.clone(), argv_of(&d)));
         fn argv_of(d: &Detected) -> String { d.suggestions[0].argv.join(" ") }
-        assert_eq!(kind(&[("Package.swift", "")]).unwrap().1, "swift build -c release");
-        assert_eq!(kind(&[("App.xcodeproj/", "")]).unwrap().1, "xcodebuild -project App.xcodeproj build");
+        assert_eq!(kind(&[("Package.swift", "")]).unwrap().1, "swift build -c release --cache-path .bc/swiftpm-cache");
+        assert_eq!(
+            kind(&[("App.xcodeproj/", "")]).unwrap().1,
+            "xcodebuild -project App.xcodeproj -derivedDataPath .bc/DerivedData \
+             -clonedSourcePackagesDirPath .bc/SourcePackages build"
+        );
         assert_eq!(kind(&[("CMakeLists.txt", "")]).unwrap().0, "C/C++ (CMake)");
         assert_eq!(kind(&[("gradlew", "")]).unwrap().1, "./gradlew build");
         assert_eq!(kind(&[("pom.xml", "")]).unwrap().1, "mvn -B package");
