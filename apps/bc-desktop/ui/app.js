@@ -8,6 +8,41 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
+// The web view has no native confirm() dialog, so ask inside the window instead.
+function ask(message, okLabel = "OK", danger = false) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "ask-overlay";
+    overlay.setAttribute("role", "alertdialog");
+    overlay.setAttribute("aria-modal", "true");
+    overlay.innerHTML = `
+      <div class="ask-box">
+        <p></p>
+        <div class="ask-actions">
+          <button data-ask="no">Cancel</button>
+          <button data-ask="yes" class="primary ${danger ? "danger" : ""}"></button>
+        </div>
+      </div>`;
+    overlay.querySelector("p").textContent = message;
+    overlay.querySelector('[data-ask="yes"]').textContent = okLabel;
+    const done = (answer) => {
+      overlay.remove();
+      document.removeEventListener("keydown", onKey, true);
+      resolve(answer);
+    };
+    const onKey = (e) => {
+      if (e.key === "Escape") { e.stopPropagation(); done(false); }
+    };
+    overlay.addEventListener("click", (e) => {
+      const button = e.target.closest("[data-ask]");
+      if (button) { e.stopPropagation(); done(button.dataset.ask === "yes"); }
+    });
+    document.addEventListener("keydown", onKey, true);
+    document.body.appendChild(overlay);
+    overlay.querySelector('[data-ask="no"]').focus();
+  });
+}
+
 // Per-viewer conveniences only; the device identity and session live in Rust.
 const store = {
   get(key) { try { return localStorage.getItem(key); } catch { return null; } },
@@ -179,7 +214,7 @@ $("cloud-cancel").addEventListener("click", () => $("cloud-dialog").classList.ad
 $("cloud-save").addEventListener("click", async () => {
   const url = await testCloud($("cloud-input"), $("cloud-msg"));
   if (!url) return;
-  if (url !== status.cloud_url && !confirm("Save this address and sign out? You will sign in again at the new address.")) return;
+  if (url !== status.cloud_url && !(await ask("Save this address and sign out? You will sign in again at the new address.", "Save and sign out"))) return;
   await invoke("set_cloud_url", { url }).catch((e) => cloudMessage($("cloud-msg"), false, String(e)));
   $("cloud-dialog").classList.add("hidden");
   devices = null;
@@ -187,7 +222,7 @@ $("cloud-save").addEventListener("click", async () => {
 });
 
 $("signout").addEventListener("click", async () => {
-  if (!confirm("Sign out of Borrowed Compute on this computer?")) return;
+  if (!(await ask("Sign out of Borrowed Compute on this computer?", "Sign out", true))) return;
   await invoke("logout");
   devices = null;
   await loadStatus();

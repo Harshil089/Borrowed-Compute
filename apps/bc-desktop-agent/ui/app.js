@@ -7,6 +7,41 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
+// The web view has no native confirm() dialog, so ask inside the window instead.
+function ask(message, okLabel = "OK", danger = false) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "ask-overlay";
+    overlay.setAttribute("role", "alertdialog");
+    overlay.setAttribute("aria-modal", "true");
+    overlay.innerHTML = `
+      <div class="ask-box">
+        <p></p>
+        <div class="ask-actions">
+          <button data-ask="no">Cancel</button>
+          <button data-ask="yes" class="primary ${danger ? "danger" : ""}"></button>
+        </div>
+      </div>`;
+    overlay.querySelector("p").textContent = message;
+    overlay.querySelector('[data-ask="yes"]').textContent = okLabel;
+    const done = (answer) => {
+      overlay.remove();
+      document.removeEventListener("keydown", onKey, true);
+      resolve(answer);
+    };
+    const onKey = (e) => {
+      if (e.key === "Escape") { e.stopPropagation(); done(false); }
+    };
+    overlay.addEventListener("click", (e) => {
+      const button = e.target.closest("[data-ask]");
+      if (button) { e.stopPropagation(); done(button.dataset.ask === "yes"); }
+    });
+    document.addEventListener("keydown", onKey, true);
+    document.body.appendChild(overlay);
+    overlay.querySelector('[data-ask="no"]').focus();
+  });
+}
+
 let status = null;
 let account = null;
 let pairings = [];
@@ -246,7 +281,7 @@ $("reopen").addEventListener("click", () => {
 });
 
 $("signout").addEventListener("click", async () => {
-  if (!confirm("Sign out? Paired devices will not be able to send jobs until you sign in again.")) return;
+  if (!(await ask("Sign out? Paired devices will not be able to send jobs until you sign in again.", "Sign out", true))) return;
   await invoke("logout").catch((e) => showError(String(e)));
   account = null; pairings = []; jobs = [];
   await refresh();
@@ -278,7 +313,7 @@ document.addEventListener("click", async (event) => {
       }
       sharing = false;
     } else if (ts.dataset.ts === "stop") {
-      if (!confirm("Stop sharing? Your PC will not reach this Mac's cloud until you share again.")) return;
+      if (!(await ask("Stop sharing? Your PC will not reach this Mac's cloud until you share again.", "Stop sharing", true))) return;
       await invoke("tailscale_stop").catch((e) => { shareMessage = String(e); });
     }
     tailscale = null; renderConnect();
@@ -293,7 +328,7 @@ document.addEventListener("click", async (event) => {
       await invoke("approve", { id: Number(approve.dataset.approve), code: approve.dataset.code });
       await refresh();
     } else if (remove) {
-      if (!confirm(`Remove ${remove.dataset.name}? It will stop being able to send jobs within 15 seconds.`)) return;
+      if (!(await ask(`Remove ${remove.dataset.name}? It will stop being able to send jobs within 15 seconds.`, "Remove", true))) return;
       remove.disabled = true;
       await invoke("unpair", { id: Number(remove.dataset.unpair) });
       await refresh();

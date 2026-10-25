@@ -52,6 +52,7 @@ Run the cloud on its own: `BC_DATABASE_URL=postgres://… or sqlite://<file>?mod
 - **Tests that need `sh` or the Mac agent are `cfg(unix)`**, so `cargo test --workspace` still runs on Windows CI.
 - **Workspaces are deleted after every job**, and the job's process group is killed on exit, timeout and cancel (`GroupGuard` in `runner.rs`). Keep both guarantees.
 - **Desktop apps call the libraries, never the CLI binaries.** New client or agent behavior goes in `bc_cli::flows` or `bc_agent::service` first, then both the CLI and the app use it.
+- **Never use `confirm()`, `alert()` or `prompt()` in the desktop UIs.** The web view has no native handler for them on macOS (the Mac app's `confirm()` returned "no" without showing anything). Use `ask()` in each `ui/app.js`.
 - **Keep `ui/base.css` identical** in both desktop apps. Text colors must pass WCAG AA (4.5:1) in light and dark mode.
 - Cloud SQL uses runtime `sqlx::query`/`query_as`, not compile-time macros, so builds need no database.
 - **Cloud SQL must run on SQLite and Postgres.** No database-side time (`now()`, intervals): pass Unix seconds from `bc_cloud::now()`. Number `$N` parameters in order of first use. Keep both migration folders describing the same schema. Tests run every API test on SQLite.
@@ -65,6 +66,6 @@ Run the cloud on its own: `BC_DATABASE_URL=postgres://… or sqlite://<file>?mod
 - The whole project is uploaded per run (up to 2 GiB). Content-addressed chunked sync is Phase two (Q2).
 - Keys and session tokens are owner-only files, not yet in the OS keychain.
 - Discovery and relays use iroh's public relays (dev only). Our own `iroh-relay` deployment is not written.
-- The Mac app's built-in cloud is reachable from other devices only through Tailscale. Sharing was tested only up to the "Tailscale not signed in" state.
+- The Mac app's built-in cloud is reachable from other devices only through Tailscale. Tested on one Mac (share, HTTPS address, sign-in and a job through it); not yet from a second device.
 - The desktop apps are verified on macOS only. CI builds the Windows installers, but nobody has run them on a Windows PC yet.
 - The Mac agent app is not signed or notarized, and does not start at login yet.
