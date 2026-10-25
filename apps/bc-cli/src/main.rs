@@ -149,7 +149,7 @@ async fn main() -> Result<()> {
             set_default_mac(&home, &mac)?;
             println!("bc run will use {mac}");
         }
-        Command::Run { to, spec, relay_only, timings, argv } => {
+        Command::Run { to, spec, relay_only, timings, mut argv } => {
             let target = match to {
                 Some(mac) => mac,
                 None => default_mac(&home)
@@ -160,6 +160,13 @@ async fn main() -> Result<()> {
                 eprintln!("bc: warning: {warning}");
             }
             let root = std::env::current_dir()?;
+            // With no command and no bc.toml, run what the project looks like it wants.
+            if argv.is_empty() && spec.is_none() && !root.join("bc.toml").exists() {
+                if let Some(found) = bc_cli::detect::detect(&root) {
+                    argv = found.suggestions[0].argv.clone();
+                    eprintln!("bc: {} project ({}); running: {}", found.kind, found.reason, argv.join(" "));
+                }
+            }
             let spec = load_spec(&root, spec, argv)?;
             let archive = pack(&root, &spec.files.exclude)?;
 

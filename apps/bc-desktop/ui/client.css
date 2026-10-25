@@ -90,6 +90,16 @@
 .cell + .cell { border-left: 1.5px solid var(--rule-2); }
 .cell button { display: inline-flex; align-items: center; }
 
+/* What the folder looks like, and the commands it suggests. */
+.detect { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.detect-kind {
+  display: inline-flex; align-items: baseline; gap: 6px; margin-right: 4px;
+  font: 700 12px/1 var(--cond); letter-spacing: 0.1em; text-transform: uppercase; color: var(--carbon);
+}
+.detect-kind small { font: 400 11.5px/1 var(--mono); letter-spacing: -0.01em; text-transform: none; color: var(--ink-3); }
+.detect button { padding: 5px 9px 4px; font-size: 11.5px; border-color: var(--rule-2); background: transparent; color: var(--ink-2); }
+.detect button[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: var(--paper); }
+
 .run-foot {
   display: flex; align-items: center; gap: 12px;
   padding: 12px 14px 12px 22px;

@@ -117,10 +117,11 @@
                 <button id="choose" type="button"><svg class="icon"><use href="#i-folder"/></svg>Choose</button>
               </div>
             </label>
-            <label class="cell command" for="command">
-              <span class="label">Command</span>
+            <div class="cell command">
+              <label class="label" for="command">Command</label>
               <input id="command" type="text" placeholder="cargo test" spellcheck="false" autocomplete="off">
-            </label>
+              <div id="detect" class="detect hidden" role="group" aria-label="Suggested commands"></div>
+            </div>
           </div>
 
           <div class="run-foot">

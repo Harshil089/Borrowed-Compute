@@ -364,11 +364,48 @@ $("pair-close").addEventListener("click", () => {
 
 // ---- Project and command ----
 
+// The command the app filled in itself. A command the user typed is never replaced.
+let autoCommand = store.get("autoCommand");
+
+function setCommand(command, auto) {
+  $("command").value = command;
+  store.set("command", command);
+  if (auto) {
+    autoCommand = command;
+    store.set("autoCommand", command);
+  }
+  markSuggestion();
+  updateRunButton();
+}
+
+// Presses the suggestion that matches the command box, if any.
+function markSuggestion() {
+  const now = $("command").value.trim();
+  $("detect").querySelectorAll("[data-command]").forEach((b) => {
+    b.setAttribute("aria-pressed", String(b.dataset.command === now));
+  });
+}
+
+function renderDetected(d) {
+  const box = $("detect");
+  if (!d) { box.classList.add("hidden"); box.innerHTML = ""; return; }
+  box.innerHTML = `<span class="detect-kind">${esc(d.kind)} <small>${esc(d.reason)}</small></span>` +
+    d.suggestions.map((s) => `<button type="button" data-command="${esc(s.command)}" title="${esc(s.command)}">${esc(s.label)}</button>`).join("");
+  box.classList.remove("hidden");
+  markSuggestion();
+}
+
+$("detect").addEventListener("click", (event) => {
+  const choice = event.target.closest("[data-command]");
+  if (choice) setCommand(choice.dataset.command, true);
+});
+
 async function setFolder(path) {
   $("folder").value = path || "";
   store.set("folder", path || "");
   specCommand = null;
   $("hint").textContent = "";
+  renderDetected(null);
   if (path) {
     const info = await invoke("project_info", { folder: path });
     if (info.spec_error) {
@@ -377,6 +414,11 @@ async function setFolder(path) {
       specCommand = info.command;
       $("hint").textContent = "Using bc.toml from this folder. A command typed here replaces its command.";
       if (!$("command").value.trim()) $("command").placeholder = info.command;
+    } else if (info.detected) {
+      renderDetected(info.detected);
+      const typed = $("command").value.trim();
+      // Fill in the default unless the user typed a command of their own.
+      if (!typed || typed === autoCommand) setCommand(info.detected.suggestions[0].command, true);
     } else {
       $("command").placeholder = "cargo test";
     }
@@ -390,7 +432,10 @@ $("choose").addEventListener("click", async () => {
 });
 $("folder").addEventListener("change", () => setFolder($("folder").value.trim()));
 $("folder").addEventListener("input", updateRunButton);
-$("command").addEventListener("input", () => store.set("command", $("command").value));
+$("command").addEventListener("input", () => {
+  store.set("command", $("command").value);
+  markSuggestion();
+});
 $("command").addEventListener("keydown", (e) => { if (e.key === "Enter" && !$("run").disabled) runJob(); });
 
 // ---- Running ----
