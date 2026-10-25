@@ -14,6 +14,15 @@
       <h1>Borrowed Compute</h1>
       <p class="muted">Run builds, tests and scripts on your Mac from this computer. Sign in with the same GitHub account you use on the Mac.</p>
       <label class="field">
+        <span>Your Mac's address</span>
+        <div class="inline">
+          <input id="signin-cloud" type="text" class="mono" placeholder="https://your-mac.tailnet-name.ts.net" spellcheck="false" autocomplete="off">
+          <button id="signin-test">Test</button>
+        </div>
+        <span class="hint muted">Shown in Borrowed Compute Agent on your Mac, under Connect your PC.</span>
+      </label>
+      <div id="signin-cloud-msg" class="banner hidden"></div>
+      <label class="field">
         <span>Name for this computer</span>
         <input id="pc-name" type="text" placeholder="laptop" maxlength="64" autocomplete="off" spellcheck="false">
       </label>
@@ -40,7 +49,10 @@
       <div id="macs" class="macs"></div>
       <div class="side-foot">
         <div id="account" class="muted"></div>
-        <button id="signout" class="link">Sign out</button>
+        <div class="foot-actions">
+          <button id="settings" class="link">Mac address</button>
+          <button id="signout" class="link">Sign out</button>
+        </div>
       </div>
     </aside>
 
@@ -90,6 +102,23 @@
       <div id="pair-wait" class="row"><span class="spinner"></span><span class="muted">Waiting for approval on the Mac…</span></div>
       <div id="pair-msg" class="banner hidden"></div>
       <div class="dialog-actions"><button id="pair-close">Close</button></div>
+    </div>
+  </div>
+
+  <!-- Cloud address dialog -->
+  <div id="cloud-dialog" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="cloud-title">
+    <div class="card pad dialog">
+      <h1 id="cloud-title">Your Mac's address</h1>
+      <p class="muted">The address Borrowed Compute Agent shows on your Mac under Connect your PC. Changing it signs you out, because a different address is a different account list.</p>
+      <div class="inline">
+        <input id="cloud-input" type="text" class="mono" spellcheck="false" autocomplete="off">
+        <button id="cloud-test">Test</button>
+      </div>
+      <div id="cloud-msg" class="banner hidden"></div>
+      <div class="dialog-actions">
+        <button id="cloud-cancel">Cancel</button>
+        <button id="cloud-save" class="primary">Save</button>
+      </div>
     </div>
   </div>
 

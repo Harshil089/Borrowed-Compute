@@ -13,9 +13,49 @@ use iroh_base::SecretKey;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-/// Cloud base URL: `BC_CLOUD_URL`, or a local development server.
-pub fn cloud_url() -> String {
-    std::env::var("BC_CLOUD_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".into())
+/// Where the cloud runs when nothing else is configured: the Mac app's built-in cloud.
+pub const DEFAULT_CLOUD_URL: &str = "http://127.0.0.1:8080";
+
+/// Cloud base URL for a device: `BC_CLOUD_URL`, else the address saved in the device's home
+/// folder (set from the app's settings), else [`DEFAULT_CLOUD_URL`].
+pub fn cloud_url_for(home: &Path) -> String {
+    std::env::var("BC_CLOUD_URL")
+        .ok()
+        .filter(|u| !u.trim().is_empty())
+        .or_else(|| {
+            std::fs::read_to_string(home.join("cloud-url"))
+                .ok()
+                .map(|u| u.trim().to_string())
+                .filter(|u| !u.is_empty())
+        })
+        .unwrap_or_else(|| DEFAULT_CLOUD_URL.to_string())
+}
+
+/// Checks and normalizes a cloud address typed by a person.
+pub fn normalize_cloud_url(input: &str) -> Result<String> {
+    let url = input.trim().trim_end_matches('/');
+    let url = if url.contains("://") { url.to_string() } else { format!("https://{url}") };
+    let parsed = reqwest::Url::parse(&url).with_context(|| format!("{input:?} is not a web address"))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        bail!("{input:?} must be an http or https address");
+    }
+    if parsed.path() != "/" || parsed.query().is_some() {
+        bail!("give only the address, without a path: for example https://my-mac.example.ts.net");
+    }
+    Ok(url)
+}
+
+/// Saves the cloud address for this device. An empty address returns to the default.
+pub fn save_cloud_url(home: &Path, url: &str) -> Result<String> {
+    std::fs::create_dir_all(home)?;
+    let path = home.join("cloud-url");
+    if url.trim().is_empty() {
+        let _ = std::fs::remove_file(path);
+        return Ok(DEFAULT_CLOUD_URL.to_string());
+    }
+    let url = normalize_cloud_url(url)?;
+    std::fs::write(&path, format!("{url}\n")).with_context(|| format!("writing {}", path.display()))?;
+    Ok(url)
 }
 
 #[derive(Clone)]
@@ -45,6 +85,23 @@ impl CloudClient {
 
     pub fn token(&self) -> Option<&str> {
         self.token.as_deref()
+    }
+
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
+    /// Confirms a Borrowed Compute cloud answers at this address.
+    pub async fn health(&self) -> Result<()> {
+        #[derive(serde::Deserialize)]
+        struct Health {
+            service: String,
+        }
+        let health: Health = self.get("/v1/health").await?;
+        if health.service != "borrowed-compute-cloud" {
+            bail!("{} answered, but it is not a Borrowed Compute cloud", self.base);
+        }
+        Ok(())
     }
 
     async fn call<T: DeserializeOwned>(
@@ -231,4 +288,41 @@ pub fn default_device_name() -> String {
         .map(|n| n.trim().trim_end_matches(".local").to_string())
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| "my-device".into())
+}
+
+/// True if the cloud rejected the session, meaning the device must sign in again (for
+/// example after switching to a different cloud).
+pub fn is_unauthorized(err: &anyhow::Error) -> bool {
+    err.to_string().ends_with("(401 Unauthorized)")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_cloud_addresses() {
+        assert_eq!(normalize_cloud_url("my-mac.tail1234.ts.net").unwrap(), "https://my-mac.tail1234.ts.net");
+        assert_eq!(normalize_cloud_url(" https://my-mac.tail1234.ts.net/ ").unwrap(), "https://my-mac.tail1234.ts.net");
+        assert_eq!(normalize_cloud_url("http://127.0.0.1:8080").unwrap(), "http://127.0.0.1:8080");
+        assert!(normalize_cloud_url("ftp://x").is_err());
+        assert!(normalize_cloud_url("https://x/v1/health").is_err());
+        assert!(normalize_cloud_url("not a url at all").is_err());
+    }
+
+    #[test]
+    fn saved_address_is_used_and_cleared() {
+        let dir = std::env::temp_dir().join(format!("bc-auth-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // BC_CLOUD_URL would win; this test relies on it being unset in the test run.
+        if std::env::var("BC_CLOUD_URL").is_ok() {
+            return;
+        }
+        assert_eq!(cloud_url_for(&dir), DEFAULT_CLOUD_URL);
+        save_cloud_url(&dir, "my-mac.tail1234.ts.net").unwrap();
+        assert_eq!(cloud_url_for(&dir), "https://my-mac.tail1234.ts.net");
+        save_cloud_url(&dir, "").unwrap();
+        assert_eq!(cloud_url_for(&dir), DEFAULT_CLOUD_URL);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

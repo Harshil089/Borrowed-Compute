@@ -90,5 +90,7 @@ main { display: flex; flex-direction: column; gap: 14px; padding: 16px 18px 18px
   padding: 24px;
 }
 .dialog { width: min(440px, 100%); }
-.dialog-actions { display: flex; justify-content: flex-end; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.foot-actions { display: flex; gap: 12px; flex: none; }
+.field .hint { font-weight: 400; font-size: 12px; }
 .banner.ok { background: var(--ok-soft); color: var(--ok); }

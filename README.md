@@ -13,7 +13,7 @@ See `../Borrowed Compute Foundation.md` for decisions, scope and the first miles
 | `crates/bc-auth` | Client for the cloud API, used by `bc` and `bc-agent` |
 | `apps/bc-agent` | Mac agent: job runner, pairing checks, cloud presence sync |
 | `apps/bc-cli` | `bc` command: sign-in, pairing, packing the project, running jobs |
-| `apps/bc-cloud` | Cloud API: GitHub sign-in, device registry, pairing, presence (axum + Postgres) |
+| `apps/bc-cloud` | Cloud API: GitHub sign-in, device registry, pairing, presence (axum; SQLite inside the Mac app, or Postgres on a server) |
 
 | `apps/bc-desktop` | Desktop app "Borrowed Compute" for the PC (Tauri 2) |
 | `apps/bc-desktop-agent` | Menu-bar app "Borrowed Compute Agent" for the Mac (Tauri 2) |
@@ -28,25 +28,35 @@ Rust 1.91 is pinned in `rust-toolchain.toml` (iroh 1.x needs it).
 cargo test --workspace
 ```
 
-The cloud API tests need Postgres. Point `BC_TEST_DATABASE_URL` at an admin connection; each test creates its own database:
+The cloud API tests always run against a fresh SQLite file. To run them against Postgres as well, point `BC_TEST_DATABASE_URL` at an admin connection; each test creates its own database:
 
 ```bash
 BC_TEST_DATABASE_URL=postgres://bc@127.0.0.1:54329/postgres cargo test --workspace
 ```
 
-Without it, those tests are skipped. They use a fake GitHub, so they need no network.
+They use a fake GitHub, so they need no network.
 
 The Windows build of `bc` must run on Windows. Cross-compiling from macOS fails because `ring` needs the Windows SDK C headers. The `windows` GitHub Actions workflow builds `bc.exe` on `windows-latest` for every push to `main` and every pull request, runs the tests that work there, and uploads `bc.exe` as the `bc-windows-x86_64` artifact. The agent runner tests and the end-to-end test are Unix only (they use `sh` and Unix process groups).
 
-## Run the cloud locally
+## Where the cloud runs
 
-Needs a GitHub OAuth app with **Device Flow enabled**. Only the client id is used; no client secret.
+For development the cloud needs no server: **Borrowed Compute Agent hosts it on the Mac**, in a SQLite file under the app's data folder, listening on `127.0.0.1:8080`. The PC reaches it through [Tailscale](https://tailscale.com), a free private network between your own devices:
+
+1. Install Tailscale on the Mac and the PC, signed in with the same account.
+2. In Borrowed Compute Agent, under **Connect your PC**, click **Share with my devices**. The app runs `tailscale serve` and shows an address like `https://studio.tail1234.ts.net`. The first time, Tailscale may ask you to turn on HTTPS certificates for your tailnet; the app links to the page.
+3. In Borrowed Compute on the PC, enter that address under **Your Mac's address**, click **Test**, then sign in.
+
+The address is reachable only from devices in your tailnet. Job traffic still goes device to device.
+
+The `bc` command uses the same saved address (`bc cloud <address>` sets it). `BC_CLOUD_URL` overrides it for one run.
+
+To run the cloud on a server instead (needs a GitHub OAuth app with **Device Flow enabled**; only the client id is used, no client secret):
 
 ```bash
-BC_DATABASE_URL=postgres://bc@127.0.0.1:54329/bc_cloud BC_GITHUB_CLIENT_ID=<client id> cargo run -p bc-cloud
+BC_DATABASE_URL=postgres://user@host/db BC_GITHUB_CLIENT_ID=<client id> cargo run -p bc-cloud
 ```
 
-It listens on `127.0.0.1:8080` (`BC_LISTEN` to change). Devices find it through `BC_CLOUD_URL`, which defaults to `http://127.0.0.1:8080`.
+`BC_DATABASE_URL` may also be `sqlite://<file>?mode=rwc`. It listens on `127.0.0.1:8080` (`BC_LISTEN` to change). When a Mac's saved cloud address points at such a server, Borrowed Compute Agent uses it and does not host its own.
 
 ## Desktop apps
 
@@ -115,6 +125,7 @@ Windows does not record Unix permissions and often checks files out with CRLF li
 - Pairing is limited to devices on the same account (Foundation decision). The PC asks, the Mac owner approves with the code shown on both screens. Codes expire after 10 minutes.
 - The agent sends a heartbeat every 15 seconds with its current address, and copies the approved list into its local paired file. A revoked pairing stops new jobs within 15 seconds.
 - The cloud never sees job contents. Jobs go device to device, end-to-end encrypted.
+- Changing a device's cloud address signs it out, because each cloud has its own accounts and devices.
 
 ## Phase one limits
 

@@ -38,12 +38,38 @@ async function loadStatus() {
   status = await invoke("get_status");
   $("signin-view").classList.toggle("hidden", status.signed_in);
   $("app-view").classList.toggle("hidden", !status.signed_in);
-  if (status.signed_in) {
-    selectedMac = selectedMac || status.default_mac;
-    invoke("get_account")
-      .then((a) => { $("account").textContent = `${a.login}${a.device_name ? ` · ${a.device_name}` : ""}`; })
-      .catch(() => {});
-    await loadDevices();
+  if (!status.signed_in) {
+    $("signin-cloud").value = status.cloud_url_set ? status.cloud_url : "";
+    return;
+  }
+  selectedMac = selectedMac || status.default_mac;
+  try {
+    const a = await invoke("get_account");
+    $("account").textContent = `${a.login}${a.device_name ? ` · ${a.device_name}` : ""}`;
+  } catch (e) {
+    // The session belonged to another cloud; the app signed out, so show sign-in.
+    if (String(e) === "signed-out") return loadStatus();
+  }
+  await loadDevices();
+}
+
+function cloudMessage(box, ok, text) {
+  box.className = `banner ${ok ? "ok" : "bad"}`;
+  box.textContent = text;
+}
+
+async function testCloud(input, box) {
+  const url = input.value.trim();
+  if (!url) { cloudMessage(box, false, "Enter your Mac's address first."); return null; }
+  box.className = "banner hidden";
+  try {
+    const normalized = await invoke("test_cloud_url", { url });
+    input.value = normalized;
+    cloudMessage(box, true, "Connected. Your Mac answers at this address.");
+    return normalized;
+  } catch (e) {
+    cloudMessage(box, false, `Could not reach it: ${e}`);
+    return null;
   }
 }
 
@@ -109,10 +135,19 @@ async function selectMac(name) {
 
 // ---- Sign-in ----
 
+$("signin-test").addEventListener("click", () => testCloud($("signin-cloud"), $("signin-cloud-msg")));
+
 $("signin-btn").addEventListener("click", async () => {
   $("signin-btn").disabled = true;
   $("signin-error").classList.add("hidden");
   try {
+    // Sign in at the address typed above, after checking the Mac answers there.
+    const typed = $("signin-cloud").value.trim();
+    if (typed || status.cloud_url_set) {
+      const url = await testCloud($("signin-cloud"), $("signin-cloud-msg"));
+      if (!url) return;
+      await invoke("set_cloud_url", { url });
+    }
     await invoke("login", { name: $("pc-name").value });
     await loadStatus();
   } catch (e) {
@@ -132,6 +167,23 @@ listen("login-code", (event) => {
   verificationUri = event.payload.verification_uri;
   $("user-code").textContent = event.payload.user_code;
   $("signin-code").classList.remove("hidden");
+});
+
+$("settings").addEventListener("click", () => {
+  $("cloud-input").value = status.cloud_url;
+  $("cloud-msg").className = "banner hidden";
+  $("cloud-dialog").classList.remove("hidden");
+});
+$("cloud-test").addEventListener("click", () => testCloud($("cloud-input"), $("cloud-msg")));
+$("cloud-cancel").addEventListener("click", () => $("cloud-dialog").classList.add("hidden"));
+$("cloud-save").addEventListener("click", async () => {
+  const url = await testCloud($("cloud-input"), $("cloud-msg"));
+  if (!url) return;
+  if (url !== status.cloud_url && !confirm("Save this address and sign out? You will sign in again at the new address.")) return;
+  await invoke("set_cloud_url", { url }).catch((e) => cloudMessage($("cloud-msg"), false, String(e)));
+  $("cloud-dialog").classList.add("hidden");
+  devices = null;
+  await loadStatus();
 });
 
 $("signout").addEventListener("click", async () => {

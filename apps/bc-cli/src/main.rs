@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use bc_auth::{cloud_url, default_device_name, save_session, CloudClient};
+use bc_auth::{cloud_url_for, default_device_name, save_session, CloudClient};
 use bc_cli::flows::{
     append_timing, client_home, default_mac, key_path, load_spec, resolve_mac, set_default_mac,
     wait_for_pairing,
@@ -36,6 +36,9 @@ enum Command {
     Devices,
     /// Ask a Mac for permission to send it jobs, then wait for approval on the Mac.
     Pair { mac: String },
+    /// Show the cloud address, or set it (for example your Mac's Tailscale address).
+    /// An empty address returns to the default.
+    Cloud { url: Option<String> },
     /// Print this device's id.
     Id,
     /// Set the Mac that `bc run` uses by default (name or device id).
@@ -65,7 +68,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let home = client_home()?;
     let key_path = key_path(&home);
-    let mut cloud = CloudClient::from_home(cloud_url(), &home);
+    let mut cloud = CloudClient::from_home(cloud_url_for(&home), &home);
 
     match cli.command {
         Command::Login { name } => {
@@ -126,6 +129,17 @@ async fn main() -> Result<()> {
             }
             println!("\nPaired with {:?}.", request.mac_name);
         }
+        Command::Cloud { url } => match url {
+            None => println!("{}", cloud.base()),
+            Some(url) => {
+                let url = bc_auth::save_cloud_url(&home, &url)?;
+                CloudClient::new(&url, None)
+                    .health()
+                    .await
+                    .with_context(|| format!("saved {url}, but it does not answer yet"))?;
+                println!("Using the cloud at {url}. Sign in there with `bc login`.");
+            }
+        },
         Command::Id => {
             let key = load_or_create_key(&key_path)?;
             println!("{}", key.public());
