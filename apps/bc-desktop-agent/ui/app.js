@@ -226,9 +226,9 @@ function renderConnect() {
 function usageText(j) {
   const u = j.end && j.end.usage;
   if (!u) return "";
-  const cpu = (u.user_ms + u.system_ms) / 1000;
+  const t = (ms) => (ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`);
   const mb = Math.round(u.max_rss_bytes / 1048576);
-  return ` · CPU ${cpu.toFixed(1)} s · ${mb} MB · ran ${(u.wall_ms / 1000).toFixed(1)} s`;
+  return ` · CPU ${t(u.user_ms + u.system_ms)} · ${mb} MB · ran ${t(u.wall_ms)}`;
 }
 
 function jobState(j) {

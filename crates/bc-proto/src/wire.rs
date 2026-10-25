@@ -69,7 +69,8 @@ impl JobUsage {
     /// "CPU 12.4 s (3.1 cores) · peak memory 210 MB · ran 4.0 s", for people.
     pub fn summary(&self) -> String {
         let cpu_ms = self.user_ms + self.system_ms;
-        let secs = |ms: u64| format!("{:.1} s", ms as f64 / 1000.0);
+        // Short jobs are common; "0.0 s" would hide what they used.
+        let secs = |ms: u64| if ms < 1000 { format!("{ms} ms") } else { format!("{:.1} s", ms as f64 / 1000.0) };
         let cores = if self.wall_ms > 0 {
             format!(" ({:.1} cores)", cpu_ms as f64 / self.wall_ms as f64)
         } else {
@@ -248,6 +249,8 @@ mod tests {
     fn summarizes_usage() {
         let u = JobUsage { wall_ms: 4000, user_ms: 11_000, system_ms: 1_400, max_rss_bytes: 210 << 20 };
         assert_eq!(u.summary(), "CPU 12.4 s (3.1 cores) · peak memory 210 MB · ran 4.0 s");
+        let quick = JobUsage { wall_ms: 70, user_ms: 23, system_ms: 17, max_rss_bytes: 14 << 20 };
+        assert_eq!(quick.summary(), "CPU 40 ms (0.6 cores) · peak memory 14 MB · ran 70 ms");
     }
 
     #[test]
