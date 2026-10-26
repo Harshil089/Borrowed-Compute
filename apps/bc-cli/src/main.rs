@@ -119,7 +119,7 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             println!(
-                "Pairing code: {}\nOn the Mac {:?}, run:  bc-agent approve {}",
+                "Pairing code: {}\nOn the Mac {:?}, type this code into Borrowed Compute Agent, or run:  bc-agent approve {}",
                 request.code.as_deref().unwrap_or("?"),
                 request.mac_name,
                 request.code.as_deref().unwrap_or("<code>")

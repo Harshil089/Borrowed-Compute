@@ -34,8 +34,13 @@ enum Command {
     Id,
     /// List pairing requests and paired devices.
     Pairings,
-    /// Approve a pairing request using the code shown on the other device.
-    Approve { code: String },
+    /// Approve a pairing request by typing the code shown on the other device.
+    Approve {
+        code: String,
+        /// The requesting device's name, when more than one is waiting.
+        #[arg(long)]
+        from: Option<String>,
+    },
     /// Remove a paired device, by name or id.
     Unpair { device: String },
     /// Development without the cloud: allow a device id directly.
@@ -89,26 +94,31 @@ async fn main() -> Result<()> {
             for p in list {
                 match p.status {
                     PairingStatus::Pending => println!(
-                        "request from {:<20} code {}  (approve with: bc-agent approve {})",
-                        p.client_name,
-                        p.code.as_deref().unwrap_or("?"),
-                        p.code.as_deref().unwrap_or("<code>")
+                        "request from {:<20} approve with: bc-agent approve <code shown on {}>",
+                        p.client_name, p.client_name
                     ),
                     PairingStatus::Approved => println!("paired      {:<20} {}", p.client_name, p.client_id),
                 }
             }
         }
-        Command::Approve { code } => {
+        Command::Approve { code, from } => {
             let me = load_or_create_key(&key_path)?.public().to_string();
             let cloud = signed_in(&cloud)?;
-            let code = code.trim().to_string();
-            let request = cloud
+            // The Mac never sees codes, so pick the request by device; the cloud checks
+            // the typed code.
+            let pending: Vec<_> = cloud
                 .pairings(&me)
                 .await?
                 .into_iter()
-                .find(|p| p.status == PairingStatus::Pending && p.code.as_deref() == Some(&code))
-                .context("no pending request with that code; check `bc-agent pairings`")?;
-            cloud.approve(request.id, &code).await?;
+                .filter(|p| p.status == PairingStatus::Pending)
+                .filter(|p| from.as_ref().is_none_or(|f| &p.client_name == f || &p.client_id == f))
+                .collect();
+            let request = match pending.as_slice() {
+                [one] => one.clone(),
+                [] => bail!("no pending request{}; check `bc-agent pairings`", from.map(|f| format!(" from {f}")).unwrap_or_default()),
+                _ => bail!("several requests are waiting; add --from <device name>"),
+            };
+            cloud.approve(request.id, code.trim()).await?;
             println!("Paired {:?}. It can send jobs within a few seconds.", request.client_name);
         }
         Command::Unpair { device } => {
