@@ -212,12 +212,35 @@ async fn execute(
 
     let path = job_path().await;
     // Resolve the program on the job's PATH; Command looks it up on the agent's own.
-    let program_path = path
+    let lookup = path.clone().or_else(|| std::env::var_os("PATH"));
+    let program_path = lookup
         .as_ref()
         .and_then(|p| std::env::split_paths(p).map(|d| d.join(program)).find(|c| c.is_file()))
         .filter(|_| !program.contains('/'))
         .unwrap_or_else(|| PathBuf::from(program));
-    let mut cmd = std::process::Command::new(&program_path);
+    // The workspace holds both the project and the job's caches.
+    let workspace = root.parent().unwrap_or(root);
+    let wrapper = crate::sandbox::wrapper(workspace, path.as_deref());
+    // Under the sandbox, sandbox-exec itself always starts, so check the program here to
+    // keep a clear "not found" instead of a bare exit code.
+    if wrapper.is_some() {
+        let found = if program.contains('/') {
+            workdir.join(program).is_file()
+        } else {
+            program_path.is_absolute() && program_path.is_file()
+        };
+        if !found {
+            bail!("starting {program:?}: not found on this Mac");
+        }
+    }
+    let mut cmd = match wrapper {
+        Some(wrapper) => {
+            let mut cmd = std::process::Command::new(&wrapper[0]);
+            cmd.args(&wrapper[1..]).arg(&program_path);
+            cmd
+        }
+        None => std::process::Command::new(&program_path),
+    };
     if let Some(path) = &path {
         cmd.env("PATH", path);
     }
@@ -542,6 +565,31 @@ mod tests {
         let path = job_path().await.expect("a login shell PATH");
         let dirs: Vec<_> = std::env::split_paths(&path).collect();
         assert!(dirs.iter().any(|d| d == Path::new("/usr/bin")), "{path:?}");
+    }
+
+    /// A job reads and writes its workspace but nothing outside it.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn sandbox_confines_jobs_to_their_workspace() {
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&secret, "do not read").unwrap();
+        let script = format!(
+            "cat hello.txt && echo inside > made.txt && cat made.txt; \
+             cat '{0}' && echo READ-OUTSIDE; \
+             echo x > '{1}' && echo WROTE-OUTSIDE; \
+             ls ~ >/dev/null 2>&1 && echo LISTED-HOME; true",
+            secret.display(),
+            outside.path().join("escaped.txt").display()
+        );
+        let (msgs, _ws, root) = run(request(&["sh", "-c", &script], None), archive(&[("hello.txt", "hi\n")])).await;
+        let out = output(&msgs, OutputStream::Stdout);
+        assert!(out.contains("hi\ninside\n"), "the workspace works: {out}");
+        assert!(!out.contains("READ-OUTSIDE"), "read a file outside the workspace: {out}");
+        assert!(!out.contains("WROTE-OUTSIDE"), "wrote outside the workspace: {out}");
+        assert!(!out.contains("LISTED-HOME"), "listed the home folder: {out}");
+        assert!(!outside.path().join("escaped.txt").exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
