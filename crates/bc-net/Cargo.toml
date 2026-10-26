@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 bc-proto.workspace = true
+bc-secrets.workspace = true
 iroh.workspace = true
 iroh-relay.workspace = true
 anyhow.workspace = true

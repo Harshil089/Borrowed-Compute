@@ -595,6 +595,8 @@ fn show_window(app: &AppHandle) {
 }
 
 fn main() {
+    // Keys and the session token belong in the OS keychain, not in files.
+    bc_net::use_keychain();
     let root = home_dir().expect("config directory");
     let home = root.join("agent");
     let paths = AgentPaths::new(home.clone());

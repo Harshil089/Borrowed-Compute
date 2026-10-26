@@ -610,6 +610,8 @@ impl Write for EmitWriter {
 }
 
 fn main() {
+    // Keys and the session token belong in the OS keychain, not in files.
+    bc_net::use_keychain();
     let home = client_home().expect("config directory");
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())

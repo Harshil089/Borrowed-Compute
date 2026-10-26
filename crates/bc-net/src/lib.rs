@@ -62,29 +62,20 @@ pub async fn bind(secret: SecretKey, config: NetConfig) -> Result<Endpoint> {
     builder.bind().await.context("binding endpoint")
 }
 
-/// Loads this device's secret key, or creates one on first run.
-///
-/// Phase one stores the key in a file readable only by its owner. The OS keychain
-/// (Windows Credential Manager, macOS Keychain) replaces this later.
+pub use bc_secrets::use_keychain;
+
+/// Loads this device's secret key, or creates one on first run. With the keychain on
+/// (see [`use_keychain`]) the key lives there; `path` names its entry and is where an
+/// older key file is migrated from.
 pub fn load_or_create_key(path: &std::path::Path) -> Result<SecretKey> {
-    if let Ok(bytes) = std::fs::read(path) {
+    if let Some(bytes) = bc_secrets::read(path) {
         let bytes: [u8; 32] = bytes
             .try_into()
             .map_err(|_| anyhow::anyhow!("{} is not a 32-byte key", path.display()))?;
         return Ok(SecretKey::from_bytes(&bytes));
     }
     let key = SecretKey::generate();
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let mut file = options
-        .open(path)
-        .with_context(|| format!("creating {}", path.display()))?;
-    std::io::Write::write_all(&mut file, &key.to_bytes())?;
+    bc_secrets::write(path, &key.to_bytes())?;
     Ok(key)
 }
 

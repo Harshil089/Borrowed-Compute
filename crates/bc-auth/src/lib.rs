@@ -280,27 +280,21 @@ fn session_path(home: &Path) -> PathBuf {
 
 /// Phase one keeps the session token in a file readable only by its owner. The OS
 /// keychain replaces this later.
+/// Session tokens live in the OS keychain when it is on (`bc_net::use_keychain`),
+/// otherwise in an owner-only file.
 pub fn save_session(home: &Path, token: &str) -> Result<()> {
-    std::fs::create_dir_all(home)?;
-    let path = session_path(home);
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let mut file = options.open(&path).with_context(|| format!("writing {}", path.display()))?;
-    std::io::Write::write_all(&mut file, token.as_bytes())?;
-    Ok(())
+    bc_secrets::write(&session_path(home), token.as_bytes())
 }
 
 pub fn load_session(home: &Path) -> Option<String> {
-    std::fs::read_to_string(session_path(home))
-        .ok()
+    bc_secrets::read(&session_path(home))
+        .and_then(|b| String::from_utf8(b).ok())
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
 }
 
 pub fn clear_session(home: &Path) {
-    let _ = std::fs::remove_file(session_path(home));
+    bc_secrets::delete(&session_path(home));
 }
 
 /// A readable default device name, such as the computer's host name.
