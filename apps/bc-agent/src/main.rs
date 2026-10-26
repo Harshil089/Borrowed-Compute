@@ -48,6 +48,8 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Keys and the session token belong in the OS keychain, not in files.
+    bc_net::use_keychain();
     let cli = Cli::parse();
     let home = home_dir()?.join("agent");
     let paired = PairedDevices::new(home.join("paired"));
