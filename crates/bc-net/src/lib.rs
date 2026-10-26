@@ -20,7 +20,7 @@ pub fn relay_map(url: &str) -> Result<RelayMap> {
 }
 
 /// ALPN for the job protocol. The version suffix tracks [`wire::PROTOCOL_VERSION`].
-pub const JOB_ALPN: &[u8] = b"borrowed-compute/job/1";
+pub const JOB_ALPN: &[u8] = b"borrowed-compute/job/2";
 
 #[derive(Debug, Clone, Default)]
 pub struct NetConfig {

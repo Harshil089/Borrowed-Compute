@@ -16,15 +16,15 @@ use bc_auth::{
     save_session, CloudClient, DEFAULT_CLOUD_URL,
 };
 use bc_cli::flows::{
-    append_timing, client_home, default_mac, key_path, load_spec, resolve_mac, set_default_mac,
-    split_command, wait_for_pairing,
+    append_timing, client_home, default_mac, key_path, load_spec, mac_net, resolve_mac,
+    set_default_mac, split_command, wait_for_pairing,
 };
 use bc_cli::pack::pack;
 use bc_cli::route::RouteMemory;
-use bc_cli::run::{run_on_mac, Exit};
-use bc_net::{load_or_create_key, NetConfig};
+use bc_cli::run::{attach_service, list_services, run_on_mac, stop_service, Exit, RunOutcome};
+use bc_net::load_or_create_key;
 use bc_proto::cloud::{DeviceInfo, DeviceKind, PairingInfo, Provider, Providers};
-use bc_proto::wire::JobUsage;
+use bc_proto::wire::{JobUsage, ServiceInfo};
 use bc_proto::JobSpec;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
@@ -122,6 +122,7 @@ struct TimingsView {
 
 #[derive(Serialize)]
 struct JobResult {
+    job_id: String,
     status: i32,
     outcome: &'static str,
     message: String,
@@ -377,20 +378,26 @@ async fn run_job(
     folder: String,
     command: String,
     relay_only: bool,
+    service: bool,
 ) -> CmdResult<JobResult> {
-    let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
-    {
-        let mut job = state.job.lock().unwrap();
-        if job.is_some() {
-            return Err("a job is already running".into());
-        }
-        *job = Some(cancel_tx);
-    }
-    let result = run_job_inner(&app, &state, &mac, &folder, &command, relay_only, cancel_rx).await;
+    let cancel_rx = claim_job(&state)?;
+    let result = run_job_inner(&app, &state, &mac, &folder, &command, relay_only, service, cancel_rx).await;
     state.job.lock().unwrap().take();
     result.map_err(err_chain)
 }
 
+/// Takes the one job slot; its sender cancels the run (or detaches from a service).
+fn claim_job(state: &AppState) -> CmdResult<oneshot::Receiver<()>> {
+    let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+    let mut job = state.job.lock().unwrap();
+    if job.is_some() {
+        return Err("a job is already running".into());
+    }
+    *job = Some(cancel_tx);
+    Ok(cancel_rx)
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_job_inner(
     app: &AppHandle,
     state: &AppState,
@@ -398,13 +405,16 @@ async fn run_job_inner(
     folder: &str,
     command: &str,
     relay_only: bool,
+    service: bool,
     cancel: oneshot::Receiver<()>,
 ) -> anyhow::Result<JobResult> {
     let root = PathBuf::from(folder);
     if !root.is_dir() {
         anyhow::bail!("{folder} is not a folder");
     }
-    let spec = load_spec(&root, None, split_command(command)?)?;
+    let mut spec = load_spec(&root, None, split_command(command)?)?;
+    spec.job.service |= service;
+    let service = spec.job.service;
 
     phase(app, format!("Finding {mac}…"));
     let cloud = state.cloud();
@@ -422,8 +432,6 @@ async fn run_job_inner(
 
     phase(app, format!("Connecting and uploading {}…", human_bytes(archive.len() as u64)));
     let key = load_or_create_key(&key_path(&state.home))?;
-    // Meet the Mac on its own relay when it runs one, keeping public relays out of it.
-    let relays = cloud.relay().await.and_then(|url| bc_net::relay_map(&url).ok());
     let (log_path, log) = open_job_log(&state.home, mac, folder, &spec.job.argv)?;
     let mut stdout = EmitWriter::new(app.clone(), "stdout", log.clone());
     let mut stderr = EmitWriter::new(app.clone(), "stderr", log.clone());
@@ -432,7 +440,7 @@ async fn run_job_inner(
     let notice_log = log.clone();
     let outcome = run_on_mac(
         &key,
-        NetConfig { relay_only, relays, ..Default::default() },
+        mac_net(&cloud, relay_only).await,
         resolved.addr,
         &spec,
         archive,
@@ -440,7 +448,7 @@ async fn run_job_inner(
         &mut stderr,
         async move {
             let _ = cancel.await;
-            phase(&started_phase, "Cancelling…");
+            phase(&started_phase, if service { "Detaching…" } else { "Cancelling…" });
         },
         Some(&root),
         &RouteMemory::at(&state.home),
@@ -461,6 +469,11 @@ async fn run_job_inner(
         }
     };
 
+    Ok(job_result(state, &outcome, &log, &log_path))
+}
+
+/// Records how a run ended in the timing log and the run's log file, for the window.
+fn job_result(state: &AppState, outcome: &RunOutcome, log: &SharedLog, log_path: &Path) -> JobResult {
     let timing = outcome.timings.to_json(&outcome.job_id, &outcome.exit, outcome.usage.as_ref());
     append_timing(&state.home, &timing);
     let (kind, message) = match &outcome.exit {
@@ -471,6 +484,7 @@ async fn run_job_inner(
         Exit::Failed(r) => ("failure", format!("Could not run on the Mac: {r}")),
         Exit::Rejected(r) => ("rejected", format!("The Mac rejected the job: {r}")),
         Exit::Cancelled => ("cancelled", "Cancelled".to_string()),
+        Exit::Detached => ("detached", "Still running on the Mac".to_string()),
     };
     let usage_text = outcome.usage.as_ref().map(JobUsage::summary);
     let _ = writeln!(
@@ -480,7 +494,8 @@ async fn run_job_inner(
         outcome.job_id,
     );
     let t = &outcome.timings;
-    Ok(JobResult {
+    JobResult {
+        job_id: outcome.job_id.clone(),
         status: outcome.exit.status(),
         outcome: kind,
         message,
@@ -496,7 +511,61 @@ async fn run_job_inner(
             via_relay: t.via_relay,
             archive_bytes: t.archive_bytes,
         },
-    })
+    }
+}
+
+/// The services this PC started on `mac`.
+#[tauri::command]
+async fn services(state: State<'_, AppState>, mac: String) -> CmdResult<Vec<ServiceInfo>> {
+    let resolved = resolve_mac(&state.cloud(), &mac).await.map_err(err_chain)?;
+    let key = load_or_create_key(&key_path(&state.home)).map_err(err)?;
+    list_services(&key, mac_net(&state.cloud(), false).await, resolved.addr, &RouteMemory::at(&state.home))
+        .await
+        .map_err(err_chain)
+}
+
+#[tauri::command]
+async fn stop_job_service(state: State<'_, AppState>, mac: String, job_id: String) -> CmdResult<()> {
+    let resolved = resolve_mac(&state.cloud(), &mac).await.map_err(err_chain)?;
+    let key = load_or_create_key(&key_path(&state.home)).map_err(err)?;
+    stop_service(&key, mac_net(&state.cloud(), false).await, resolved.addr, &RouteMemory::at(&state.home), &job_id)
+        .await
+        .map_err(err_chain)
+}
+
+/// Watches a running service in the output pane, like a run; Cancel detaches.
+#[tauri::command]
+async fn attach_job_service(app: AppHandle, state: State<'_, AppState>, mac: String, job_id: String) -> CmdResult<JobResult> {
+    let cancel = claim_job(&state)?;
+    let result = async {
+        phase(&app, format!("Attaching to {job_id}…"));
+        let resolved = resolve_mac(&state.cloud(), &mac).await?;
+        let key = load_or_create_key(&key_path(&state.home))?;
+        let (log_path, log) = open_job_log(&state.home, &mac, "(attached)", std::slice::from_ref(&job_id))?;
+        let mut stdout = EmitWriter::new(app.clone(), "stdout", log.clone());
+        let mut stderr = EmitWriter::new(app.clone(), "stderr", log.clone());
+        let detach_app = app.clone();
+        let outcome = attach_service(
+            &key,
+            mac_net(&state.cloud(), false).await,
+            resolved.addr,
+            &RouteMemory::at(&state.home),
+            &job_id,
+            &mut stdout,
+            &mut stderr,
+            async move {
+                let _ = cancel.await;
+                phase(&detach_app, "Detaching…");
+            },
+        )
+        .await?;
+        stdout.flush()?;
+        stderr.flush()?;
+        anyhow::Ok(job_result(&state, &outcome, &log, &log_path))
+    }
+    .await;
+    state.job.lock().unwrap().take();
+    result.map_err(err_chain)
 }
 
 #[tauri::command]
@@ -633,6 +702,9 @@ fn main() {
             project_info,
             run_job,
             cancel_job,
+            services,
+            stop_job_service,
+            attach_job_service,
             open_log,
             check_update,
             install_update,

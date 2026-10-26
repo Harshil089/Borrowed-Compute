@@ -3,12 +3,13 @@
 use anyhow::{bail, Context, Result};
 use bc_net::{recv_msg, send_msg};
 use bc_proto::wire::{AgentMsg, ClientMsg, PROTOCOL_VERSION};
-use iroh::endpoint::Connection;
-use tokio::sync::mpsc;
+use iroh::endpoint::{Connection, RecvStream, SendStream};
+use tokio::sync::{broadcast, mpsc};
 
 use crate::events::{AgentEvent, EventSender, JobEnd};
 use crate::paired::PairedDevices;
 use crate::runner::{run_job, RunnerConfig};
+use crate::services::{Attached, Services, StopError};
 
 /// Largest project archive accepted in Phase one, before chunked sync exists.
 pub const MAX_ARCHIVE: u64 = 2 << 30;
@@ -19,11 +20,12 @@ pub struct AgentConfig {
     pub paired: PairedDevices,
     /// Job activity for a UI. `None` when nobody is watching.
     pub events: Option<EventSender>,
+    pub services: Services,
 }
 
 impl AgentConfig {
     pub fn new(runner: RunnerConfig, paired: PairedDevices) -> Self {
-        AgentConfig { runner, paired, events: None }
+        AgentConfig { runner, paired, events: None, services: Services::default() }
     }
 
     fn emit(&self, event: AgentEvent) {
@@ -48,10 +50,7 @@ pub async fn serve_connection(config: &AgentConfig, conn: Connection) -> Result<
     }
     send_msg(&mut send, &AgentMsg::Hello { protocol: PROTOCOL_VERSION }).await?;
 
-    let req = match recv_msg::<ClientMsg>(&mut recv).await? {
-        ClientMsg::Submit(req) => req,
-        other => bail!("expected Submit, got {other:?}"),
-    };
+    let first = recv_msg::<ClientMsg>(&mut recv).await?;
     // Checked after the handshake so an unpaired device gets a clear message.
     if !config.paired.contains(&peer) {
         let reason = format!("device {peer} is not paired with this Mac");
@@ -61,6 +60,29 @@ pub async fn serve_connection(config: &AgentConfig, conn: Connection) -> Result<
         conn.closed().await;
         bail!(reason);
     }
+    let req = match first {
+        ClientMsg::Submit(req) => req,
+        ClientMsg::Attach { job_id } => {
+            return match config.services.attach(&job_id, peer) {
+                Ok(attached) => {
+                    send_msg(&mut send, &AgentMsg::Accepted { job_id: job_id.clone() }).await?;
+                    stream_service(config, &conn, send, recv, &job_id, attached).await
+                }
+                Err(e) => reply_and_close(&conn, send, AgentMsg::Rejected { reason: service_error(&job_id, e) }).await,
+            };
+        }
+        ClientMsg::Stop { job_id } => {
+            let reply = match config.services.stop(&job_id, Some(peer)) {
+                Ok(()) => AgentMsg::Accepted { job_id },
+                Err(e) => AgentMsg::Rejected { reason: service_error(&job_id, e) },
+            };
+            return reply_and_close(&conn, send, reply).await;
+        }
+        ClientMsg::ListServices => {
+            return reply_and_close(&conn, send, AgentMsg::Services(config.services.list(Some(peer)))).await;
+        }
+        other => bail!("expected Submit, Attach, Stop or ListServices, got {other:?}"),
+    };
     if req.archive_bytes > MAX_ARCHIVE {
         let reason = format!("project is {} bytes, limit is {MAX_ARCHIVE}", req.archive_bytes);
         send_msg(&mut send, &AgentMsg::Rejected { reason: reason.clone() }).await?;
@@ -92,6 +114,11 @@ pub async fn serve_connection(config: &AgentConfig, conn: Connection) -> Result<
         client: peer.to_string(),
         argv: req.argv.clone(),
     });
+    if req.service {
+        // The service, not this connection, owns the job from here, and reports its end.
+        let attached = config.services.start(config.runner.clone(), req, archive, peer, config.events.clone());
+        return stream_service(config, &conn, send, recv, &job_id, attached).await;
+    }
     // Reports how the job ended on every return path, including a lost connection.
     let mut end = JobEndGuard { config, job_id, end: JobEnd::Disconnected };
 
@@ -134,6 +161,66 @@ pub async fn serve_connection(config: &AgentConfig, conn: Connection) -> Result<
     send.finish()?;
     conn.closed().await;
     Ok(())
+}
+
+/// Streams a service to an attached client until it ends or the client leaves. Leaving
+/// (closing the connection) detaches; `Cancel` stops the service.
+async fn stream_service(
+    config: &AgentConfig,
+    conn: &Connection,
+    mut send: SendStream,
+    mut recv: RecvStream,
+    job_id: &str,
+    attached: Attached,
+) -> Result<()> {
+    let Attached { backlog, mut live } = attached;
+    for msg in backlog {
+        send_msg(&mut send, &msg).await.context("streaming to client")?;
+    }
+    let mut client = AbortOnDrop(tokio::spawn(async move { recv_msg::<ClientMsg>(&mut recv).await }));
+    loop {
+        tokio::select! {
+            msg = live.recv() => match msg {
+                Ok(msg) => {
+                    let end = matches!(msg, AgentMsg::Exited { .. } | AgentMsg::Failed { .. });
+                    send_msg(&mut send, &msg).await.context("streaming to client")?;
+                    if end {
+                        break;
+                    }
+                }
+                // A slow client misses some output rather than holding the service back.
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
+            msg = &mut client.0 => {
+                if matches!(msg, Ok(Ok(ClientMsg::Cancel))) {
+                    let _ = config.services.stop(job_id, None);
+                    // Keep streaming: the service's end follows.
+                    client = AbortOnDrop(tokio::spawn(std::future::pending()));
+                    continue;
+                }
+                // Gone or detached; the service keeps running.
+                return Ok(());
+            }
+        }
+    }
+    send.finish()?;
+    conn.closed().await;
+    Ok(())
+}
+
+async fn reply_and_close(conn: &Connection, mut send: SendStream, msg: AgentMsg) -> Result<()> {
+    send_msg(&mut send, &msg).await?;
+    send.finish()?;
+    conn.closed().await;
+    Ok(())
+}
+
+fn service_error(job_id: &str, e: StopError) -> String {
+    match e {
+        StopError::NotFound => format!("no service {job_id} is running on this Mac"),
+        StopError::NotOwner => format!("service {job_id} was started by another device"),
+    }
 }
 
 struct JobEndGuard<'a> {

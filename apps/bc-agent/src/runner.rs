@@ -281,16 +281,22 @@ async fn execute(
         tx.clone(),
     ));
 
-    let limit = req
-        .timeout_secs
-        .map(Duration::from_secs)
-        .unwrap_or(config.default_timeout);
+    // Services run until stopped, so they have no limit.
+    let limit = match req.timeout_secs {
+        _ if req.service => None,
+        Some(secs) => Some(Duration::from_secs(secs)),
+        None => Some(config.default_timeout),
+    };
     // The wait runs on its own thread and reaps the process even if this job is abandoned:
     // the group guard kills the job, and the wait then returns.
     let mut wait = tokio::task::spawn_blocking(move || wait_with_usage(child));
-    let ((status, usage), timed_out) = match tokio::time::timeout(limit, &mut wait).await {
-        Ok(waited) => (waited??, false),
-        Err(_) => {
+    let waited = match limit {
+        Some(limit) => tokio::time::timeout(limit, &mut wait).await.ok(),
+        None => Some((&mut wait).await),
+    };
+    let ((status, usage), timed_out) = match waited {
+        Some(waited) => (waited??, false),
+        None => {
             kill_group(Some(pid));
             (wait.await??, true)
         }
@@ -424,6 +430,7 @@ mod tests {
             workdir: ".".into(),
             env: BTreeMap::from([("BC_TEST".into(), "yes".into())]),
             timeout_secs,
+            service: false,
             archive_bytes: 0,
         }
     }

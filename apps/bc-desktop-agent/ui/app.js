@@ -46,6 +46,7 @@ let status = null;
 let account = null;
 let pairings = [];
 let jobs = [];
+let services = [];
 let verificationUri = null;
 let signingIn = false;
 let tailscale = null;
@@ -193,6 +194,15 @@ function fig(v) {
   return v < 1000 ? `${v}<i>ms</i>` : `${(v / 1000).toFixed(1)}<i>s</i>`;
 }
 
+// How long a service has been up, as "4m" or "2h 10m".
+function uptime(startedAt) {
+  const s = Math.max(0, Math.floor(Date.now() / 1000) - startedAt);
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+  return `${Math.floor(s / 86400)}d`;
+}
+
 function clientName(id) {
   const p = pairings.find((p) => p.client_id === id);
   return p ? p.client_name : `${id.slice(0, 10)}…`;
@@ -277,6 +287,17 @@ function render() {
     : `<div class="board-empty">No devices cleared yet. On your PC, choose this Mac and press Pair; the request appears here to approve.</div>`);
 
   renderArrivals();
+
+  $("services-block").classList.toggle("hidden", !services.length);
+  setHtml("services", services.map((s) => `
+    <div class="dep svc live">
+      <span class="dep-time">${esc(uptime(s.started_at))}</span>
+      <span class="dep-main">
+        <span class="dep-cmd">${esc(s.argv.join(" "))}</span>
+        <span class="dep-sub"><span class="kv"><b>From</b> ${esc(clientName(s.owner))}</span><span class="kv"><b>Up since</b> ${clock(s.started_at * 1000)}</span></span>
+      </span>
+      <button class="danger" data-stop="${esc(s.job_id)}" data-cmd="${esc(s.argv.join(" "))}">Stop</button>
+    </div>`).join(""));
 
   setHtml("jobs", jobs.length
     ? `<div class="board-head"><span>Time</span><span>Run</span><span>Status</span></div>` +
@@ -401,6 +422,7 @@ async function refresh() {
       if (status.host.hosting) tailscale = await invoke("tailscale_status");
       pairings = await invoke("list_pairings");
       jobs = await invoke("recent_jobs");
+      services = await invoke("list_services");
       showError(status.start_error ? `The agent could not start: ${status.start_error}` : "");
     }
   } catch (e) {
@@ -543,6 +565,14 @@ document.addEventListener("click", async (event) => {
   }
   const approve = event.target.closest("[data-approve]");
   const remove = event.target.closest("[data-unpair]");
+  const stop = event.target.closest("[data-stop]");
+  if (stop) {
+    if (!(await ask(`Stop ${stop.dataset.cmd}? Its process ends and its workspace is deleted.`, "Stop", true))) return;
+    stop.disabled = true;
+    try { await invoke("stop_service", { jobId: stop.dataset.stop }); } catch (e) { showError(String(e)); }
+    await refresh();
+    return;
+  }
   if (approve) { approvePairing(approve.dataset.approve); return; }
   try {
     if (remove) {

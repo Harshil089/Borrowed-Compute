@@ -82,6 +82,14 @@
         <button id="refresh" class="icon-btn" title="Refresh" aria-label="Refresh"><svg class="icon"><use href="#i-refresh"/></svg></button>
       </div>
       <div id="macs" class="macs"></div>
+
+      <div id="services-box" class="services hidden">
+        <div class="rail-head">
+          <h2 class="heading">Still running</h2>
+        </div>
+        <p class="empty-note">Services keep running and keep the Mac awake until you stop them.</p>
+        <ul id="services" class="service-list"></ul>
+      </div>
     </aside>
 
     <main class="deck">
@@ -128,6 +136,10 @@
           <div class="run-foot">
             <div class="run-notes">
               <span id="hint" class="hint"></span>
+              <label class="check" title="For servers: no time limit, keeps running after you close this window or the PC sleeps, and keeps the Mac awake until you stop it.">
+                <input id="as-service" type="checkbox">
+                <span>Keep running <span class="faint">as a service</span></span>
+              </label>
               <label class="check relay">
                 <input id="relay-only" type="checkbox">
                 <span>Relay only <span class="faint">for testing strict networks</span></span>

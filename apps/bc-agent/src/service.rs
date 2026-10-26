@@ -53,6 +53,11 @@ impl Agent {
         Ok(Agent { endpoint, config })
     }
 
+    /// Running services, for the Mac app to show and stop.
+    pub fn services(&self) -> &crate::services::Services {
+        &self.config.services
+    }
+
     /// Accepts job connections until the endpoint closes.
     pub async fn accept_loop(&self) {
         while let Some(incoming) = self.endpoint.accept().await {

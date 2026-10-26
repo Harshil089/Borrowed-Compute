@@ -206,7 +206,64 @@ async function selectMac(name) {
   selectedMac = name;
   await invoke("choose_mac", { mac: name }).catch(() => {});
   renderMacs();
+  loadServices();
 }
+
+// ---- Services ----
+
+let services = [];
+
+async function loadServices() {
+  const mac = devices?.devices.find((d) => d.name === selectedMac);
+  if (!mac || !mac.online || pairingFor(mac)?.status !== "approved") { services = []; renderServices(); return; }
+  try {
+    services = await invoke("services", { mac: selectedMac });
+  } catch {
+    // An older agent or a dropped connection: show nothing rather than an error.
+    services = [];
+  }
+  renderServices();
+}
+
+function uptime(startedAt) {
+  const s = Math.max(0, Math.floor(Date.now() / 1000) - startedAt);
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+  return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
+}
+
+function renderServices() {
+  $("services-box").classList.toggle("hidden", services.length === 0);
+  $("services").innerHTML = services.map((s) => `
+    <li class="service">
+      <span class="service-cmd">${esc(s.argv.join(" "))}</span>
+      <div class="service-foot">
+        <span class="service-up">up ${esc(uptime(s.started_at))}</span>
+        <span class="actions">
+          <button data-watch="${esc(s.job_id)}" ${running ? "disabled" : ""}>Watch</button>
+          <button class="danger" data-stop="${esc(s.job_id)}">Stop</button>
+        </span>
+      </div>
+    </li>`).join("");
+}
+
+$("services").addEventListener("click", async (event) => {
+  const watch = event.target.closest("[data-watch]");
+  const stop = event.target.closest("[data-stop]");
+  if (watch) watchService(watch.dataset.watch);
+  if (stop) {
+    const s = services.find((x) => x.job_id === stop.dataset.stop);
+    if (!(await ask(`Stop ${s ? s.argv.join(" ") : "this service"} on ${selectedMac}? Its workspace is deleted.`, "Stop service", true))) return;
+    stop.disabled = true;
+    try {
+      await invoke("stop_job_service", { mac: selectedMac, jobId: stop.dataset.stop });
+    } catch (e) {
+      showError(String(e));
+    }
+    loadServices();
+  }
+});
 
 // ---- Sign-in ----
 
@@ -520,6 +577,7 @@ function setRunTab(word) { $("run-tab").textContent = word; }
 function stampFor(r) {
   if (r.outcome === "success") return ["ok", "Landed"];
   if (r.outcome === "cancelled") return ["void", "Void"];
+  if (r.outcome === "detached") return ["ok", "Still up"];
   if (r.outcome === "rejected") return ["bad", "Refused"];
   return ["bad", r.status === 124 ? "Timed out" : `Exit ${r.status}`];
 }
@@ -574,23 +632,35 @@ async function runJob() {
   atBottom = true;
   $("result").classList.add("hidden");
   $("run").classList.add("hidden");
+  const service = $("as-service").checked;
+  $("cancel").textContent = service ? "Detach" : "Cancel run";
+  $("cancel").title = service ? "Stop watching. The service keeps running on the Mac." : "";
   $("cancel").classList.remove("hidden");
   $("cancel").disabled = false;
   setPhase("Starting…", true);
   setLeg("pack");
   setRunTab("In flight");
+  // Once it is up, list it so it can be stopped from the rail.
+  const listSoon = service ? setTimeout(loadServices, 4000) : null;
   try {
     const r = await invoke("run_job", {
       mac: selectedMac,
       folder: $("folder").value.trim(),
       command,
       relayOnly: $("relay-only").checked,
+      service,
     });
+    clearTimeout(listSoon);
     renderResult(r);
     setRunTab(stampFor(r)[1]);
-    if (r.outcome === "success") setLeg("done");
+    if (r.outcome === "success" || r.outcome === "detached") setLeg("done");
     else $("legs").classList.add("failed");
-    setPhase(r.outcome === "rejected" ? "Not paired with this Mac. Click Pair next to it." : "Done.", false);
+    setPhase(
+      r.outcome === "rejected" ? "Not paired with this Mac. Click Pair next to it."
+        : r.outcome === "detached" ? "Detached. The service keeps running on the Mac until you stop it."
+        : "Done.",
+      false,
+    );
     if (r.outcome === "rejected") loadDevices();
   } catch (e) {
     setPhase("Could not run the job.", false);
@@ -602,6 +672,41 @@ async function runJob() {
     $("run").classList.remove("hidden");
     $("cancel").classList.add("hidden");
     updateRunButton();
+    loadServices();
+  }
+}
+
+// Shows a running service's recent and live output in the flight log.
+async function watchService(jobId) {
+  if (running) return;
+  showError("");
+  running = true;
+  sawOutput = false;
+  consoleEl.textContent = "";
+  atBottom = true;
+  renderServices();
+  $("result").classList.add("hidden");
+  $("run").classList.add("hidden");
+  $("cancel").textContent = "Detach";
+  $("cancel").title = "Stop watching. The service keeps running on the Mac.";
+  $("cancel").classList.remove("hidden");
+  $("cancel").disabled = false;
+  setLeg("run");
+  setRunTab("Watching");
+  try {
+    const r = await invoke("attach_job_service", { mac: selectedMac, jobId });
+    renderResult(r);
+    setRunTab(stampFor(r)[1]);
+    setPhase(r.outcome === "detached" ? "Detached. The service is still running." : "The service ended.", false);
+  } catch (e) {
+    setPhase("Could not watch the service.", false);
+    showError(String(e));
+  } finally {
+    running = false;
+    $("run").classList.remove("hidden");
+    $("cancel").classList.add("hidden");
+    updateRunButton();
+    loadServices();
   }
 }
 
@@ -618,10 +723,14 @@ $("clear").addEventListener("click", () => {
 // ---- Start ----
 
 $("command").value = store.get("command") || "";
+$("as-service").checked = store.get("service") === "1";
+$("as-service").addEventListener("change", () => store.set("service", $("as-service").checked ? "1" : ""));
 setLeg("idle");
 $("date-tab").textContent = new Date().toLocaleDateString(undefined, { month: "short", day: "numeric" });
 loadStatus()
-  .then(() => setFolder(store.get("folder") || ""))
+  .then(() => { loadServices(); return setFolder(store.get("folder") || ""); })
   .catch((e) => showError(String(e)));
 // Keep online states fresh without hammering the cloud.
-setInterval(() => { if (status?.signed_in && !running && document.visibilityState === "visible") loadDevices(); }, 15000);
+setInterval(() => {
+  if (status?.signed_in && !running && document.visibilityState === "visible") loadDevices().then(loadServices);
+}, 15000);

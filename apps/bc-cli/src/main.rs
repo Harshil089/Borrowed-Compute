@@ -5,13 +5,13 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use bc_auth::{cloud_url_for, default_device_name, save_session, CloudClient};
 use bc_cli::flows::{
-    append_timing, client_home, default_mac, key_path, load_spec, resolve_mac, set_default_mac,
-    wait_for_pairing,
+    append_timing, client_home, default_mac, key_path, load_spec, mac_net, resolve_mac,
+    set_default_mac, wait_for_pairing,
 };
 use bc_cli::pack::pack;
 use bc_cli::route::RouteMemory;
-use bc_cli::run::{run_on_mac, Exit};
-use bc_net::{load_or_create_key, NetConfig};
+use bc_cli::run::{attach_service, list_services, run_on_mac, stop_service, Exit};
+use bc_net::load_or_create_key;
 use bc_proto::cloud::{DeviceKind, PairingStatus, Provider};
 use clap::{Parser, Subcommand};
 
@@ -62,9 +62,30 @@ enum Command {
         /// Print phase timings when the job ends.
         #[arg(long)]
         timings: bool,
+        /// Run as a service, such as a dev server: no timeout, and it keeps running on
+        /// the Mac (which stays awake) after Ctrl+C or a disconnect, until `bc stop`.
+        #[arg(long)]
+        service: bool,
         /// Program and arguments. Overrides `job.argv` in the spec.
         #[arg(last = true)]
         argv: Vec<String>,
+    },
+    /// List the services this device started on the Mac.
+    Services {
+        #[arg(long)]
+        to: Option<String>,
+    },
+    /// Watch a running service's output. Ctrl+C stops watching, not the service.
+    Attach {
+        id: String,
+        #[arg(long)]
+        to: Option<String>,
+    },
+    /// Stop a running service.
+    Stop {
+        id: String,
+        #[arg(long)]
+        to: Option<String>,
     },
 }
 
@@ -156,16 +177,46 @@ async fn main() -> Result<()> {
             set_default_mac(&home, &mac)?;
             println!("bc run will use {mac}");
         }
-        Command::Run { to, spec, relay_only, timings, mut argv } => {
-            let target = match to {
-                Some(mac) => mac,
-                None => default_mac(&home)
-                    .context("no Mac chosen; pass --to <name> or run `bc use <name>`")?,
-            };
-            let mac = resolve_mac(&cloud, &target).await?;
-            if let Some(warning) = &mac.offline_warning {
-                eprintln!("bc: warning: {warning}");
+        Command::Services { to } => {
+            let (_, mac) = target_mac(&home, &cloud, to).await?;
+            let key = load_or_create_key(&key_path)?;
+            let list = list_services(&key, mac_net(&cloud, false).await, mac.addr, &RouteMemory::at(&home)).await?;
+            if list.is_empty() {
+                println!("No services running.");
             }
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
+            for s in list {
+                println!("{:<28} up {:<10} {}", s.job_id, ago(now - s.started_at as i64).trim_end_matches(" ago"), s.argv.join(" "));
+            }
+        }
+        Command::Attach { id, to } => {
+            let (_, mac) = target_mac(&home, &cloud, to).await?;
+            let key = load_or_create_key(&key_path)?;
+            let cancel = async {
+                let _ = tokio::signal::ctrl_c().await;
+            };
+            let outcome = attach_service(
+                &key,
+                mac_net(&cloud, false).await,
+                mac.addr,
+                &RouteMemory::at(&home),
+                &id,
+                &mut std::io::stdout(),
+                &mut std::io::stderr(),
+                cancel,
+            )
+            .await?;
+            report_end(&outcome.job_id, &outcome.exit);
+            std::process::exit(outcome.exit.status());
+        }
+        Command::Stop { id, to } => {
+            let (_, mac) = target_mac(&home, &cloud, to).await?;
+            let key = load_or_create_key(&key_path)?;
+            stop_service(&key, mac_net(&cloud, false).await, mac.addr, &RouteMemory::at(&home), &id).await?;
+            println!("Stopped {id}.");
+        }
+        Command::Run { to, spec, relay_only, timings, service, mut argv } => {
+            let (target, mac) = target_mac(&home, &cloud, to).await?;
             let root = std::env::current_dir()?;
             // With no command and no bc.toml, run what the project looks like it wants.
             if argv.is_empty() && spec.is_none() && !root.join("bc.toml").exists() {
@@ -174,18 +225,17 @@ async fn main() -> Result<()> {
                     eprintln!("bc: {} project ({}); running: {}", found.kind, found.reason, argv.join(" "));
                 }
             }
-            let spec = load_spec(&root, spec, argv)?;
+            let mut spec = load_spec(&root, spec, argv)?;
+            spec.job.service |= service;
             let archive = pack(&root, &spec.files.exclude)?;
 
             let key = load_or_create_key(&key_path)?;
-            // Meet the Mac on its own relay when it runs one, keeping public relays out of it.
-            let relays = cloud.relay().await.and_then(|url| bc_net::relay_map(&url).ok());
             let cancel = async {
                 let _ = tokio::signal::ctrl_c().await;
             };
             let outcome = run_on_mac(
                 &key,
-                NetConfig { relay_only, relays, ..Default::default() },
+                mac_net(&cloud, relay_only).await,
                 mac.addr,
                 &spec,
                 archive,
@@ -213,12 +263,31 @@ async fn main() -> Result<()> {
                 }
                 Exit::Failed(reason) => eprintln!("bc: job failed on the Mac: {reason}"),
                 Exit::TimedOut => eprintln!("bc: job timed out"),
-                _ => {}
+                exit => report_end(&outcome.job_id, exit),
             }
             std::process::exit(outcome.exit.status());
         }
     }
     Ok(())
+}
+
+/// The Mac named by `--to`, else the one set with `bc use`.
+async fn target_mac(home: &std::path::Path, cloud: &CloudClient, to: Option<String>) -> Result<(String, bc_cli::flows::ResolvedMac)> {
+    let target = match to {
+        Some(mac) => mac,
+        None => default_mac(home).context("no Mac chosen; pass --to <name> or run `bc use <name>`")?,
+    };
+    let mac = resolve_mac(cloud, &target).await?;
+    if let Some(warning) = &mac.offline_warning {
+        eprintln!("bc: warning: {warning}");
+    }
+    Ok((target, mac))
+}
+
+fn report_end(job_id: &str, exit: &Exit) {
+    if *exit == Exit::Detached {
+        eprintln!("bc: service {job_id} keeps running on the Mac. Watch it with `bc attach {job_id}`, stop it with `bc stop {job_id}`.");
+    }
 }
 
 fn signed_in(cloud: &CloudClient) -> Result<&CloudClient> {

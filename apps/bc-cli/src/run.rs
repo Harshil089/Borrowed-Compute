@@ -5,8 +5,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use bc_net::{bind, recv_msg, send_msg, EndpointAddr, NetConfig, JOB_ALPN};
-use bc_proto::wire::{AgentMsg, ClientMsg, JobRequest, JobUsage, OutputStream, PROTOCOL_VERSION};
+use bc_proto::wire::{AgentMsg, ClientMsg, JobRequest, JobUsage, OutputStream, ServiceInfo, PROTOCOL_VERSION};
 use bc_proto::JobSpec;
+use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::{Endpoint, SecretKey};
 
 use crate::autofix;
@@ -29,6 +30,8 @@ pub enum Exit {
     Failed(String),
     Rejected(String),
     Cancelled,
+    /// A service this client stopped watching; it keeps running on the Mac.
+    Detached,
 }
 
 impl Exit {
@@ -39,6 +42,7 @@ impl Exit {
             Exit::TimedOut => 124,
             Exit::Killed => 137,
             Exit::Cancelled => 130,
+            Exit::Detached => 0,
             Exit::Failed(_) | Exit::Rejected(_) => 1,
         }
     }
@@ -291,13 +295,40 @@ async fn run_attempt(
     send_msg(&mut send, &ClientMsg::UploadDone).await?;
     timings.upload = t0.elapsed();
 
+    let (exit, usage) =
+        stream_job(&mut send, &mut recv, spec.job.service, &mut timings, t0, stdout, stderr, cancel, started).await?;
+
+    timings.via_relay = bc_net::via_relay(&conn);
+    let _ = send.finish();
+    conn.close(0u32.into(), b"done");
+    Ok(done(job_id, exit, timings, t0, usage))
+}
+
+/// Writes a job's output until it ends or `cancel` fires. Cancelling a service only
+/// detaches from it (the connection closes, the service keeps running); cancelling a job
+/// stops it.
+#[allow(clippy::too_many_arguments)]
+async fn stream_job(
+    send: &mut SendStream,
+    recv: &mut RecvStream,
+    service: bool,
+    timings: &mut Timings,
+    t0: Instant,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+    cancel: impl std::future::Future<Output = ()>,
+    started: &mut bool,
+) -> Result<(Exit, Option<JobUsage>)> {
     tokio::pin!(cancel);
     let mut usage = None;
     let exit = loop {
         let msg = tokio::select! {
-            msg = recv_msg::<AgentMsg>(&mut recv) => msg.context("connection to the Mac lost")?,
+            msg = recv_msg::<AgentMsg>(recv) => msg.context("connection to the Mac lost")?,
             _ = &mut cancel => {
-                let _ = send_msg(&mut send, &ClientMsg::Cancel).await;
+                if service {
+                    break Exit::Detached;
+                }
+                let _ = send_msg(send, &ClientMsg::Cancel).await;
                 break Exit::Cancelled;
             }
         };
@@ -327,11 +358,104 @@ async fn run_attempt(
             other => bail!("unexpected message during job {other:?}"),
         }
     };
+    Ok((exit, usage))
+}
 
-    timings.via_relay = bc_net::via_relay(&conn);
-    let _ = send.finish();
-    conn.close(0u32.into(), b"done");
-    Ok(done(job_id, exit, timings, t0, usage))
+/// A connection to the Mac that has passed the handshake, for the service commands.
+struct Session {
+    endpoint: Endpoint,
+    conn: Connection,
+    send: SendStream,
+    recv: RecvStream,
+}
+
+impl Session {
+    /// Connects through the relay when `memory` says the direct path to this Mac fails.
+    async fn open(key: &SecretKey, net: NetConfig, mac: EndpointAddr, memory: &RouteMemory) -> Result<Self> {
+        let relay_only = net.relay_only || memory.relay_first(&mac);
+        let endpoint = bind(key.clone(), NetConfig { relay_only, ..net }).await?;
+        let conn = tokio::time::timeout(CONNECT_TIMEOUT, endpoint.connect(mac, JOB_ALPN))
+            .await
+            .map_err(|_| anyhow::anyhow!("the Mac did not answer within {}s", CONNECT_TIMEOUT.as_secs()))?
+            .context("connecting to the Mac")?;
+        let (mut send, mut recv) = conn.open_bi().await?;
+        send_msg(&mut send, &ClientMsg::Hello { protocol: PROTOCOL_VERSION }).await?;
+        match recv_msg::<AgentMsg>(&mut recv).await? {
+            AgentMsg::Hello { protocol } if protocol == PROTOCOL_VERSION => {}
+            AgentMsg::Rejected { reason } => bail!(reason),
+            other => bail!("unexpected handshake reply {other:?}"),
+        }
+        Ok(Session { endpoint, conn, send, recv })
+    }
+
+    /// Sends `msg` and returns the one reply. A pairing refusal comes back as an error.
+    async fn ask(&mut self, msg: &ClientMsg) -> Result<AgentMsg> {
+        send_msg(&mut self.send, msg).await?;
+        match recv_msg::<AgentMsg>(&mut self.recv).await? {
+            AgentMsg::Rejected { reason } => bail!(reason),
+            reply => Ok(reply),
+        }
+    }
+
+    async fn close(self) {
+        let _ = { self.send }.finish();
+        self.conn.close(0u32.into(), b"done");
+        self.endpoint.close().await;
+    }
+}
+
+/// The services this device started on `mac`.
+pub async fn list_services(key: &SecretKey, net: NetConfig, mac: EndpointAddr, memory: &RouteMemory) -> Result<Vec<ServiceInfo>> {
+    let mut session = Session::open(key, net, mac, memory).await?;
+    let reply = session.ask(&ClientMsg::ListServices).await;
+    session.close().await;
+    match reply? {
+        AgentMsg::Services(list) => Ok(list),
+        other => bail!("unexpected reply to ListServices {other:?}"),
+    }
+}
+
+/// Stops a service this device started; its process group and workspace go with it.
+pub async fn stop_service(key: &SecretKey, net: NetConfig, mac: EndpointAddr, memory: &RouteMemory, job_id: &str) -> Result<()> {
+    let mut session = Session::open(key, net, mac, memory).await?;
+    let reply = session.ask(&ClientMsg::Stop { job_id: job_id.into() }).await;
+    session.close().await;
+    match reply? {
+        AgentMsg::Accepted { .. } => Ok(()),
+        other => bail!("unexpected reply to Stop {other:?}"),
+    }
+}
+
+/// Watches a running service: its recent output first, then new output until it ends or
+/// `cancel` fires, which detaches and leaves it running.
+#[allow(clippy::too_many_arguments)]
+pub async fn attach_service(
+    key: &SecretKey,
+    net: NetConfig,
+    mac: EndpointAddr,
+    memory: &RouteMemory,
+    job_id: &str,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+    cancel: impl std::future::Future<Output = ()>,
+) -> Result<RunOutcome> {
+    let t0 = Instant::now();
+    let mut timings = Timings::default();
+    let mut session = Session::open(key, net, mac, memory).await?;
+    timings.connect = t0.elapsed();
+    let streamed = match session.ask(&ClientMsg::Attach { job_id: job_id.into() }).await {
+        Ok(AgentMsg::Accepted { .. }) => {
+            let mut started = false;
+            let Session { send, recv, .. } = &mut session;
+            stream_job(send, recv, true, &mut timings, t0, stdout, stderr, cancel, &mut started).await
+        }
+        Ok(other) => Err(anyhow::anyhow!("unexpected reply to Attach {other:?}")),
+        Err(e) => Err(e),
+    };
+    timings.via_relay = bc_net::via_relay(&session.conn);
+    session.close().await;
+    let (exit, usage) = streamed?;
+    Ok(done(job_id.to_string(), exit, timings, t0, usage))
 }
 
 fn done(job_id: String, exit: Exit, mut timings: Timings, t0: Instant, usage: Option<JobUsage>) -> RunOutcome {
