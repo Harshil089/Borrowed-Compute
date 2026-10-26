@@ -229,3 +229,98 @@ async fn auto_fix_installs_dependencies_and_runs_again() {
     assert!(String::from_utf8_lossy(&out).contains("built"));
     assert!(notices.iter().any(|n| n.contains("Installing dependencies") && n.contains("Running again")), "{notices:?}");
 }
+
+#[tokio::test]
+async fn service_keeps_running_after_detach_until_stopped() {
+    let (relay_map, _url, _relay) = iroh::test_utils::run_relay_server().await.unwrap();
+    let net = NetConfig { relays: Some(relay_map.clone()), relay_only: true, insecure_relay_tls: true };
+    let agent = bind(SecretKey::generate(), net.clone()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), agent.online()).await.unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let paired = PairedDevices::new(state.path().join("paired"));
+    let client_key = SecretKey::generate();
+    paired.add(client_key.public()).unwrap();
+    let work_root = tempfile::tempdir().unwrap();
+    // A 1 s default timeout, which a service must ignore.
+    let config = AgentConfig::new(
+        RunnerConfig { work_root: work_root.path().to_path_buf(), default_timeout: Duration::from_secs(1) },
+        paired,
+    );
+    let accept = agent.clone();
+    tokio::spawn(async move {
+        while let Some(incoming) = accept.accept().await {
+            let config = config.clone();
+            tokio::spawn(async move {
+                if let Ok(conn) = incoming.await {
+                    let _ = serve_connection(&config, conn).await;
+                }
+            });
+        }
+    });
+    let memory = bc_cli::route::RouteMemory::none();
+
+    let proj = project();
+    let mut spec = JobSpec::from_argv(
+        ["sh", "-c", "echo up; while true; do sleep 0.1; done"].iter().map(|a| a.to_string()).collect(),
+    )
+    .unwrap();
+    spec.job.service = true;
+    let archive = pack(proj.path(), &spec.files.exclude).unwrap();
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let outcome = bc_cli::run::run_on_mac(
+        &client_key,
+        net.clone(),
+        agent.addr(),
+        &spec,
+        archive,
+        &mut out,
+        &mut err,
+        tokio::time::sleep(Duration::from_secs(2)),
+        None,
+        &memory,
+        |_: &str| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.exit, Exit::Detached, "{}", String::from_utf8_lossy(&err));
+    assert_eq!(String::from_utf8_lossy(&out), "up\n");
+
+    // Still running after the client left and past the timeout.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let list = bc_cli::run::list_services(&client_key, net.clone(), agent.addr(), &memory).await.unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].job_id, outcome.job_id);
+    // Another paired device sees none of it and cannot stop it.
+    let other = SecretKey::generate();
+    let paired = PairedDevices::new(state.path().join("paired"));
+    paired.add(other.public()).unwrap();
+    assert!(bc_cli::run::list_services(&other, net.clone(), agent.addr(), &memory).await.unwrap().is_empty());
+    assert!(bc_cli::run::stop_service(&other, net.clone(), agent.addr(), &memory, &outcome.job_id).await.is_err());
+
+    // Attaching replays what was missed.
+    let mut out = Vec::new();
+    let attached = bc_cli::run::attach_service(
+        &client_key,
+        net.clone(),
+        agent.addr(),
+        &memory,
+        &outcome.job_id,
+        &mut out,
+        &mut Vec::new(),
+        tokio::time::sleep(Duration::from_secs(1)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(attached.exit, Exit::Detached);
+    assert_eq!(String::from_utf8_lossy(&out), "up\n");
+
+    bc_cli::run::stop_service(&client_key, net.clone(), agent.addr(), &memory, &outcome.job_id).await.unwrap();
+    for _ in 0..100 {
+        let gone = bc_cli::run::list_services(&client_key, net.clone(), agent.addr(), &memory).await.unwrap().is_empty();
+        if gone && std::fs::read_dir(work_root.path()).unwrap().next().is_none() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("service or its workspace is still there after stop");
+}

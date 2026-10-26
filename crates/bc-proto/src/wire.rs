@@ -10,7 +10,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use crate::spec::JobSpec;
 
 /// Bumped on any incompatible change to these messages.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Largest frame either side accepts.
 pub const MAX_FRAME: usize = 16 << 20;
@@ -36,6 +36,9 @@ pub struct JobRequest {
     pub workdir: String,
     pub env: BTreeMap<String, String>,
     pub timeout_secs: Option<u64>,
+    /// Runs as a service: no timeout, and it keeps running when the client disconnects.
+    #[serde(default)]
+    pub service: bool,
     /// Size of the project archive that follows in `Upload` messages.
     pub archive_bytes: u64,
 }
@@ -49,6 +52,7 @@ impl JobRequest {
             env: spec.job.env.clone(),
             // `validate` already checked the timeout parses.
             timeout_secs: spec.timeout().ok().flatten().map(|d| d.as_secs()),
+            service: spec.job.service,
             archive_bytes,
         }
     }
@@ -85,6 +89,17 @@ impl JobUsage {
     }
 }
 
+/// A service running on the Mac, as a client or the Mac app sees it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceInfo {
+    pub job_id: String,
+    pub argv: Vec<String>,
+    /// Unix seconds.
+    pub started_at: u64,
+    /// The device that started it; only that device can attach to it or stop it.
+    pub owner: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutputStream {
     Stdout,
@@ -103,7 +118,18 @@ pub enum ClientMsg {
         data: Vec<u8>,
     },
     UploadDone,
+    /// Stops the job. For a service, closing the connection instead leaves it running.
     Cancel,
+    /// Streams a running service's recent and new output, like a fresh `Submit` would.
+    Attach {
+        job_id: String,
+    },
+    /// Stops a service; answered with `Accepted` or `Rejected`.
+    Stop {
+        job_id: String,
+    },
+    /// Answered with `Services`: the ones this device started.
+    ListServices,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -136,6 +162,7 @@ pub enum AgentMsg {
     Failed {
         reason: String,
     },
+    Services(Vec<ServiceInfo>),
 }
 
 pub fn encode<T: Serialize>(msg: &T) -> Result<Vec<u8>, WireError> {

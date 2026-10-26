@@ -306,6 +306,19 @@ async fn unpair(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
     cloud.unpair(id).await.map_err(|e| format!("{e:#}"))
 }
 
+/// Services running on this Mac, from every paired device.
+#[tauri::command]
+fn list_services(state: State<'_, AppState>) -> Vec<bc_proto::wire::ServiceInfo> {
+    state.agent.get().map(|a| a.services().list(None)).unwrap_or_default()
+}
+
+/// The Mac's owner may stop any service, whoever started it.
+#[tauri::command]
+fn stop_service(state: State<'_, AppState>, job_id: String) -> CmdResult<()> {
+    let agent = state.agent.get().ok_or("the agent is not running")?;
+    agent.services().stop(&job_id, None).map_err(|_| format!("{job_id} is no longer running"))
+}
+
 #[tauri::command]
 fn recent_jobs(state: State<'_, AppState>) -> Vec<JobRecord> {
     state.jobs.lock().unwrap().iter().cloned().collect()
@@ -562,6 +575,8 @@ fn main() {
             approve,
             unpair,
             recent_jobs,
+            list_services,
+            stop_service,
             open_logs,
             open_url,
             tailscale_status,

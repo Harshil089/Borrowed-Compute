@@ -29,6 +29,7 @@ async fn job(name: &str, argv: &[&str], files: &[(&str, &str)]) {
         workdir: ".".into(),
         env: BTreeMap::new(),
         timeout_secs: None,
+        service: false,
         archive_bytes: 0,
     };
     let (tx, mut rx) = tokio::sync::mpsc::channel(1024);

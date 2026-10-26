@@ -58,6 +58,10 @@ pub struct Job {
     pub timeout: Option<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// A server or other long-running process: no timeout, keeps running after the
+    /// client disconnects, and runs until someone stops it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub service: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
@@ -118,6 +122,7 @@ impl JobSpec {
                 workdir: default_workdir(),
                 timeout: None,
                 env: BTreeMap::new(),
+                service: false,
             },
             toolchain: BTreeMap::new(),
             files: Files::default(),
