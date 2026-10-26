@@ -245,16 +245,20 @@ function render() {
     <div class="pass die-cut ${seenRequests.has(p.id) ? "" : "arrived"}" data-request="${p.id}">
       <div class="pass-main">
         <span class="pass-from">${esc(p.client_name)}</span>
-        <p>Asks to run jobs on this Mac. Approve only if ${esc(p.client_name)} shows the same code.</p>
+        <p>Asks to run jobs on this Mac. Type the code ${esc(p.client_name)} shows to approve it.</p>
       </div>
       <div class="pass-stub">
-        <span class="code">${esc(p.code)}</span>
-        <button class="primary" data-approve="${p.id}" data-code="${esc(p.code)}">Approve</button>
+        <label class="label" for="code-${p.id}">Code on ${esc(p.client_name)}</label>
+        <input id="code-${p.id}" class="code-input" type="text" maxlength="9" placeholder="ABCD-EFGH"
+               autocomplete="off" spellcheck="false" autocapitalize="characters" data-code-for="${p.id}">
+        <button class="primary" data-approve="${p.id}">Approve</button>
+        <span class="pass-msg" id="msg-${p.id}"></span>
       </div>
     </div>`).join("");
   // Compare without the one-time arrival class, so a repeat poll is a no-op.
-  if ($("requests").dataset.key !== pending.map((p) => `${p.id}:${p.code}`).join()) {
-    $("requests").dataset.key = pending.map((p) => `${p.id}:${p.code}`).join();
+  // Keyed by request id only, so a poll never clears a code being typed.
+  if ($("requests").dataset.key !== pending.map((p) => p.id).join()) {
+    $("requests").dataset.key = pending.map((p) => p.id).join();
     $("requests").innerHTML = pendingHtml;
   }
   pending.forEach((p) => seenRequests.add(p.id));
@@ -539,12 +543,9 @@ document.addEventListener("click", async (event) => {
   }
   const approve = event.target.closest("[data-approve]");
   const remove = event.target.closest("[data-unpair]");
+  if (approve) { approvePairing(approve.dataset.approve); return; }
   try {
-    if (approve) {
-      approve.disabled = true;
-      await invoke("approve", { id: Number(approve.dataset.approve), code: approve.dataset.code });
-      await refresh();
-    } else if (remove) {
+    if (remove) {
       if (!(await ask(`Remove ${remove.dataset.name}? It will stop being able to send jobs within 15 seconds.`, "Remove", true))) return;
       remove.disabled = true;
       await invoke("unpair", { id: Number(remove.dataset.unpair) });
@@ -554,6 +555,33 @@ document.addEventListener("click", async (event) => {
     showError(String(e));
     await refresh();
   }
+});
+
+// Approves a request with the code typed on its pass. A wrong code keeps the pass open
+// with the cloud's answer (tries left, or cancelled after three).
+async function approvePairing(id) {
+  const input = $(`code-${id}`);
+  const button = document.querySelector(`[data-approve="${id}"]`);
+  const msg = $(`msg-${id}`);
+  const code = input.value.trim();
+  if (!code) { msg.textContent = "Type the code shown on the other device."; input.focus(); return; }
+  button.disabled = true;
+  msg.textContent = "";
+  try {
+    await invoke("approve", { id: Number(id), code });
+    await refresh();
+  } catch (e) {
+    msg.textContent = String(e).replace(/ \(400 Bad Request\)$/, "");
+    button.disabled = false;
+    input.select();
+    // A cancelled request disappears on the next refresh.
+    if (/cancelled/.test(String(e))) setTimeout(refresh, 2500);
+  }
+}
+
+document.addEventListener("keydown", (event) => {
+  const input = event.target.closest?.("[data-code-for]");
+  if (input && event.key === "Enter") approvePairing(input.dataset.codeFor);
 });
 
 listen("login-code", (event) => {

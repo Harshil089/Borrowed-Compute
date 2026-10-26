@@ -53,6 +53,7 @@ Every merge to `main` runs `.github/workflows/release.yml`: it builds the Mac ag
 - **SQLite migrations run with foreign keys off** (`migrate_sqlite` in `bc-cloud`), then `pragma foreign_key_check`, because table rebuilds would otherwise cascade-delete sessions and devices. sqlx always wraps a SQLite migration in a transaction, so pragmas inside a migration file do nothing.
 - **Device registration requires a signature** over `register_message` (bound to the session hash). Do not add a registration path without it.
 - **Every cloud query is scoped by `account_id`.** v1 pairs only devices on the same account (Foundation decision; Q6).
+- **Pairing codes are a secret between the requesting device and the person at the Mac.** Only `create` returns the code (to the requester); every list returns `code: None`, so the Mac owner must type it. Codes are 8 characters from an unambiguous alphabet, compared case- and dash-insensitively; three wrong codes delete the request (`pairings.attempts`).
 - **The agent checks the paired list on every connection.** It must never run a job from an unpaired device.
 - **Packing fixes Windows files** (`apps/bc-cli/src/pack.rs`): executable bit from file system, git index (`100755`) or shebang for untracked files; CRLF to LF only in scripts. Do not normalize other text files.
 - **Tests that need `sh` or the Mac agent are `cfg(unix)`**, so `cargo test --workspace` still runs on Windows CI.
