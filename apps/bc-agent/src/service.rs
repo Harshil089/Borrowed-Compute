@@ -38,9 +38,15 @@ pub struct Agent {
 
 impl Agent {
     /// Binds this Mac's endpoint and waits until it can be reached.
-    pub async fn start(paths: &AgentPaths, relay_only: bool, events: Option<EventSender>) -> Result<Self> {
+    /// `relays` replaces iroh's public relays, as with the relay the Mac app runs itself.
+    pub async fn start(
+        paths: &AgentPaths,
+        relay_only: bool,
+        relays: Option<bc_net::RelayMap>,
+        events: Option<EventSender>,
+    ) -> Result<Self> {
         let key = load_or_create_key(&paths.key())?;
-        let endpoint = bind(key, NetConfig { relay_only, ..Default::default() }).await?;
+        let endpoint = bind(key, NetConfig { relay_only, relays, ..Default::default() }).await?;
         endpoint.online().await;
         let mut config = AgentConfig::new(RunnerConfig::default(), paths.paired());
         config.events = events;

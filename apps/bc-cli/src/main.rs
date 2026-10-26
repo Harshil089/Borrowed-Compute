@@ -5,13 +5,13 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use bc_auth::{cloud_url_for, default_device_name, save_session, CloudClient};
 use bc_cli::flows::{
-    append_timing, client_home, default_mac, key_path, load_spec, resolve_mac, set_default_mac,
-    wait_for_pairing,
+    append_timing, client_home, default_mac, key_path, load_spec, mac_net, resolve_mac,
+    set_default_mac, wait_for_pairing,
 };
 use bc_cli::pack::pack;
 use bc_cli::route::RouteMemory;
 use bc_cli::run::{attach_service, list_services, run_on_mac, stop_service, Exit};
-use bc_net::{load_or_create_key, NetConfig};
+use bc_net::load_or_create_key;
 use bc_proto::cloud::{DeviceKind, PairingStatus, Provider};
 use clap::{Parser, Subcommand};
 
@@ -185,7 +185,7 @@ async fn main() -> Result<()> {
         Command::Services { to } => {
             let (_, mac) = target_mac(&home, &cloud, to).await?;
             let key = load_or_create_key(&key_path)?;
-            let list = list_services(&key, NetConfig::default(), mac.addr, &RouteMemory::at(&home)).await?;
+            let list = list_services(&key, mac_net(&cloud, false).await, mac.addr, &RouteMemory::at(&home)).await?;
             if list.is_empty() {
                 println!("No services running.");
             }
@@ -202,7 +202,7 @@ async fn main() -> Result<()> {
             };
             let outcome = attach_service(
                 &key,
-                NetConfig::default(),
+                mac_net(&cloud, false).await,
                 mac.addr,
                 &RouteMemory::at(&home),
                 &id,
@@ -218,7 +218,7 @@ async fn main() -> Result<()> {
             let (_, mac) = target_mac(&home, &cloud, to).await?;
             let key = load_or_create_key(&key_path)?;
             eprintln!("bc: forwarding your services' ports; Ctrl+C to stop");
-            bc_cli::forward::forward_services(&key, NetConfig::default(), mac.addr, &RouteMemory::at(&home), print_forward, async {
+            bc_cli::forward::forward_services(&key, mac_net(&cloud, false).await, mac.addr, &RouteMemory::at(&home), print_forward, async {
                 let _ = tokio::signal::ctrl_c().await;
             })
             .await?;
@@ -226,7 +226,7 @@ async fn main() -> Result<()> {
         Command::Stop { id, to } => {
             let (_, mac) = target_mac(&home, &cloud, to).await?;
             let key = load_or_create_key(&key_path)?;
-            stop_service(&key, NetConfig::default(), mac.addr, &RouteMemory::at(&home), &id).await?;
+            stop_service(&key, mac_net(&cloud, false).await, mac.addr, &RouteMemory::at(&home), &id).await?;
             println!("Stopped {id}.");
         }
         Command::Run { to, spec, relay_only, timings, mut service, mut argv } => {
@@ -248,7 +248,7 @@ async fn main() -> Result<()> {
             let cancel = async {
                 let _ = tokio::signal::ctrl_c().await;
             };
-            let net = NetConfig { relay_only, ..Default::default() };
+            let net = mac_net(&cloud, relay_only).await;
             let memory = RouteMemory::at(&home);
             // A service's ports reach this computer's localhost while it is watched.
             let forwarding = async {

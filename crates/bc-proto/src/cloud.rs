@@ -60,6 +60,13 @@ impl Provider {
     }
 }
 
+/// The relay devices on this cloud should use, when the Mac runs one. `None` means
+/// iroh's public relays.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RelayInfo {
+    pub url: Option<String>,
+}
+
 /// Which sign-in providers this cloud offers. GitHub is always available.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Providers {

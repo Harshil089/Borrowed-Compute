@@ -16,14 +16,14 @@ use bc_auth::{
     save_session, CloudClient, DEFAULT_CLOUD_URL,
 };
 use bc_cli::flows::{
-    append_timing, client_home, default_mac, key_path, load_spec, resolve_mac, set_default_mac,
-    split_command, wait_for_pairing,
+    append_timing, client_home, default_mac, key_path, load_spec, mac_net, resolve_mac,
+    set_default_mac, split_command, wait_for_pairing,
 };
 use bc_cli::forward::{forward_services, ForwardEvent, Forwarded};
 use bc_cli::pack::pack;
 use bc_cli::route::RouteMemory;
 use bc_cli::run::{attach_service, list_services, run_on_mac, stop_service, Exit, RunOutcome};
-use bc_net::{load_or_create_key, NetConfig};
+use bc_net::load_or_create_key;
 use bc_proto::cloud::{DeviceInfo, DeviceKind, PairingInfo, Provider, Providers};
 use bc_proto::wire::{JobUsage, ServiceInfo};
 use bc_proto::JobSpec;
@@ -446,7 +446,7 @@ async fn run_job_inner(
     let notice_log = log.clone();
     let outcome = run_on_mac(
         &key,
-        NetConfig { relay_only, ..Default::default() },
+        mac_net(&cloud, relay_only).await,
         resolved.addr,
         &spec,
         archive,
@@ -525,7 +525,7 @@ fn job_result(state: &AppState, outcome: &RunOutcome, log: &SharedLog, log_path:
 async fn services(state: State<'_, AppState>, mac: String) -> CmdResult<Vec<ServiceInfo>> {
     let resolved = resolve_mac(&state.cloud(), &mac).await.map_err(err_chain)?;
     let key = load_or_create_key(&key_path(&state.home)).map_err(err)?;
-    list_services(&key, NetConfig::default(), resolved.addr, &RouteMemory::at(&state.home))
+    list_services(&key, mac_net(&state.cloud(), false).await, resolved.addr, &RouteMemory::at(&state.home))
         .await
         .map_err(err_chain)
 }
@@ -534,7 +534,7 @@ async fn services(state: State<'_, AppState>, mac: String) -> CmdResult<Vec<Serv
 async fn stop_job_service(state: State<'_, AppState>, mac: String, job_id: String) -> CmdResult<()> {
     let resolved = resolve_mac(&state.cloud(), &mac).await.map_err(err_chain)?;
     let key = load_or_create_key(&key_path(&state.home)).map_err(err)?;
-    stop_service(&key, NetConfig::default(), resolved.addr, &RouteMemory::at(&state.home), &job_id)
+    stop_service(&key, mac_net(&state.cloud(), false).await, resolved.addr, &RouteMemory::at(&state.home), &job_id)
         .await
         .map_err(err_chain)
 }
@@ -559,6 +559,7 @@ async fn start_forwarding(app: AppHandle, state: State<'_, AppState>, mac: Strin
     let (stop_tx, stop_rx) = oneshot::channel();
     *state.forwarding.lock().unwrap() = Some((mac, stop_tx));
     let memory = RouteMemory::at(&state.home);
+    let net = mac_net(&state.cloud(), false).await;
     let forwards = state.forwards.clone();
     tauri::async_runtime::spawn(async move {
         let emit = |list: &Vec<Forwarded>| {
@@ -577,7 +578,7 @@ async fn start_forwarding(app: AppHandle, state: State<'_, AppState>, mac: Strin
         let cancel = async {
             let _ = stop_rx.await;
         };
-        if let Err(e) = forward_services(&key, NetConfig::default(), resolved.addr, &memory, on_event, cancel).await {
+        if let Err(e) = forward_services(&key, net, resolved.addr, &memory, on_event, cancel).await {
             eprintln!("port forwarding ended: {e:#}");
         }
         forwards.lock().unwrap().clear();
@@ -609,7 +610,7 @@ async fn attach_job_service(app: AppHandle, state: State<'_, AppState>, mac: Str
         let detach_app = app.clone();
         let outcome = attach_service(
             &key,
-            NetConfig::default(),
+            mac_net(&state.cloud(), false).await,
             resolved.addr,
             &RouteMemory::at(&state.home),
             &job_id,
