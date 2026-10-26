@@ -163,6 +163,13 @@ pub fn append_timing(home: &Path, line: &str) {
     }
 }
 
+/// Network settings for reaching a Mac: its own relay when its cloud advertises one, so
+/// connection metadata stays off public relays; iroh's public relays otherwise.
+pub async fn mac_net(cloud: &CloudClient, relay_only: bool) -> bc_net::NetConfig {
+    let relays = cloud.relay().await.and_then(|url| bc_net::relay_map(&url).ok());
+    bc_net::NetConfig { relay_only, relays, ..Default::default() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

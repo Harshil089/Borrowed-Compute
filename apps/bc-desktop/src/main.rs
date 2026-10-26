@@ -16,13 +16,13 @@ use bc_auth::{
     save_session, CloudClient, DEFAULT_CLOUD_URL,
 };
 use bc_cli::flows::{
-    append_timing, client_home, default_mac, key_path, load_spec, resolve_mac, set_default_mac,
-    split_command, wait_for_pairing,
+    append_timing, client_home, default_mac, key_path, load_spec, mac_net, resolve_mac,
+    set_default_mac, split_command, wait_for_pairing,
 };
 use bc_cli::pack::pack;
 use bc_cli::route::RouteMemory;
 use bc_cli::run::{attach_service, list_services, run_on_mac, stop_service, Exit, RunOutcome};
-use bc_net::{load_or_create_key, NetConfig};
+use bc_net::load_or_create_key;
 use bc_proto::cloud::{DeviceInfo, DeviceKind, PairingInfo, Provider, Providers};
 use bc_proto::wire::{JobUsage, ServiceInfo};
 use bc_proto::JobSpec;
@@ -432,8 +432,6 @@ async fn run_job_inner(
 
     phase(app, format!("Connecting and uploading {}…", human_bytes(archive.len() as u64)));
     let key = load_or_create_key(&key_path(&state.home))?;
-    // Meet the Mac on its own relay when it runs one, keeping public relays out of it.
-    let relays = cloud.relay().await.and_then(|url| bc_net::relay_map(&url).ok());
     let (log_path, log) = open_job_log(&state.home, mac, folder, &spec.job.argv)?;
     let mut stdout = EmitWriter::new(app.clone(), "stdout", log.clone());
     let mut stderr = EmitWriter::new(app.clone(), "stderr", log.clone());
@@ -442,7 +440,7 @@ async fn run_job_inner(
     let notice_log = log.clone();
     let outcome = run_on_mac(
         &key,
-        NetConfig { relay_only, relays, ..Default::default() },
+        mac_net(&cloud, relay_only).await,
         resolved.addr,
         &spec,
         archive,
@@ -521,7 +519,7 @@ fn job_result(state: &AppState, outcome: &RunOutcome, log: &SharedLog, log_path:
 async fn services(state: State<'_, AppState>, mac: String) -> CmdResult<Vec<ServiceInfo>> {
     let resolved = resolve_mac(&state.cloud(), &mac).await.map_err(err_chain)?;
     let key = load_or_create_key(&key_path(&state.home)).map_err(err)?;
-    list_services(&key, NetConfig::default(), resolved.addr, &RouteMemory::at(&state.home))
+    list_services(&key, mac_net(&state.cloud(), false).await, resolved.addr, &RouteMemory::at(&state.home))
         .await
         .map_err(err_chain)
 }
@@ -530,7 +528,7 @@ async fn services(state: State<'_, AppState>, mac: String) -> CmdResult<Vec<Serv
 async fn stop_job_service(state: State<'_, AppState>, mac: String, job_id: String) -> CmdResult<()> {
     let resolved = resolve_mac(&state.cloud(), &mac).await.map_err(err_chain)?;
     let key = load_or_create_key(&key_path(&state.home)).map_err(err)?;
-    stop_service(&key, NetConfig::default(), resolved.addr, &RouteMemory::at(&state.home), &job_id)
+    stop_service(&key, mac_net(&state.cloud(), false).await, resolved.addr, &RouteMemory::at(&state.home), &job_id)
         .await
         .map_err(err_chain)
 }
@@ -549,7 +547,7 @@ async fn attach_job_service(app: AppHandle, state: State<'_, AppState>, mac: Str
         let detach_app = app.clone();
         let outcome = attach_service(
             &key,
-            NetConfig::default(),
+            mac_net(&state.cloud(), false).await,
             resolved.addr,
             &RouteMemory::at(&state.home),
             &job_id,
