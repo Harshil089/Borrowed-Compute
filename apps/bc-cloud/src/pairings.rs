@@ -1,5 +1,7 @@
-//! Pairing: a client device asks to send jobs to a Mac, and the Mac owner approves it
-//! by entering the code shown on both screens. v1 pairs only devices on one account.
+//! Pairing: a client device asks to send jobs to a Mac, and the Mac owner approves it by
+//! typing the code the client shows. Only the requesting client ever receives the code,
+//! so approving proves the owner can see that client's screen. Three wrong codes delete
+//! the request. v1 pairs only devices on one account.
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -14,6 +16,23 @@ use crate::error::{ApiError, ApiResult};
 use crate::{now, AppState};
 
 const CODE_SECS: i64 = 10 * 60;
+/// Wrong codes allowed before the request is deleted.
+const MAX_ATTEMPTS: i64 = 3;
+/// Letters and digits that cannot be mistaken for each other (no 0/O, 1/I/L).
+const CODE_ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+
+/// Eight characters shown as `ABCD-EFGH`: about 40 bits, against three guesses.
+fn new_code() -> String {
+    let chars: String = (0..8)
+        .map(|_| CODE_ALPHABET[rand::random::<usize>() % CODE_ALPHABET.len()] as char)
+        .collect();
+    format!("{}-{}", &chars[..4], &chars[4..])
+}
+
+/// Compares codes the way people type them: any case, with or without the dash.
+fn normalize(code: &str) -> String {
+    code.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_uppercase()).collect()
+}
 
 type PairingRow = (i64, String, String, String, String, String, String, i64);
 
@@ -79,13 +98,15 @@ pub async fn create(
 
     // Keep an approved pairing or a still-valid code; otherwise issue a fresh code.
     let now = now();
-    let code = format!("{:06}", rand::random::<u32>() % 1_000_000);
+    let code = new_code();
     let (id,): (i64,) = sqlx::query_as(
         "insert into pairings (client_id, mac_id, code, status, created_at, expires_at)
          values ($1, $2, $3, 'pending', $4, $5)
          on conflict (client_id, mac_id) do update
            set code = case when pairings.status = 'pending' and pairings.expires_at <= $4
                            then excluded.code else pairings.code end,
+               attempts = case when pairings.status = 'pending' and pairings.expires_at <= $4
+                               then 0 else pairings.attempts end,
                expires_at = case when pairings.status = 'pending' and pairings.expires_at <= $4
                                  then excluded.expires_at else pairings.expires_at end
          returning id",
@@ -123,7 +144,8 @@ pub async fn list(
     .bind(now)
     .fetch_all(&state.db)
     .await?;
-    Ok(Json(rows.into_iter().map(|r| to_info(r, now)).collect()))
+    // Codes go only to the device that asked (in `create`); the Mac must type it.
+    Ok(Json(rows.into_iter().map(|r| PairingInfo { code: None, ..to_info(r, now) }).collect()))
 }
 
 pub async fn approve(
@@ -148,8 +170,22 @@ pub async fn approve(
     if expires_at <= now() {
         return Err(ApiError::bad_request("pairing code expired; ask again from the other device"));
     }
-    if code != req.code.trim() {
-        return Err(ApiError::bad_request("pairing code does not match"));
+    if normalize(&code) != normalize(&req.code) {
+        let (attempts,): (i64,) =
+            sqlx::query_as("update pairings set attempts = attempts + 1 where id = $1 returning attempts")
+                .bind(id)
+                .fetch_one(&state.db)
+                .await?;
+        if attempts >= MAX_ATTEMPTS {
+            sqlx::query("delete from pairings where id = $1").bind(id).execute(&state.db).await?;
+            return Err(ApiError::bad_request(
+                "wrong code three times; the request was cancelled. Ask again from the other device",
+            ));
+        }
+        return Err(ApiError::bad_request(format!(
+            "that code does not match; {} tries left",
+            MAX_ATTEMPTS - attempts
+        )));
     }
     sqlx::query("update pairings set status = 'approved' where id = $1")
         .bind(id)
@@ -193,4 +229,18 @@ pub async fn paired_clients(
     .fetch_all(&state.db)
     .await?;
     Ok(Json(PairedClients { clients: rows.into_iter().map(|(c,)| c).collect() }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codes_are_unambiguous_and_typed_loosely() {
+        let code = new_code();
+        assert_eq!(code.len(), 9);
+        assert!(code.chars().all(|c| c == '-' || CODE_ALPHABET.contains(&(c as u8))), "{code}");
+        assert_eq!(normalize("abcd-efgh"), normalize("ABCDEFGH"));
+        assert_eq!(normalize(" AbCd EfGh "), "ABCDEFGH");
+    }
 }
