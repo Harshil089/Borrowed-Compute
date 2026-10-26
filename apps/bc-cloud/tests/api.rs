@@ -261,18 +261,17 @@ async fn sign_in_register_pair_and_revoke_on(env: Env) {
     assert_eq!(after.addr, Some(addr));
     assert_eq!(alice.devices().await.unwrap().len(), 2);
 
-    // The laptop asks; the Mac sees the same code and approves with it.
+    // The laptop asks and is shown the code; the Mac sees the request but must type it.
     let request = alice.request_pairing(&pc_id, "studio").await.unwrap();
     assert_eq!(request.status, PairingStatus::Pending);
     let code = request.code.clone().unwrap();
-    assert_eq!(code.len(), 6);
+    assert_eq!(code.len(), 9);
     let on_mac = alice.pairings(&mac_id).await.unwrap();
     assert_eq!(on_mac.len(), 1);
-    assert_eq!(on_mac[0].code.as_deref(), Some(code.as_str()));
+    assert_eq!(on_mac[0].code, None);
     assert_eq!(on_mac[0].client_name, "laptop");
 
-    let wrong = if code == "000000" { "111111" } else { "000000" };
-    assert!(alice.approve(request.id, wrong).await.is_err());
+    assert!(alice.approve(request.id, "WRNG-CODE").await.is_err());
     assert!(alice.paired_clients(&mac_id).await.unwrap().is_empty());
 
     let approved = alice.approve(request.id, &code).await.unwrap();
@@ -378,4 +377,43 @@ async fn upgrades_an_existing_database() {
     let (identities,): (i64,) = sqlx::query_as("select count(*) from identities").fetch_one(&db).await.unwrap();
     let (accounts,): (i64,) = sqlx::query_as("select count(*) from accounts").fetch_one(&db).await.unwrap();
     assert_eq!(identities, accounts, "every existing account keeps its GitHub identity");
+}
+
+#[tokio::test]
+async fn pairing_codes_reach_only_the_requester_and_lock_after_three_misses() {
+    for (url, _dir) in databases().await {
+        pairing_lockout_on(setup(&url).await).await;
+    }
+}
+
+async fn pairing_lockout_on(env: Env) {
+    let alice = env.login(1, "alice").await;
+    let (pc, mac) = (SecretKey::generate(), SecretKey::generate());
+    alice.register(&pc, "pc", DeviceKind::Windows).await.unwrap();
+    alice.register(&mac, "studio", DeviceKind::Mac).await.unwrap();
+
+    let request = alice.request_pairing(&pc.public().to_string(), "studio").await.unwrap();
+    let code = request.code.clone().expect("the requester gets the code");
+    assert_eq!(code.len(), 9, "ABCD-EFGH: {code}");
+    let seen_by_mac = alice.pairings(&mac.public().to_string()).await.unwrap();
+    assert!(seen_by_mac.iter().all(|p| p.code.is_none()), "the Mac must type the code, not read it");
+
+    // Two misses leave the request; the right code typed loosely still works.
+    for tries_left in ["2 tries left", "1 tries left"] {
+        let err = alice.approve(request.id, "WRNG-CODE").await.unwrap_err();
+        assert!(format!("{err:#}").contains(tries_left), "{err:#}");
+    }
+    let loose = code.to_lowercase().replace('-', " ");
+    alice.approve(request.id, &loose).await.unwrap();
+
+    // A new request: three misses cancel it, and the right code no longer works.
+    alice.unpair(request.id).await.unwrap();
+    let request = alice.request_pairing(&pc.public().to_string(), "studio").await.unwrap();
+    let code = request.code.clone().unwrap();
+    for _ in 0..2 {
+        alice.approve(request.id, "WRNG-CODE").await.unwrap_err();
+    }
+    let err = alice.approve(request.id, "WRNG-CODE").await.unwrap_err();
+    assert!(format!("{err:#}").contains("cancelled"), "{err:#}");
+    assert!(alice.approve(request.id, &code).await.is_err(), "the request is gone");
 }
