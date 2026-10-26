@@ -294,7 +294,7 @@ function render() {
       <span class="dep-time">${esc(uptime(s.started_at))}</span>
       <span class="dep-main">
         <span class="dep-cmd">${esc(s.argv.join(" "))}</span>
-        <span class="dep-sub"><span class="kv"><b>From</b> ${esc(clientName(s.owner))}</span><span class="kv"><b>Up since</b> ${clock(s.started_at * 1000)}</span></span>
+        <span class="dep-sub"><span class="kv"><b>From</b> ${esc(clientName(s.owner))}</span><span class="kv"><b>Up since</b> ${clock(s.started_at * 1000)}</span>${s.ports.length ? `<span class="kv"><b>Port</b> <span class="num">${s.ports.join(", ")}</span></span>` : ""}</span>
       </span>
       <button class="danger" data-stop="${esc(s.job_id)}" data-cmd="${esc(s.argv.join(" "))}">Stop</button>
     </div>`).join(""));

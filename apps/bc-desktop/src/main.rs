@@ -19,6 +19,7 @@ use bc_cli::flows::{
     append_timing, client_home, default_mac, key_path, load_spec, mac_net, resolve_mac,
     set_default_mac, split_command, wait_for_pairing,
 };
+use bc_cli::forward::{forward_services, ForwardEvent, Forwarded};
 use bc_cli::pack::pack;
 use bc_cli::route::RouteMemory;
 use bc_cli::run::{attach_service, list_services, run_on_mac, stop_service, Exit, RunOutcome};
@@ -45,6 +46,9 @@ struct AppState {
     home: PathBuf,
     /// Cancels the running job. At most one job runs at a time.
     job: StdMutex<Option<oneshot::Sender<()>>>,
+    /// Port forwarding to one Mac's services, and what it has opened so far.
+    forwarding: StdMutex<Option<(String, oneshot::Sender<()>)>>,
+    forwards: Arc<StdMutex<Vec<Forwarded>>>,
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -107,6 +111,8 @@ struct SuggestionView {
     label: String,
     /// The command as the command box shows it; `split_command` turns it back into argv.
     command: String,
+    /// A server: picking it ticks Keep running.
+    service: bool,
 }
 
 #[derive(Serialize)]
@@ -341,7 +347,7 @@ fn project_info(folder: String) -> ProjectInfo {
             suggestions: d
                 .suggestions
                 .into_iter()
-                .map(|s| SuggestionView { label: s.label, command: join_command(&s.argv) })
+                .map(|s| SuggestionView { label: s.label, command: join_command(&s.argv), service: s.service })
                 .collect(),
         });
         return ProjectInfo { has_spec: false, command: None, spec_error: None, detected };
@@ -533,6 +539,63 @@ async fn stop_job_service(state: State<'_, AppState>, mac: String, job_id: Strin
         .map_err(err_chain)
 }
 
+#[derive(Clone, Serialize)]
+struct ForwardView {
+    job_id: String,
+    remote: u16,
+    local: u16,
+}
+
+/// Starts forwarding `mac`'s services' ports to this PC's localhost, replacing forwarding
+/// to any other Mac. The window gets the open ports as `forwards` events.
+#[tauri::command]
+async fn start_forwarding(app: AppHandle, state: State<'_, AppState>, mac: String) -> CmdResult<()> {
+    if state.forwarding.lock().unwrap().as_ref().is_some_and(|(m, _)| *m == mac) {
+        return Ok(());
+    }
+    stop_forwarding(app.clone(), state.clone());
+    let resolved = resolve_mac(&state.cloud(), &mac).await.map_err(err_chain)?;
+    let key = load_or_create_key(&key_path(&state.home)).map_err(err)?;
+    let (stop_tx, stop_rx) = oneshot::channel();
+    *state.forwarding.lock().unwrap() = Some((mac, stop_tx));
+    let memory = RouteMemory::at(&state.home);
+    let net = mac_net(&state.cloud(), false).await;
+    let forwards = state.forwards.clone();
+    tauri::async_runtime::spawn(async move {
+        let emit = |list: &Vec<Forwarded>| {
+            let view: Vec<ForwardView> =
+                list.iter().map(|f| ForwardView { job_id: f.job_id.clone(), remote: f.remote, local: f.local }).collect();
+            let _ = app.emit("forwards", view);
+        };
+        let on_event = |event: ForwardEvent| {
+            let mut list = forwards.lock().unwrap();
+            match event {
+                ForwardEvent::Opened(f) => list.push(f),
+                ForwardEvent::Closed { job_id } => list.retain(|f| f.job_id != job_id),
+            }
+            emit(&list);
+        };
+        let cancel = async {
+            let _ = stop_rx.await;
+        };
+        if let Err(e) = forward_services(&key, net, resolved.addr, &memory, on_event, cancel).await {
+            eprintln!("port forwarding ended: {e:#}");
+        }
+        forwards.lock().unwrap().clear();
+        emit(&Vec::new());
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn stop_forwarding(app: AppHandle, state: State<'_, AppState>) {
+    if let Some((_, stop)) = state.forwarding.lock().unwrap().take() {
+        let _ = stop.send(());
+    }
+    state.forwards.lock().unwrap().clear();
+    let _ = app.emit("forwards", Vec::<ForwardView>::new());
+}
+
 /// Watches a running service in the output pane, like a run; Cancel detaches.
 #[tauri::command]
 async fn attach_job_service(app: AppHandle, state: State<'_, AppState>, mac: String, job_id: String) -> CmdResult<JobResult> {
@@ -618,8 +681,9 @@ fn open_log(app: AppHandle, state: State<'_, AppState>, path: String) -> CmdResu
 
 #[tauri::command]
 fn open_url(app: AppHandle, url: String) -> CmdResult<()> {
-    if !url.starts_with("https://") {
-        return Err("only https links can be opened".into());
+    // Forwarded services are plain http on this PC's own localhost.
+    if !url.starts_with("https://") && !url.starts_with("http://localhost:") {
+        return Err("only https links and forwarded services can be opened".into());
     }
     app.opener().open_url(url, None::<&str>).map_err(err)
 }
@@ -687,7 +751,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .manage(AppState { home, job: StdMutex::new(None) })
+        .manage(AppState { home, job: StdMutex::new(None), forwarding: StdMutex::new(None), forwards: Arc::default() })
         .invoke_handler(tauri::generate_handler![
             get_status,
             get_account,
@@ -705,6 +769,8 @@ fn main() {
             services,
             stop_job_service,
             attach_job_service,
+            start_forwarding,
+            stop_forwarding,
             open_log,
             check_update,
             install_update,

@@ -362,18 +362,30 @@ async fn stream_job(
 }
 
 /// A connection to the Mac that has passed the handshake, for the service commands.
-struct Session {
-    endpoint: Endpoint,
-    conn: Connection,
-    send: SendStream,
-    recv: RecvStream,
+pub(crate) struct Session {
+    /// Owned when the session bound its own endpoint, closed with it.
+    endpoint: Option<Endpoint>,
+    pub(crate) conn: Connection,
+    pub(crate) send: SendStream,
+    pub(crate) recv: RecvStream,
+}
+
+/// An endpoint for talking to `mac`: through the relay when `memory` says the direct path
+/// to it fails.
+pub(crate) async fn endpoint_for(key: &SecretKey, net: NetConfig, mac: &EndpointAddr, memory: &RouteMemory) -> Result<Endpoint> {
+    let relay_only = net.relay_only || memory.relay_first(mac);
+    bind(key.clone(), NetConfig { relay_only, ..net }).await
 }
 
 impl Session {
-    /// Connects through the relay when `memory` says the direct path to this Mac fails.
     async fn open(key: &SecretKey, net: NetConfig, mac: EndpointAddr, memory: &RouteMemory) -> Result<Self> {
-        let relay_only = net.relay_only || memory.relay_first(&mac);
-        let endpoint = bind(key.clone(), NetConfig { relay_only, ..net }).await?;
+        let endpoint = endpoint_for(key, net, &mac, memory).await?;
+        let mut session = Session::connect(&endpoint, mac).await?;
+        session.endpoint = Some(endpoint);
+        Ok(session)
+    }
+
+    pub(crate) async fn connect(endpoint: &Endpoint, mac: EndpointAddr) -> Result<Self> {
         let conn = tokio::time::timeout(CONNECT_TIMEOUT, endpoint.connect(mac, JOB_ALPN))
             .await
             .map_err(|_| anyhow::anyhow!("the Mac did not answer within {}s", CONNECT_TIMEOUT.as_secs()))?
@@ -385,11 +397,11 @@ impl Session {
             AgentMsg::Rejected { reason } => bail!(reason),
             other => bail!("unexpected handshake reply {other:?}"),
         }
-        Ok(Session { endpoint, conn, send, recv })
+        Ok(Session { endpoint: None, conn, send, recv })
     }
 
     /// Sends `msg` and returns the one reply. A pairing refusal comes back as an error.
-    async fn ask(&mut self, msg: &ClientMsg) -> Result<AgentMsg> {
+    pub(crate) async fn ask(&mut self, msg: &ClientMsg) -> Result<AgentMsg> {
         send_msg(&mut self.send, msg).await?;
         match recv_msg::<AgentMsg>(&mut self.recv).await? {
             AgentMsg::Rejected { reason } => bail!(reason),
@@ -397,10 +409,12 @@ impl Session {
         }
     }
 
-    async fn close(self) {
+    pub(crate) async fn close(self) {
         let _ = { self.send }.finish();
         self.conn.close(0u32.into(), b"done");
-        self.endpoint.close().await;
+        if let Some(endpoint) = self.endpoint {
+            endpoint.close().await;
+        }
     }
 }
 

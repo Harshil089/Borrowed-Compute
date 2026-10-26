@@ -19,7 +19,7 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::task::AbortHandle;
 
 use crate::events::{AgentEvent, EventSender, JobEnd};
-use crate::runner::{run_job, RunnerConfig};
+use crate::runner::{run_job_with, RunnerConfig};
 
 /// Output kept per service for clients that attach later.
 const BACKLOG_BYTES: usize = 256 << 10;
@@ -37,6 +37,8 @@ struct Inner {
 
 struct Entry {
     info: ServiceInfo,
+    /// The job's process, which leads its process group.
+    pid: Option<u32>,
     started: bool,
     backlog: VecDeque<AgentMsg>,
     backlog_bytes: usize,
@@ -75,6 +77,7 @@ impl Services {
                 .map(|d| d.as_secs())
                 .unwrap_or_default(),
             owner: owner.to_string(),
+            ports: Vec::new(),
         };
         let (live, rx) = broadcast::channel(1024);
         // Made outside the task so a service stopped before it first runs is still removed.
@@ -83,7 +86,17 @@ impl Services {
         // Spawned under the lock so the task cannot record output before its entry exists.
         let task = tokio::spawn(async move {
             let (tx, mut msgs) = mpsc::channel(256);
-            let run = run_job(&runner, &req, archive, tx);
+            let (pid_tx, pid_rx) = tokio::sync::oneshot::channel();
+            let run = run_job_with(&runner, &req, archive, tx, Some(pid_tx));
+            let services = guard.services.clone();
+            let id = guard.job_id.clone();
+            tokio::spawn(async move {
+                if let Ok(pid) = pid_rx.await {
+                    if let Some(entry) = services.inner.lock().unwrap().running.get_mut(&id) {
+                        entry.pid = Some(pid);
+                    }
+                }
+            });
             let record = async {
                 while let Some(msg) = msgs.recv().await {
                     match &msg {
@@ -100,7 +113,7 @@ impl Services {
         });
         inner.running.insert(
             info.job_id.clone(),
-            Entry { info, started: false, backlog: VecDeque::new(), backlog_bytes: 0, live, task: task.abort_handle() },
+            Entry { info, pid: None, started: false, backlog: VecDeque::new(), backlog_bytes: 0, live, task: task.abort_handle() },
         );
         if inner.awake.is_none() {
             inner.awake = keep_awake();
@@ -151,6 +164,31 @@ impl Services {
         list
     }
 
+    /// [`Services::list`] with the ports each service listens on.
+    pub async fn list_with_ports(&self, client: Option<EndpointId>) -> Vec<ServiceInfo> {
+        let mut list = self.list(client);
+        let pids: Vec<Option<u32>> = {
+            let inner = self.inner.lock().unwrap();
+            list.iter().map(|s| inner.running.get(&s.job_id).and_then(|e| e.pid)).collect()
+        };
+        let ports = tokio::task::spawn_blocking(move || pids.into_iter().map(|p| p.map(listening_ports).unwrap_or_default()).collect::<Vec<_>>())
+            .await
+            .unwrap_or_default();
+        for (service, ports) in list.iter_mut().zip(ports) {
+            service.ports = ports;
+        }
+        list
+    }
+
+    /// Ports `job_id` listens on now; empty if it is not running.
+    pub async fn ports(&self, job_id: &str) -> Vec<u16> {
+        let pid = self.inner.lock().unwrap().running.get(job_id).and_then(|e| e.pid);
+        match pid {
+            Some(pid) => tokio::task::spawn_blocking(move || listening_ports(pid)).await.unwrap_or_default(),
+            None => Vec::new(),
+        }
+    }
+
     fn record(&self, job_id: &str, msg: AgentMsg) {
         let mut inner = self.inner.lock().unwrap();
         let Some(entry) = inner.running.get_mut(job_id) else { return };
@@ -197,6 +235,24 @@ impl Drop for EndGuard {
             });
         }
     }
+}
+
+/// TCP ports that any process in group `pgid` listens on, from `lsof`. Forwarding is
+/// limited to these, so a paired device reaches its own service and nothing else on the
+/// Mac's localhost.
+fn listening_ports(pgid: u32) -> Vec<u16> {
+    let out = std::process::Command::new("/usr/sbin/lsof")
+        .args(["-nP", "-a", "-g", &pgid.to_string(), "-iTCP", "-sTCP:LISTEN", "-Fn"])
+        .output();
+    let Ok(out) = out else { return Vec::new() };
+    let mut ports: Vec<u16> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.strip_prefix('n'))
+        .filter_map(|addr| addr.rsplit(':').next()?.parse().ok())
+        .collect();
+    ports.sort_unstable();
+    ports.dedup();
+    ports
 }
 
 /// Keeps the Mac from sleeping while the returned process lives: `-i` blocks idle sleep,
@@ -275,6 +331,28 @@ mod tests {
         // The workspace goes with it.
         wait_for(|| std::fs::read_dir(root.path()).unwrap().next().is_none()).await;
         assert_eq!(services.stop("svc", None), Err(StopError::NotFound));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn finds_the_ports_a_service_listens_on() {
+        let root = tempfile::tempdir().unwrap();
+        let runner = RunnerConfig { work_root: root.path().into(), default_timeout: Duration::from_secs(30) };
+        let services = Services::default();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let script = format!("python3 -m http.server {port} -b 127.0.0.1");
+        drop(services.start(runner, request("web", &["sh", "-c", &script]), empty_archive(), device(1), None));
+        for _ in 0..100 {
+            if services.ports("web").await == vec![port] {
+                assert_eq!(services.list_with_ports(None).await[0].ports, vec![port]);
+                services.stop("web", None).unwrap();
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("port {port} never showed up");
     }
 
     #[tokio::test]

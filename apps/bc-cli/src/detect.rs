@@ -13,6 +13,15 @@ pub struct Suggestion {
     /// What the command does, for a button: "Build", "Test", "Run main.py".
     pub label: String,
     pub argv: Vec<String>,
+    /// A server or watcher that runs until stopped, so it should run as a service.
+    pub service: bool,
+}
+
+impl Suggestion {
+    fn service(mut self) -> Self {
+        self.service = true;
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -75,7 +84,7 @@ impl RootFiles {
 }
 
 fn s(label: &str, argv: &[&str]) -> Suggestion {
-    Suggestion { label: label.to_string(), argv: argv.iter().map(|a| a.to_string()).collect() }
+    Suggestion { label: label.to_string(), argv: argv.iter().map(|a| a.to_string()).collect(), service: false }
 }
 
 /// A command that needs a shell (`&&` between steps). Still an argv: `sh -c <script>`.
@@ -159,9 +168,13 @@ fn node(root: &Path, f: &RootFiles) -> Option<Detected> {
         .unwrap_or_default();
     let scripts = package.get("scripts").and_then(|v| v.as_object());
     let mut suggestions = Vec::new();
-    for (name, label) in [("build", "Build"), ("test", "Test"), ("start", "Start"), ("lint", "Lint")] {
+    let servers = ["dev", "start", "serve", "preview"];
+    for (name, label) in
+        [("build", "Build"), ("test", "Test"), ("dev", "Dev server"), ("start", "Start"), ("serve", "Serve"), ("preview", "Preview"), ("lint", "Lint")]
+    {
         if scripts.is_some_and(|s| s.contains_key(name)) {
-            suggestions.push(shell(label, &format!("{install} && {pm} run {name}")));
+            let suggestion = shell(label, &format!("{install} && {pm} run {name}"));
+            suggestions.push(if servers.contains(&name) { suggestion.service() } else { suggestion });
         }
     }
     // A TypeScript project with no build script still has a compiler to run.
@@ -295,6 +308,8 @@ fn html(f: &RootFiles) -> Option<Detected> {
         // The standard preset checks conformance to the HTML spec, not house style.
         s("Check HTML", &["npx", "--yes", "html-validate", "--preset", "standard", "**/*.html"]),
         s("Build with Vite", &["npx", "--yes", "vite", "build"]),
+        // Port forwarding brings it to the PC's http://localhost:8000.
+        s("Serve", &["python3", "-m", "http.server", "8000", "-b", "127.0.0.1"]).service(),
     ])
 }
 
@@ -417,6 +432,15 @@ mod tests {
         assert_eq!((d.kind.as_str(), d.reason.as_str()), ("HTML", "index.html"));
         assert_eq!(argv(&d, 0), "npx --yes html-validate --preset standard **/*.html");
         assert_eq!(d.suggestions[1].label, "Build with Vite");
+        assert!(d.suggestions[2].service && !d.suggestions[0].service);
+    }
+
+    #[test]
+    fn node_dev_servers_run_as_services() {
+        let pkg = r#"{"scripts":{"build":"vite build","dev":"vite","start":"node server.js"}}"#;
+        let d = detect(project(&[("package.json", pkg)]).path()).unwrap();
+        let services: Vec<(&str, bool)> = d.suggestions.iter().map(|s| (s.label.as_str(), s.service)).collect();
+        assert_eq!(services, [("Build", false), ("Dev server", true), ("Start", true)]);
     }
 
     #[test]

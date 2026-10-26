@@ -43,6 +43,18 @@ pub async fn run_job(
     archive: Vec<u8>,
     tx: mpsc::Sender<AgentMsg>,
 ) -> PathBuf {
+    run_job_with(config, req, archive, tx, None).await
+}
+
+/// [`run_job`], also sending the job's process id (which is its process group id) to
+/// `pid` once it starts, so services can find the ports the job listens on.
+pub async fn run_job_with(
+    config: &RunnerConfig,
+    req: &JobRequest,
+    archive: Vec<u8>,
+    tx: mpsc::Sender<AgentMsg>,
+    pid: Option<tokio::sync::oneshot::Sender<u32>>,
+) -> PathBuf {
     let workspace = match prepare(config, archive).await {
         Ok(ws) => ws,
         Err(e) => {
@@ -55,7 +67,7 @@ pub async fn run_job(
         }
     };
     let path = workspace.path().to_path_buf();
-    let last = match execute(config, req, &path.join(PROJECT_DIR), &path.join(CACHE_DIR), &tx).await {
+    let last = match execute(config, req, &path.join(PROJECT_DIR), &path.join(CACHE_DIR), &tx, pid).await {
         Ok(exited) => exited,
         Err(e) => AgentMsg::Failed {
             reason: format!("{e:#}"),
@@ -199,6 +211,7 @@ async fn execute(
     root: &Path,
     cache: &Path,
     tx: &mpsc::Sender<AgentMsg>,
+    pid_sink: Option<tokio::sync::oneshot::Sender<u32>>,
 ) -> Result<AgentMsg> {
     let workdir_rel = Path::new(&req.workdir);
     if !is_inside(workdir_rel) {
@@ -265,6 +278,9 @@ async fn execute(
         .with_context(|| format!("starting {program:?}"))?;
     let pid = child.id();
     let group = GroupGuard(Some(pid));
+    if let Some(sink) = pid_sink {
+        let _ = sink.send(pid);
+    }
     let _ = tx.send(AgentMsg::Started).await;
 
     let seq = Arc::new(AtomicU64::new(0));
