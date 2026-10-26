@@ -81,6 +81,11 @@ enum Command {
         #[arg(long)]
         to: Option<String>,
     },
+    /// Forward your services' ports on the Mac to this computer's localhost until Ctrl+C.
+    Forward {
+        #[arg(long)]
+        to: Option<String>,
+    },
     /// Stop a running service.
     Stop {
         id: String,
@@ -209,19 +214,29 @@ async fn main() -> Result<()> {
             report_end(&outcome.job_id, &outcome.exit);
             std::process::exit(outcome.exit.status());
         }
+        Command::Forward { to } => {
+            let (_, mac) = target_mac(&home, &cloud, to).await?;
+            let key = load_or_create_key(&key_path)?;
+            eprintln!("bc: forwarding your services' ports; Ctrl+C to stop");
+            bc_cli::forward::forward_services(&key, NetConfig::default(), mac.addr, &RouteMemory::at(&home), print_forward, async {
+                let _ = tokio::signal::ctrl_c().await;
+            })
+            .await?;
+        }
         Command::Stop { id, to } => {
             let (_, mac) = target_mac(&home, &cloud, to).await?;
             let key = load_or_create_key(&key_path)?;
             stop_service(&key, NetConfig::default(), mac.addr, &RouteMemory::at(&home), &id).await?;
             println!("Stopped {id}.");
         }
-        Command::Run { to, spec, relay_only, timings, service, mut argv } => {
+        Command::Run { to, spec, relay_only, timings, mut service, mut argv } => {
             let (target, mac) = target_mac(&home, &cloud, to).await?;
             let root = std::env::current_dir()?;
             // With no command and no bc.toml, run what the project looks like it wants.
             if argv.is_empty() && spec.is_none() && !root.join("bc.toml").exists() {
                 if let Some(found) = bc_cli::detect::detect(&root) {
                     argv = found.suggestions[0].argv.clone();
+                    service |= found.suggestions[0].service;
                     eprintln!("bc: {} project ({}); running: {}", found.kind, found.reason, argv.join(" "));
                 }
             }
@@ -233,20 +248,33 @@ async fn main() -> Result<()> {
             let cancel = async {
                 let _ = tokio::signal::ctrl_c().await;
             };
-            let outcome = run_on_mac(
+            let net = NetConfig { relay_only, ..Default::default() };
+            let memory = RouteMemory::at(&home);
+            // A service's ports reach this computer's localhost while it is watched.
+            let forwarding = async {
+                if spec.job.service {
+                    let _ = bc_cli::forward::forward_services(&key, net.clone(), mac.addr.clone(), &memory, print_forward, std::future::pending()).await;
+                }
+                std::future::pending::<()>().await
+            };
+            let (mut stdout, mut stderr) = (std::io::stdout(), std::io::stderr());
+            let run = run_on_mac(
                 &key,
-                NetConfig { relay_only, ..Default::default() },
-                mac.addr,
+                net.clone(),
+                mac.addr.clone(),
                 &spec,
                 archive,
-                &mut std::io::stdout(),
-                &mut std::io::stderr(),
+                &mut stdout,
+                &mut stderr,
                 cancel,
                 Some(&root),
-                &RouteMemory::at(&home),
+                &memory,
                 |text| eprintln!("bc: {text}"),
-            )
-            .await?;
+            );
+            let outcome = tokio::select! {
+                outcome = run => outcome?,
+                () = forwarding => unreachable!(),
+            };
 
             let line = outcome.timings.to_json(&outcome.job_id, &outcome.exit, outcome.usage.as_ref());
             append_timing(&home, &line);
@@ -284,9 +312,18 @@ async fn target_mac(home: &std::path::Path, cloud: &CloudClient, to: Option<Stri
     Ok((target, mac))
 }
 
+fn print_forward(event: bc_cli::forward::ForwardEvent) {
+    use bc_cli::forward::ForwardEvent;
+    match event {
+        ForwardEvent::Opened(f) if f.local == f.remote => eprintln!("bc: http://localhost:{} now reaches the service on the Mac", f.local),
+        ForwardEvent::Opened(f) => eprintln!("bc: http://localhost:{} now reaches port {} on the Mac (port {} is taken here)", f.local, f.remote, f.remote),
+        ForwardEvent::Closed { job_id } => eprintln!("bc: stopped forwarding {job_id}"),
+    }
+}
+
 fn report_end(job_id: &str, exit: &Exit) {
     if *exit == Exit::Detached {
-        eprintln!("bc: service {job_id} keeps running on the Mac. Watch it with `bc attach {job_id}`, stop it with `bc stop {job_id}`.");
+        eprintln!("bc: service {job_id} keeps running on the Mac. Watch it with `bc attach {job_id}`, reach its ports with `bc forward`, stop it with `bc stop {job_id}`.");
     }
 }
 

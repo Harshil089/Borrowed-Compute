@@ -308,8 +308,11 @@ async fn unpair(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
 
 /// Services running on this Mac, from every paired device.
 #[tauri::command]
-fn list_services(state: State<'_, AppState>) -> Vec<bc_proto::wire::ServiceInfo> {
-    state.agent.get().map(|a| a.services().list(None)).unwrap_or_default()
+async fn list_services(state: State<'_, AppState>) -> CmdResult<Vec<bc_proto::wire::ServiceInfo>> {
+    Ok(match state.agent.get() {
+        Some(agent) => agent.services().list_with_ports(None).await,
+        None => Vec::new(),
+    })
 }
 
 /// The Mac's owner may stop any service, whoever started it.

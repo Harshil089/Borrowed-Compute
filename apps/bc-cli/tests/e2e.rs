@@ -324,3 +324,93 @@ async fn service_keeps_running_after_detach_until_stopped() {
     }
     panic!("service or its workspace is still there after stop");
 }
+
+#[tokio::test]
+async fn forwards_a_service_port_to_localhost() {
+    if std::process::Command::new("python3").arg("--version").output().is_err() {
+        eprintln!("python3 not installed; skipping");
+        return;
+    }
+    let (relay_map, _url, _relay) = iroh::test_utils::run_relay_server().await.unwrap();
+    let net = NetConfig { relays: Some(relay_map.clone()), relay_only: true, insecure_relay_tls: true };
+    let agent = bind(SecretKey::generate(), net.clone()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), agent.online()).await.unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let paired = PairedDevices::new(state.path().join("paired"));
+    let client_key = SecretKey::generate();
+    paired.add(client_key.public()).unwrap();
+    let work_root = tempfile::tempdir().unwrap();
+    let config = AgentConfig::new(
+        RunnerConfig { work_root: work_root.path().to_path_buf(), default_timeout: Duration::from_secs(30) },
+        paired,
+    );
+    let accept = agent.clone();
+    tokio::spawn(async move {
+        while let Some(incoming) = accept.accept().await {
+            let config = config.clone();
+            tokio::spawn(async move {
+                if let Ok(conn) = incoming.await {
+                    let _ = serve_connection(&config, conn).await;
+                }
+            });
+        }
+    });
+    let memory = bc_cli::route::RouteMemory::none();
+
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let proj = project();
+    std::fs::write(proj.path().join("index.html"), "<p>served from the Mac</p>").unwrap();
+    let mut spec = JobSpec::from_argv(
+        ["python3", "-m", "http.server", &port.to_string(), "-b", "127.0.0.1"].iter().map(|a| a.to_string()).collect(),
+    )
+    .unwrap();
+    spec.job.service = true;
+    let archive = pack(proj.path(), &spec.files.exclude).unwrap();
+    let outcome = bc_cli::run::run_on_mac(
+        &client_key,
+        net.clone(),
+        agent.addr(),
+        &spec,
+        archive,
+        &mut Vec::new(),
+        &mut Vec::new(),
+        tokio::time::sleep(Duration::from_secs(1)),
+        None,
+        &memory,
+        |_: &str| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.exit, Exit::Detached);
+
+    let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let forwarding = {
+        let (key, net, mac, memory) = (client_key.clone(), net.clone(), agent.addr(), memory.clone());
+        tokio::spawn(async move {
+            bc_cli::forward::forward_services(&key, net, mac, &memory, move |e| { let _ = tx.send(e); }, async {
+                let _ = stop_rx.await;
+            })
+            .await
+        })
+    };
+    let opened = tokio::time::timeout(Duration::from_secs(20), events.recv()).await.unwrap().unwrap();
+    let bc_cli::forward::ForwardEvent::Opened(f) = opened else { panic!("{opened:?}") };
+    assert_eq!(f.remote, port);
+    // Agent and client share this machine, so the same port is taken and another is used.
+    assert_ne!(f.local, port);
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut tcp = tokio::net::TcpStream::connect(("127.0.0.1", f.local)).await.unwrap();
+    tcp.write_all(b"GET /index.html HTTP/1.0\r\nHost: localhost\r\n\r\n").await.unwrap();
+    let mut body = String::new();
+    tcp.read_to_string(&mut body).await.unwrap();
+    assert!(body.starts_with("HTTP/1.0 200"), "{body}");
+    assert!(body.contains("served from the Mac"), "{body}");
+
+    bc_cli::run::stop_service(&client_key, net.clone(), agent.addr(), &memory, &outcome.job_id).await.unwrap();
+    let closed = tokio::time::timeout(Duration::from_secs(20), events.recv()).await.unwrap().unwrap();
+    assert_eq!(closed, bc_cli::forward::ForwardEvent::Closed { job_id: outcome.job_id.clone() });
+    let _ = stop_tx.send(());
+    forwarding.await.unwrap().unwrap();
+}

@@ -212,16 +212,22 @@ async function selectMac(name) {
 // ---- Services ----
 
 let services = [];
+// Ports forwarded to this PC, from the forwarding task: [{ job_id, remote, local }].
+let forwards = [];
+listen("forwards", (event) => { forwards = event.payload; renderServices(); });
 
 async function loadServices() {
   const mac = devices?.devices.find((d) => d.name === selectedMac);
-  if (!mac || !mac.online || pairingFor(mac)?.status !== "approved") { services = []; renderServices(); return; }
+  if (!mac || !mac.online || pairingFor(mac)?.status !== "approved") { services = []; invoke("stop_forwarding").catch(() => {}); renderServices(); return; }
   try {
     services = await invoke("services", { mac: selectedMac });
   } catch {
     // An older agent or a dropped connection: show nothing rather than an error.
     services = [];
   }
+  // Forward ports only while there is something to forward.
+  if (services.length) invoke("start_forwarding", { mac: selectedMac }).catch(() => {});
+  else invoke("stop_forwarding").catch(() => {});
   renderServices();
 }
 
@@ -238,6 +244,10 @@ function renderServices() {
   $("services").innerHTML = services.map((s) => `
     <li class="service">
       <span class="service-cmd">${esc(s.argv.join(" "))}</span>
+      ${forwards.filter((f) => f.job_id === s.job_id).map((f) => `
+        <button class="link service-port" data-open-port="${f.local}" title="Port ${f.remote} on the Mac">
+          <svg class="icon"><use href="#i-plane"/></svg>localhost:${f.local}</button>`).join("")}
+      ${s.ports.length && !forwards.some((f) => f.job_id === s.job_id) ? `<span class="service-up faint">Forwarding port ${s.ports.join(", ")}…</span>` : ""}
       <div class="service-foot">
         <span class="service-up">up ${esc(uptime(s.started_at))}</span>
         <span class="actions">
@@ -249,6 +259,8 @@ function renderServices() {
 }
 
 $("services").addEventListener("click", async (event) => {
+  const port = event.target.closest("[data-open-port]");
+  if (port) { invoke("open_url", { url: `http://localhost:${port.dataset.openPort}/` }).catch((e) => showError(String(e))); return; }
   const watch = event.target.closest("[data-watch]");
   const stop = event.target.closest("[data-stop]");
   if (watch) watchService(watch.dataset.watch);
@@ -456,6 +468,11 @@ function setCommand(command, auto) {
 }
 
 // Presses the suggestion that matches the command box, if any.
+function setService(on) {
+  $("as-service").checked = on;
+  store.set("service", on ? "1" : "");
+}
+
 function markSuggestion() {
   const now = $("command").value.trim();
   $("detect").querySelectorAll("[data-command]").forEach((b) => {
@@ -467,14 +484,17 @@ function renderDetected(d) {
   const box = $("detect");
   if (!d) { box.classList.add("hidden"); box.innerHTML = ""; return; }
   box.innerHTML = `<span class="detect-kind">${esc(d.kind)} <small>${esc(d.reason)}</small></span>` +
-    d.suggestions.map((s) => `<button type="button" data-command="${esc(s.command)}" title="${esc(s.command)}">${esc(s.label)}</button>`).join("");
+    d.suggestions.map((s) => `<button type="button" data-command="${esc(s.command)}" data-service="${s.service ? "1" : ""}" title="${esc(s.command)}${s.service ? " (keeps running as a service)" : ""}">${esc(s.label)}</button>`).join("");
   box.classList.remove("hidden");
   markSuggestion();
 }
 
 $("detect").addEventListener("click", (event) => {
   const choice = event.target.closest("[data-command]");
-  if (choice) setCommand(choice.dataset.command, true);
+  if (choice) {
+    setCommand(choice.dataset.command, true);
+    setService(!!choice.dataset.service);
+  }
 });
 
 async function setFolder(path) {
@@ -495,7 +515,10 @@ async function setFolder(path) {
       renderDetected(info.detected);
       const typed = $("command").value.trim();
       // Fill in the default unless the user typed a command of their own.
-      if (!typed || typed === autoCommand) setCommand(info.detected.suggestions[0].command, true);
+      if (!typed || typed === autoCommand) {
+        setCommand(info.detected.suggestions[0].command, true);
+        setService(info.detected.suggestions[0].service);
+      }
     } else {
       $("command").placeholder = "cargo test";
     }
@@ -641,7 +664,7 @@ async function runJob() {
   setLeg("pack");
   setRunTab("In flight");
   // Once it is up, list it so it can be stopped from the rail.
-  const listSoon = service ? setTimeout(loadServices, 4000) : null;
+  const listSoon = service ? setInterval(loadServices, 4000) : null;
   try {
     const r = await invoke("run_job", {
       mac: selectedMac,
@@ -650,7 +673,7 @@ async function runJob() {
       relayOnly: $("relay-only").checked,
       service,
     });
-    clearTimeout(listSoon);
+    clearInterval(listSoon);
     renderResult(r);
     setRunTab(stampFor(r)[1]);
     if (r.outcome === "success" || r.outcome === "detached") setLeg("done");

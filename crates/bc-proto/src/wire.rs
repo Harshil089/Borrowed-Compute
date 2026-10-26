@@ -98,6 +98,9 @@ pub struct ServiceInfo {
     pub started_at: u64,
     /// The device that started it; only that device can attach to it or stop it.
     pub owner: String,
+    /// TCP ports the service listens on, which its device can forward.
+    #[serde(default)]
+    pub ports: Vec<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,6 +133,15 @@ pub enum ClientMsg {
     },
     /// Answered with `Services`: the ones this device started.
     ListServices,
+    /// Opens port forwarding to a service, answered with `Accepted` or `Rejected`. Each
+    /// forwarded TCP connection is then a new stream on the same connection that starts
+    /// with `Connect`; after its answer the stream carries raw bytes both ways.
+    Forward {
+        job_id: String,
+    },
+    Connect {
+        port: u16,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

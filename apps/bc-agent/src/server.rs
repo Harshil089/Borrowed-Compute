@@ -79,7 +79,18 @@ pub async fn serve_connection(config: &AgentConfig, conn: Connection) -> Result<
             return reply_and_close(&conn, send, reply).await;
         }
         ClientMsg::ListServices => {
-            return reply_and_close(&conn, send, AgentMsg::Services(config.services.list(Some(peer)))).await;
+            let list = config.services.list_with_ports(Some(peer)).await;
+            return reply_and_close(&conn, send, AgentMsg::Services(list)).await;
+        }
+        ClientMsg::Forward { job_id } => {
+            return match config.services.attach(&job_id, peer) {
+                Ok(attached) => {
+                    send_msg(&mut send, &AgentMsg::Accepted { job_id: job_id.clone() }).await?;
+                    forward(config, &conn, attached, &job_id).await;
+                    Ok(())
+                }
+                Err(e) => reply_and_close(&conn, send, AgentMsg::Rejected { reason: service_error(&job_id, e) }).await,
+            };
         }
         other => bail!("expected Submit, Attach, Stop or ListServices, got {other:?}"),
     };
@@ -206,6 +217,73 @@ async fn stream_service(
     }
     send.finish()?;
     conn.closed().await;
+    Ok(())
+}
+
+/// Carries the client's forwarded TCP connections to the service's ports on this Mac's
+/// localhost, one stream each, until the service ends or the client closes the connection.
+async fn forward(config: &AgentConfig, conn: &Connection, attached: Attached, job_id: &str) {
+    let mut live = attached.live;
+    let service_ended = async move {
+        loop {
+            if let Err(broadcast::error::RecvError::Closed) = live.recv().await {
+                return;
+            }
+        }
+    };
+    tokio::pin!(service_ended);
+    loop {
+        tokio::select! {
+            stream = conn.accept_bi() => match stream {
+                Ok((send, recv)) => {
+                    let services = config.services.clone();
+                    let job_id = job_id.to_string();
+                    tokio::spawn(async move {
+                        if let Err(e) = forward_stream(&services, &job_id, send, recv).await {
+                            eprintln!("forwarding for {job_id} ended: {e:#}");
+                        }
+                    });
+                }
+                Err(_) => return,
+            },
+            _ = &mut service_ended => {
+                conn.close(0u32.into(), b"service ended");
+                return;
+            }
+        }
+    }
+}
+
+async fn forward_stream(services: &Services, job_id: &str, mut send: SendStream, mut recv: RecvStream) -> Result<()> {
+    let port = match recv_msg::<ClientMsg>(&mut recv).await? {
+        ClientMsg::Connect { port } => port,
+        other => bail!("expected Connect, got {other:?}"),
+    };
+    // Only the service's own ports: anything else on localhost is not the client's.
+    if !services.ports(job_id).await.contains(&port) {
+        let reason = format!("service {job_id} is not listening on port {port}");
+        send_msg(&mut send, &AgentMsg::Rejected { reason: reason.clone() }).await?;
+        send.finish()?;
+        bail!(reason);
+    }
+    let tcp = match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+        Ok(tcp) => tcp,
+        // Some servers listen on IPv6 localhost only.
+        Err(_) => tokio::net::TcpStream::connect(("::1", port)).await?,
+    };
+    let _ = tcp.set_nodelay(true);
+    send_msg(&mut send, &AgentMsg::Accepted { job_id: job_id.to_string() }).await?;
+    let (mut tcp_read, mut tcp_write) = tcp.into_split();
+    let upstream = async {
+        tokio::io::copy(&mut recv, &mut tcp_write).await?;
+        tokio::io::AsyncWriteExt::shutdown(&mut tcp_write).await
+    };
+    let downstream = async {
+        tokio::io::copy(&mut tcp_read, &mut send).await?;
+        send.finish().map_err(std::io::Error::other)
+    };
+    let (up, down) = tokio::join!(upstream, downstream);
+    up.and(down)?;
     Ok(())
 }
 
