@@ -9,6 +9,7 @@ use bc_proto::wire::{AgentMsg, ClientMsg, JobRequest, JobUsage, OutputStream, PR
 use bc_proto::JobSpec;
 use iroh::{Endpoint, SecretKey};
 
+use crate::autofix;
 use crate::route::RouteMemory;
 
 const UPLOAD_CHUNK: usize = 1 << 20;
@@ -114,8 +115,79 @@ pub async fn run_remote(
 /// wherever HTTPS does. `memory` records the failure so the next runs to that Mac go
 /// through the relay first and skip the wait. `notice` explains each switch to the person
 /// watching.
+///
+/// With `project` (the folder being sent), the run also fixes what a fresh workspace
+/// lacks: [`autofix::preflight`] installs dependencies or builds first, and after a
+/// failed run [`autofix::after_failure`] reads the output and, when it recognizes a
+/// missing module, command or build file, runs once more with the fix.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_on_mac(
+    key: &SecretKey,
+    net: NetConfig,
+    mac: EndpointAddr,
+    spec: &JobSpec,
+    archive: Vec<u8>,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+    cancel: impl std::future::Future<Output = ()>,
+    project: Option<&std::path::Path>,
+    memory: &RouteMemory,
+    notice: impl Fn(&str),
+) -> Result<RunOutcome> {
+    tokio::pin!(cancel);
+    let mut spec = spec.clone();
+    if let Some(fix) = project.and_then(|p| autofix::preflight(p, &spec.job.argv)) {
+        notice(&format!("Auto-fix: {}. Running: {}", fix.reason, fix.argv.join(" ")));
+        spec.job.argv = fix.argv;
+    }
+    // The end of the output, to recognize what a failed run was missing.
+    let tail = std::sync::Mutex::new(Vec::new());
+    let outcome = {
+        let mut out = Tail { inner: &mut *stdout, tail: &tail };
+        let mut err = Tail { inner: &mut *stderr, tail: &tail };
+        run_routed(key, net.clone(), mac.clone(), &spec, archive.clone(), &mut out, &mut err, cancel.as_mut(), memory, &notice)
+            .await?
+    };
+    let failed = matches!(outcome.exit, Exit::Code(c) if c != 0);
+    if let (true, Some(project)) = (failed, project) {
+        let output = String::from_utf8_lossy(&tail.lock().unwrap()).into_owned();
+        if let Some(fix) = autofix::after_failure(project, &spec.job.argv, &output) {
+            notice(&format!("Auto-fix: {}. Running again: {}", fix.reason, fix.argv.join(" ")));
+            spec.job.argv = fix.argv;
+            return run_routed(key, net, mac, &spec, archive, stdout, stderr, cancel.as_mut(), memory, &notice).await;
+        }
+    }
+    Ok(outcome)
+}
+
+/// Keeps the last [`TAIL_BYTES`] written, in memory only, while passing everything on.
+const TAIL_BYTES: usize = 64 * 1024;
+
+struct Tail<'a, W: Write> {
+    inner: &'a mut W,
+    tail: &'a std::sync::Mutex<Vec<u8>>,
+}
+
+impl<W: Write> Write for Tail<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        let mut tail = self.tail.lock().unwrap();
+        tail.extend_from_slice(&buf[..n]);
+        if tail.len() > TAIL_BYTES {
+            let excess = tail.len() - TAIL_BYTES;
+            tail.drain(..excess);
+        }
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Runs the job, choosing direct or relay as described on [`run_on_mac`].
+#[allow(clippy::too_many_arguments)]
+async fn run_routed(
     key: &SecretKey,
     net: NetConfig,
     mac: EndpointAddr,
