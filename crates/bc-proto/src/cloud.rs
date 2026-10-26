@@ -35,6 +35,38 @@ pub struct Me {
     pub login: String,
 }
 
+/// A way to sign in. Identities from different providers that report the same verified
+/// email address belong to one account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Provider {
+    Github,
+    Google,
+}
+
+impl Provider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Provider::Github => "github",
+            Provider::Google => "google",
+        }
+    }
+
+    pub fn display(self) -> &'static str {
+        match self {
+            Provider::Github => "GitHub",
+            Provider::Google => "Google",
+        }
+    }
+}
+
+/// Which sign-in providers this cloud offers. GitHub is always available.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Providers {
+    pub github: bool,
+    pub google: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DeviceKind {

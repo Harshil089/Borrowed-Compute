@@ -28,7 +28,7 @@
           <div class="brand on-paper"><svg><use href="#i-mark"/></svg><span class="wordmark">Borrowed Compute</span></div>
         </div>
         <h1 class="pass-title">Run it on your Mac.</h1>
-        <p class="muted pass-lede">Builds, tests and scripts from this PC run on your Mac's Apple silicon, with output streaming back here. Sign in with the GitHub account you use on the Mac.</p>
+        <p class="muted pass-lede">Builds, tests and scripts from this PC run on your Mac's Apple silicon, with output streaming back here. Sign in with the account you use on the Mac; GitHub and Google with the same verified email are one account.</p>
         <label class="field">
           <span class="label">Your Mac's address</span>
           <div class="inline">
@@ -43,13 +43,14 @@
           <input id="pc-name" type="text" placeholder="laptop" maxlength="64" autocomplete="off" spellcheck="false">
         </label>
         <button id="signin-btn" class="primary wide">Sign in with GitHub</button>
+        <button id="signin-google" class="wide hidden">Sign in with Google</button>
         <div id="signin-error" class="banner bad hidden"></div>
       </section>
       <aside class="pass-stub">
         <div id="signin-code" class="stub-code hidden">
-          <span class="label">Enter on GitHub</span>
+          <span class="label">Enter this code</span>
           <div id="user-code" class="code"></div>
-          <div class="row"><span class="spinner"></span><span>Waiting for GitHub…</span></div>
+          <div class="row"><span class="spinner"></span><span>Waiting for sign-in…</span></div>
           <button id="reopen" class="link">Open the page again</button>
         </div>
         <div class="stub-route" aria-hidden="true">

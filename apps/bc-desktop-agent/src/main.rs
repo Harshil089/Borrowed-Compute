@@ -28,7 +28,7 @@ use bc_auth::{
     CloudClient, DEFAULT_CLOUD_URL,
 };
 use bc_net::{home_dir, load_or_create_key};
-use bc_proto::cloud::{DeviceKind, PairingInfo};
+use bc_proto::cloud::{DeviceKind, PairingInfo, Provider, Providers};
 use logs::{log, Logs};
 use serde::{Deserialize, Serialize};
 use tauri::menu::{Menu, MenuItem};
@@ -48,6 +48,12 @@ const CLOUD_PORT: u16 = 8080;
 /// Client id of the GitHub OAuth app used for sign-in. OAuth client ids are public by
 /// design (device flow uses no client secret). `BC_GITHUB_CLIENT_ID` overrides it.
 const DEFAULT_GITHUB_CLIENT_ID: &str = "Ov23liLwrFmQ0cqqpXfy";
+
+/// Client id of the Google OAuth client (type "TVs and Limited Input devices"). Empty
+/// until one is created; Google sign-in is then not offered. Its secret, which Google
+/// documents as not confidential for this client type, is built in from the
+/// `BC_GOOGLE_CLIENT_SECRET` CI secret rather than kept in the repo.
+const DEFAULT_GOOGLE_CLIENT_ID: &str = "";
 
 #[derive(Debug, Clone, Default, Serialize)]
 struct CloudHost {
@@ -189,12 +195,21 @@ async fn get_account(state: State<'_, AppState>) -> CmdResult<Account> {
 }
 
 #[tauri::command]
-async fn login(app: AppHandle, state: State<'_, AppState>, name: String) -> CmdResult<Account> {
+async fn login(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+    provider: Option<String>,
+) -> CmdResult<Account> {
+    let provider = match provider.as_deref() {
+        Some("google") => Provider::Google,
+        _ => Provider::Github,
+    };
     // A fresh client, so other commands are not blocked while the user is on GitHub.
     let mut client = CloudClient::new(cloud_url_for(&state.paths.home), None);
     let emitter = app.clone();
     let (token, login) = client
-        .login(|start| {
+        .login_with(provider, |start| {
             let _ = emitter.emit("login-code", start);
             let _ = emitter.opener().open_url(&start.verification_uri, None::<&str>);
         })
@@ -211,6 +226,14 @@ async fn login(app: AppHandle, state: State<'_, AppState>, name: String) -> CmdR
     *state.cloud_state.lock().unwrap() = CloudState::default();
     restart_sync(&state).await;
     Ok(Account { login, device_name: Some(device.name) })
+}
+
+/// Which sign-in buttons to show. The cloud decides; an unreachable cloud shows GitHub
+/// only, and sign-in then reports the real problem.
+#[tauri::command]
+async fn providers(state: State<'_, AppState>) -> CmdResult<Providers> {
+    let client = CloudClient::new(cloud_url_for(&state.paths.home), None);
+    Ok(client.providers().await.unwrap_or(Providers { github: true, google: false }))
 }
 
 #[tauri::command]
@@ -250,7 +273,11 @@ async fn host_cloud(data_dir: std::path::PathBuf) -> anyhow::Result<()> {
     let db = bc_cloud::connect(&bc_cloud::sqlite_url(&data_dir.join("cloud.db"))).await?;
     let client_id = std::env::var("BC_GITHUB_CLIENT_ID")
         .unwrap_or_else(|_| DEFAULT_GITHUB_CLIENT_ID.to_string());
-    let state = bc_cloud::AppState { db, github: Arc::new(bc_cloud::GitHub::new(client_id)) };
+    let state = bc_cloud::AppState {
+        db,
+        github: Arc::new(bc_cloud::GitHub::new(client_id)),
+        google: bc_cloud::google_client(DEFAULT_GOOGLE_CLIENT_ID, option_env!("BC_GOOGLE_CLIENT_SECRET")),
+    };
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", CLOUD_PORT))
         .await
         .map_err(|e| anyhow::anyhow!("port {CLOUD_PORT} is busy ({e}); quit whatever else uses it"))?;
@@ -527,6 +554,7 @@ fn main() {
             get_status,
             get_account,
             login,
+            providers,
             logout,
             list_pairings,
             approve,

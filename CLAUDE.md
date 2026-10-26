@@ -48,7 +48,9 @@ Every merge to `main` runs `.github/workflows/release.yml`: it builds the Mac ag
 - **Jobs are `argv` arrays, never shell strings.** Keep it that way in the spec, wire format and runner.
 - **Unknown `bc.toml` keys are errors** (`deny_unknown_fields`). Add new keys explicitly and validate them in `JobSpec::validate`.
 - **Bump `PROTOCOL_VERSION` and `JOB_ALPN`** together on any incompatible change to `wire.rs`.
-- **Never store GitHub tokens.** The cloud uses one once to read the user, then drops it. Session tokens are stored only as SHA-256.
+- **Never store provider tokens** (GitHub or Google). The cloud uses one once to read the user and their verified emails, then drops it. Session tokens are stored only as SHA-256.
+- **Accounts are reached through identities** (`identities` table: provider + provider user id). A new identity joins the account of an existing identity with the same **verified** email, else creates an account (`account_for` in `auth.rs`). Never link on an unverified address. Google sign-in is offered only when a client id and secret are configured (`BC_GOOGLE_CLIENT_ID`/`BC_GOOGLE_CLIENT_SECRET`, or the Mac app's built-in id plus the `GOOGLE_CLIENT_SECRET` CI secret).
+- **SQLite migrations run with foreign keys off** (`migrate_sqlite` in `bc-cloud`), then `pragma foreign_key_check`, because table rebuilds would otherwise cascade-delete sessions and devices. sqlx always wraps a SQLite migration in a transaction, so pragmas inside a migration file do nothing.
 - **Device registration requires a signature** over `register_message` (bound to the session hash). Do not add a registration path without it.
 - **Every cloud query is scoped by `account_id`.** v1 pairs only devices on the same account (Foundation decision; Q6).
 - **The agent checks the paired list on every connection.** It must never run a job from an unpaired device.
