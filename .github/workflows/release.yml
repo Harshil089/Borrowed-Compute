@@ -1,8 +1,14 @@
 name: release
 
-# On every merge to main: builds the Mac agent app and the Windows client app, signs their
-# updates, and publishes them as release v0.1.<run number> in the public releases repo.
-# The apps' Check for updates reads `agent.json` and `client.json` from its latest release.
+# On every merge to main, releases whichever app changed. The Mac app (agent) and the
+# Windows app (client) are versioned separately: `.github/release-plan.sh` compares the
+# push with each app's last tag in this repo (agent-v0.2.3, client-v0.2.7) and picks the
+# next version. Each app is built, its update signed, and published to the public
+# releases repo as its own release (agent-v…, client-v…), and this repo is tagged.
+#
+# The apps' Check for updates reads `agent.json` and `client.json` from the releases
+# repo's latest release, so every release carries both: the new one for the app it ships,
+# and the other app's current one, copied from the previous latest release.
 #
 # Secrets:
 # - TAURI_SIGNING_PRIVATE_KEY: signs updates; the apps only install updates signed by it.
@@ -14,16 +20,22 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      apps:
+        description: Which apps to release (auto releases what changed)
+        type: choice
+        options: [auto, both, agent, client]
+        default: auto
 
 permissions:
-  contents: read
+  # Tags each release in this repo, so the next push knows what changed since.
+  contents: write
 
 concurrency:
   group: release
   cancel-in-progress: false
 
 env:
-  VERSION: 0.1.${{ github.run_number }}
   RELEASES_REPO: Harshil089/Borrowed-Compute-releases
   TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
   TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
@@ -31,8 +43,29 @@ env:
   UPDATER_CONFIG: '{"bundle":{"createUpdaterArtifacts":true}}'
 
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      agent: ${{ steps.plan.outputs.agent }}
+      agent_version: ${{ steps.plan.outputs.agent_version }}
+      client: ${{ steps.plan.outputs.client }}
+      client_version: ${{ steps.plan.outputs.client_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Decide what to release
+        id: plan
+        run: |
+          sh .github/release-plan.sh "${{ inputs.apps || 'auto' }}" | tee -a "$GITHUB_OUTPUT"
+
   mac:
+    needs: plan
+    if: needs.plan.outputs.agent == 'true'
     runs-on: macos-14
+    env:
+      VERSION: ${{ needs.plan.outputs.agent_version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -90,7 +123,11 @@ jobs:
           if-no-files-found: error
 
   windows:
+    needs: plan
+    if: needs.plan.outputs.client == 'true'
     runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.plan.outputs.client_version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -126,8 +163,18 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [mac, windows]
+    needs: [plan, mac, windows]
+    # Runs when at least one app was built and nothing failed; a skipped app is fine.
+    if: >-
+      !cancelled() && !contains(needs.*.result, 'failure') &&
+      (needs.plan.outputs.agent == 'true' || needs.plan.outputs.client == 'true')
     runs-on: ubuntu-latest
+    env:
+      AGENT: ${{ needs.plan.outputs.agent }}
+      AGENT_VERSION: ${{ needs.plan.outputs.agent_version }}
+      CLIENT: ${{ needs.plan.outputs.client }}
+      CLIENT_VERSION: ${{ needs.plan.outputs.client_version }}
+      GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -136,24 +183,48 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # A new manifest for each app built; the other app's current one is carried over.
       - name: Write update manifests
         run: |
-          base="https://github.com/$RELEASES_REPO/releases/download/v$VERSION"
-          node .github/update-manifest.mjs "$VERSION" darwin-aarch64 \
-            "$base/BorrowedComputeAgent.app.tar.gz" dist/BorrowedComputeAgent.app.tar.gz.sig > dist/agent.json
-          node .github/update-manifest.mjs "$VERSION" windows-x86_64 \
-            "$base/BorrowedCompute-setup.exe" dist/BorrowedCompute-setup.exe.sig > dist/client.json
+          latest="https://github.com/$RELEASES_REPO/releases/latest/download"
+          if [ "$AGENT" = true ]; then
+            node .github/update-manifest.mjs "$AGENT_VERSION" darwin-aarch64 \
+              "https://github.com/$RELEASES_REPO/releases/download/agent-v$AGENT_VERSION/BorrowedComputeAgent.app.tar.gz" \
+              dist/BorrowedComputeAgent.app.tar.gz.sig > dist/agent.json
+          else
+            curl -fsSL "$latest/agent.json" -o dist/agent.json
+          fi
+          if [ "$CLIENT" = true ]; then
+            node .github/update-manifest.mjs "$CLIENT_VERSION" windows-x86_64 \
+              "https://github.com/$RELEASES_REPO/releases/download/client-v$CLIENT_VERSION/BorrowedCompute-setup.exe" \
+              dist/BorrowedCompute-setup.exe.sig > dist/client.json
+          else
+            curl -fsSL "$latest/client.json" -o dist/client.json
+          fi
           cat dist/agent.json dist/client.json
 
-      - name: Publish release
-        env:
-          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+      # The client goes last when both ship, so the newest release (the one Check for
+      # updates reads) holds both new manifests.
+      - name: Publish releases
         run: |
-          gh release create "v$VERSION" --repo "$RELEASES_REPO" \
-            --title "Borrowed Compute $VERSION" \
-            --notes "Built from ${GITHUB_SHA::7}. Mac: BorrowedComputeAgent.dmg. Windows: BorrowedCompute-setup.exe. Installed apps update themselves with Check for updates." \
-            dist/BorrowedComputeAgent.dmg \
-            dist/BorrowedComputeAgent.app.tar.gz \
-            dist/BorrowedCompute-setup.exe \
-            dist/agent.json \
-            dist/client.json
+          short=${GITHUB_SHA::7}
+          if [ "$AGENT" = true ]; then
+            gh release create "agent-v$AGENT_VERSION" --repo "$RELEASES_REPO" \
+              --title "Borrowed Compute Agent $AGENT_VERSION (Mac)" \
+              --notes "Mac app, built from $short. Install BorrowedComputeAgent.dmg; installed apps update themselves." \
+              dist/BorrowedComputeAgent.dmg dist/BorrowedComputeAgent.app.tar.gz dist/agent.json dist/client.json
+          fi
+          if [ "$CLIENT" = true ]; then
+            gh release create "client-v$CLIENT_VERSION" --repo "$RELEASES_REPO" \
+              --title "Borrowed Compute $CLIENT_VERSION (Windows)" \
+              --notes "Windows app, built from $short. Install BorrowedCompute-setup.exe; installed apps update themselves." \
+              dist/BorrowedCompute-setup.exe dist/agent.json dist/client.json
+          fi
+
+      - name: Tag this repo
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$AGENT" = true ]; then git tag "agent-v$AGENT_VERSION"; fi
+          if [ "$CLIENT" = true ]; then git tag "client-v$CLIENT_VERSION"; fi
+          git push origin --tags
