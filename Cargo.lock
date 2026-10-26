@@ -600,6 +600,7 @@ dependencies = [
  "bc-net",
  "bc-proto",
  "humantime",
+ "iroh-relay",
  "libc",
  "objc2",
  "serde",

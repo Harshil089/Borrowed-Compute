@@ -7,10 +7,17 @@
 use anyhow::{Context, Result};
 use bc_proto::wire;
 use iroh::endpoint::{presets, Connection, QuicTransportConfig, RecvStream, SendStream};
-use iroh::{Endpoint, RelayMap, RelayMode, SecretKey};
+use iroh::{Endpoint, RelayMode, SecretKey};
 use serde::{de::DeserializeOwned, Serialize};
 
-pub use iroh::{EndpointAddr, EndpointId};
+pub use iroh::{EndpointAddr, EndpointId, RelayMap};
+
+/// A relay map with one relay, such as the one the Mac app runs and shares through
+/// Tailscale. Devices that use it keep their connection metadata off public relays.
+pub fn relay_map(url: &str) -> Result<RelayMap> {
+    let url: iroh::RelayUrl = url.parse().with_context(|| format!("relay address {url:?}"))?;
+    Ok(RelayMap::from(url))
+}
 
 /// ALPN for the job protocol. The version suffix tracks [`wire::PROTOCOL_VERSION`].
 pub const JOB_ALPN: &[u8] = b"borrowed-compute/job/1";

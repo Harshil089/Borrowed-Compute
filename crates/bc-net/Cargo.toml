@@ -19,5 +19,6 @@ dirs.workspace = true
 test-utils = ["iroh/test-utils", "iroh-relay/test-utils"]
 
 [dev-dependencies]
+iroh-relay = { workspace = true, features = ["server", "test-utils"] }
 bc-net = { path = ".", features = ["test-utils"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

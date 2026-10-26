@@ -422,6 +422,8 @@ async fn run_job_inner(
 
     phase(app, format!("Connecting and uploading {}…", human_bytes(archive.len() as u64)));
     let key = load_or_create_key(&key_path(&state.home))?;
+    // Meet the Mac on its own relay when it runs one, keeping public relays out of it.
+    let relays = cloud.relay().await.and_then(|url| bc_net::relay_map(&url).ok());
     let (log_path, log) = open_job_log(&state.home, mac, folder, &spec.job.argv)?;
     let mut stdout = EmitWriter::new(app.clone(), "stdout", log.clone());
     let mut stderr = EmitWriter::new(app.clone(), "stderr", log.clone());
@@ -430,7 +432,7 @@ async fn run_job_inner(
     let notice_log = log.clone();
     let outcome = run_on_mac(
         &key,
-        NetConfig { relay_only, ..Default::default() },
+        NetConfig { relay_only, relays, ..Default::default() },
         resolved.addr,
         &spec,
         archive,
