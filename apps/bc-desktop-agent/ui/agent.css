@@ -38,8 +38,26 @@ main { flex: 1; min-width: 0; padding: 18px 18px 28px; display: flex; flex-direc
 .station-account { font-size: 12.5px; color: var(--ink-2); }
 
 #home { display: flex; flex-direction: column; gap: 24px; }
-#home.needs-route #route-block { order: -1; }
+.col { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
+/* Until the PC has a way in, the setup column (Route first) leads. */
+#home.needs-route .col-side { order: -1; }
 #home.needs-route .station { order: -2; }
+
+/* Landscape: live work on the left (requests, arrivals, departures), setup on the right
+   (route, manifest, station). Narrower windows keep the single stack above. */
+@media (min-width: 900px) {
+  main { padding: 22px 28px 32px; }
+  #home {
+    display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(300px, 1fr);
+    column-gap: 28px; row-gap: 22px; align-items: start;
+  }
+  #home .station { grid-column: 1 / -1; }
+  #home.needs-route .col-side { order: 0; }
+  .arrivals .route { padding: 20px 22px 18px; gap: 20px; }
+  .arrivals .port-code { font-size: 52px; }
+  .arrivals .port-name { max-width: 200px; font-size: 12.5px; }
+  .arr-time strong { font-size: 36px; }
+}
 .block { display: flex; flex-direction: column; gap: 10px; }
 .block-head { display: flex; align-items: center; justify-content: space-between; }
 .block-head .link { display: inline-flex; align-items: center; }
@@ -75,7 +93,7 @@ main { flex: 1; min-width: 0; padding: 18px 18px 28px; display: flex; flex-direc
 .arr-time { display: flex; flex-direction: column; gap: 5px; }
 .arr-time strong { font: 500 30px/0.9 var(--mono); letter-spacing: -0.05em; color: var(--carbon); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .arr-time strong i { font-size: 11px; }
-.arr-figs { display: grid; grid-template-columns: auto auto; gap: 4px 10px; align-content: center; min-width: 0; }
+.arr-figs { display: grid; grid-template-columns: auto auto; gap: 4px 18px; align-content: center; justify-self: start; min-width: 0; }
 .arr-figs b { font: 600 11px/1.3 var(--cond); letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-2); }
 .arr-figs span { font: 500 12px/1.3 var(--mono); color: var(--carbon); text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .arr-stub .stamp { justify-self: end; }

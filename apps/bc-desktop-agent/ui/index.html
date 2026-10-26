@@ -56,86 +56,91 @@
         </div>
       </div>
 
-      <section id="requests-block" class="block hidden">
-        <h2 class="heading">Boarding requests</h2>
-        <div id="requests" class="passes"></div>
-      </section>
+      <div class="col col-main">
+        <section id="requests-block" class="block hidden">
+          <h2 class="heading">Boarding requests</h2>
+          <div id="requests" class="passes"></div>
+        </section>
 
-      <section class="block arrivals-block">
-        <div class="tabs"><span id="arr-tab" class="tab red">Waiting</span><span id="arr-date" class="tab"></span></div>
-        <div class="coupon arrivals die-cut">
-          <div class="route">
-            <div class="port">
-              <span class="label">From</span>
-              <strong id="arr-from" class="port-code">PC</strong>
-              <span id="arr-from-name" class="port-name">Your PC</span>
+        <section class="block arrivals-block">
+          <div class="tabs"><span id="arr-tab" class="tab red">Waiting</span><span id="arr-date" class="tab"></span></div>
+          <div class="coupon arrivals die-cut">
+            <div class="route">
+              <div class="port">
+                <span class="label">From</span>
+                <strong id="arr-from" class="port-code">PC</strong>
+                <span id="arr-from-name" class="port-name">Your PC</span>
+              </div>
+              <ol id="arr-legs" class="legs idle" aria-label="Latest run">
+                <li data-leg="upload"><span>Upload</span></li>
+                <li data-leg="run"><span>Run</span></li>
+                <li data-leg="return"><span>Return</span></li>
+                <svg class="icon jet"><use href="#i-plane"/></svg>
+              </ol>
+              <div class="port to">
+                <span class="label">To</span>
+                <strong id="arr-to" class="port-code">MAC</strong>
+                <span id="arr-to-name" class="port-name">This Mac</span>
+              </div>
             </div>
-            <ol id="arr-legs" class="legs idle" aria-label="Latest run">
-              <li data-leg="upload"><span>Upload</span></li>
-              <li data-leg="run"><span>Run</span></li>
-              <li data-leg="return"><span>Return</span></li>
-              <svg class="icon jet"><use href="#i-plane"/></svg>
-            </ol>
-            <div class="port to">
-              <span class="label">To</span>
-              <strong id="arr-to" class="port-code">MAC</strong>
-              <span id="arr-to-name" class="port-name">This Mac</span>
+            <div class="arr-run">
+              <span class="label">Run</span>
+              <span id="arr-cmd" class="arr-cmd">No runs yet. When your PC sends one, it lands here live.</span>
+              <span id="arr-clock" class="arr-clock"></span>
             </div>
+            <div id="arr-stub" class="arr-stub hidden"></div>
           </div>
-          <div class="arr-run">
-            <span class="label">Run</span>
-            <span id="arr-cmd" class="arr-cmd">No runs yet. When your PC sends one, it lands here live.</span>
-            <span id="arr-clock" class="arr-clock"></span>
+        </section>
+
+        <section class="block">
+          <div class="block-head">
+            <h2 class="heading">Departures</h2>
+            <button id="open-logs" class="link"><svg class="icon"><use href="#i-doc"/></svg>Logs</button>
           </div>
-          <div id="arr-stub" class="arr-stub hidden"></div>
-        </div>
-      </section>
+          <div id="jobs" class="board coupon die-cut"></div>
+        </section>
 
-      <section class="block">
-        <div class="block-head">
-          <h2 class="heading">Departures</h2>
-          <button id="open-logs" class="link"><svg class="icon"><use href="#i-doc"/></svg>Logs</button>
-        </div>
-        <div id="jobs" class="board coupon die-cut"></div>
-      </section>
+      </div>
 
-      <section class="block">
-        <h2 class="heading">Manifest</h2>
-        <div id="paired" class="manifest coupon"></div>
-      </section>
+      <div class="col col-side">
+        <section id="route-block" class="block">
+          <h2 class="heading">Route</h2>
+          <div id="connect" class="route coupon"></div>
+        </section>
 
-      <section id="route-block" class="block">
-        <h2 class="heading">Route</h2>
-        <div id="connect" class="route coupon"></div>
-      </section>
+        <section class="block">
+          <h2 class="heading">Manifest</h2>
+          <div id="paired" class="manifest coupon"></div>
+        </section>
 
-      <section class="block">
-        <h2 class="heading">Station</h2>
-        <div class="coupon settings">
-          <label class="setting">
-            <span class="setting-text">
-              <strong>Run in background</strong>
-              <span>Quitting (⌘Q) hides the app and it keeps accepting runs. Reopen it from the menu-bar icon.</span>
-            </span>
-            <span class="switch"><input id="run-bg" type="checkbox"><span></span></span>
-          </label>
-          <div class="setting">
-            <span class="setting-text">
-              <strong>Appearance</strong>
-              <span>Light, dark, or follow the Mac.</span>
-            </span>
-            <div class="segmented" role="group" aria-label="Appearance"><button data-appearance="light">Light</button><button data-appearance="dark">Dark</button><button data-appearance="system">System</button></div>
+        <section class="block">
+          <h2 class="heading">Station</h2>
+          <div class="coupon settings">
+            <label class="setting">
+              <span class="setting-text">
+                <strong>Run in background</strong>
+                <span>Quitting (⌘Q) hides the app and it keeps accepting runs. Reopen it from the menu-bar icon.</span>
+              </span>
+              <span class="switch"><input id="run-bg" type="checkbox"><span></span></span>
+            </label>
+            <div class="setting">
+              <span class="setting-text">
+                <strong>Appearance</strong>
+                <span>Light, dark, or follow the Mac.</span>
+              </span>
+              <div class="segmented" role="group" aria-label="Appearance"><button data-appearance="light">Light</button><button data-appearance="dark">Dark</button><button data-appearance="system">System</button></div>
+            </div>
+            <div class="setting">
+              <span class="setting-text">
+                <strong>Updates</strong>
+                <span id="version"></span>
+              </span>
+              <button id="check-update">Check</button>
+            </div>
+            <div id="update-status" class="hidden"></div>
           </div>
-          <div class="setting">
-            <span class="setting-text">
-              <strong>Updates</strong>
-              <span id="version"></span>
-            </span>
-            <button id="check-update">Check</button>
-          </div>
-          <div id="update-status" class="hidden"></div>
-        </div>
-      </section>
+        </section>
+      </div>
     </section>
   </main>
 
