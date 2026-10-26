@@ -39,6 +39,12 @@ pub struct User {
     pub login: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct Email {
+    email: String,
+    verified: bool,
+}
+
 #[derive(Deserialize)]
 struct TokenResponse {
     access_token: Option<String>,
@@ -68,7 +74,9 @@ impl GitHub {
             .http
             .post(format!("{}/login/device/code", self.web_base))
             .header("Accept", "application/json")
-            .form(&[("client_id", self.client_id.as_str()), ("scope", "")])
+            // user:email lets the cloud read verified addresses, which link a GitHub
+            // sign-in to the same person's Google sign-in.
+            .form(&[("client_id", self.client_id.as_str()), ("scope", "user:email")])
             .send()
             .await?;
         let status = resp.status();
@@ -117,5 +125,22 @@ impl GitHub {
             bail!("GitHub user request failed: {}", resp.status());
         }
         Ok(resp.json().await?)
+    }
+
+    /// The user's verified email addresses. Empty when the token lacks the `user:email`
+    /// scope, as for sign-ins approved before it was asked for.
+    pub async fn verified_emails(&self, token: &str) -> Result<Vec<String>> {
+        let resp = self
+            .http
+            .get(format!("{}/user/emails", self.api_base))
+            .bearer_auth(token)
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Ok(Vec::new());
+        }
+        let emails: Vec<Email> = resp.json().await?;
+        Ok(emails.into_iter().filter(|e| e.verified).map(|e| e.email.to_lowercase()).collect())
     }
 }

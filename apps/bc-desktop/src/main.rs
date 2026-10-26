@@ -23,7 +23,7 @@ use bc_cli::pack::pack;
 use bc_cli::route::RouteMemory;
 use bc_cli::run::{run_on_mac, Exit};
 use bc_net::{load_or_create_key, NetConfig};
-use bc_proto::cloud::{DeviceInfo, DeviceKind, PairingInfo};
+use bc_proto::cloud::{DeviceInfo, DeviceKind, PairingInfo, Provider, Providers};
 use bc_proto::wire::JobUsage;
 use bc_proto::JobSpec;
 use serde::Serialize;
@@ -210,12 +210,21 @@ async fn get_account(state: State<'_, AppState>) -> CmdResult<Account> {
 }
 
 #[tauri::command]
-async fn login(app: AppHandle, state: State<'_, AppState>, name: String) -> CmdResult<Account> {
+async fn login(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+    provider: Option<String>,
+) -> CmdResult<Account> {
+    let provider = match provider.as_deref() {
+        Some("google") => Provider::Google,
+        _ => Provider::Github,
+    };
     // A fresh client, so other commands are not blocked while the user is on GitHub.
     let mut client = CloudClient::new(cloud_url_for(&state.home), None);
     let emitter = app.clone();
     let (token, login) = client
-        .login(|start| {
+        .login_with(provider, |start| {
             let _ = emitter.emit("login-code", start);
             let _ = emitter.opener().open_url(&start.verification_uri, None::<&str>);
         })
@@ -230,6 +239,14 @@ async fn login(app: AppHandle, state: State<'_, AppState>, name: String) -> CmdR
     let device = client.register(&key, &name, DeviceKind::current()).await.map_err(err_chain)?;
     drop(client);
     Ok(Account { login, device_name: Some(device.name) })
+}
+
+/// Which sign-in buttons to show. The cloud decides; an unreachable cloud shows GitHub
+/// only, and sign-in then reports the real problem.
+#[tauri::command]
+async fn providers(state: State<'_, AppState>) -> CmdResult<Providers> {
+    let client = CloudClient::new(cloud_url_for(&state.home), None);
+    Ok(client.providers().await.unwrap_or(Providers { github: true, google: false }))
 }
 
 #[tauri::command]
@@ -601,6 +618,7 @@ fn main() {
             get_status,
             get_account,
             login,
+            providers,
             logout,
             list_devices,
             request_pairing,

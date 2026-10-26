@@ -32,17 +32,18 @@
     <section id="signin" class="checkin hidden">
       <div class="coupon checkin-main">
         <h1 class="checkin-title">Open this Mac for runs.</h1>
-        <p class="muted">Sign in with the GitHub account you use on your PC. Only devices on that account can ask to board, and you approve each one here.</p>
+        <p class="muted">Sign in with the account you use on your PC; GitHub and Google with the same verified email are one account. Only devices on that account can ask to board, and you approve each one here.</p>
         <label class="field">
           <span class="label">Name for this Mac</span>
           <input id="mac-name" type="text" placeholder="studio" maxlength="64" autocomplete="off" spellcheck="false">
         </label>
         <button id="signin-btn" class="primary wide">Sign in with GitHub</button>
+        <button id="signin-google" class="wide hidden">Sign in with Google</button>
       </div>
       <div id="signin-code" class="checkin-stub hidden">
-        <span class="label">Enter on GitHub</span>
+        <span class="label">Enter this code</span>
         <div id="user-code" class="code"></div>
-        <div class="row"><span class="spinner"></span><span>Waiting for GitHub…</span></div>
+        <div class="row"><span class="spinner"></span><span>Waiting for sign-in…</span></div>
         <button id="reopen" class="link">Open the page again</button>
       </div>
     </section>

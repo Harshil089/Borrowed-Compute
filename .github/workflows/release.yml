@@ -8,6 +8,7 @@ name: release
 # - TAURI_SIGNING_PRIVATE_KEY: signs updates; the apps only install updates signed by it.
 #   Its public half is `plugins.updater.pubkey` in both apps' tauri.conf.json.
 # - RELEASES_TOKEN: fine-grained token with Contents read and write on the releases repo.
+# - GOOGLE_CLIENT_SECRET: optional; the Google OAuth client's secret for Google sign-in.
 
 on:
   push:
@@ -58,6 +59,8 @@ jobs:
         working-directory: apps/bc-desktop-agent
         env:
           CI: "true"
+          # Built into the Mac app's cloud for Google sign-in; empty hides the button.
+          BC_GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
         run: |
           for attempt in 1 2 3; do
             if npx --yes @tauri-apps/cli@2.12.4 build --bundles app,dmg --config "$UPDATER_CONFIG"; then

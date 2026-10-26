@@ -7,8 +7,7 @@ use anyhow::{bail, Context, Result};
 use bc_proto::cloud::{
     register_message, sha256_hex, ApiErrorBody, ApprovePairing, CreatePairing, DeviceFlowPoll,
     DeviceFlowStart, DeviceFlowStatus, DeviceInfo, DeviceKind, Heartbeat, Me, PairedClients,
-    PairingInfo, RegisterDevice,
-};
+    PairingInfo, RegisterDevice, Provider, Providers};
 use iroh_base::SecretKey;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -146,9 +145,23 @@ impl CloudClient {
     }
 
     /// Signs in with GitHub device flow. `show` receives the code and URL to show the
-    /// user. Returns the session token and GitHub login.
+    /// user. Returns the session token and the account name.
     pub async fn login(&mut self, show: impl FnOnce(&DeviceFlowStart)) -> Result<(String, String)> {
-        let start: DeviceFlowStart = self.post("/v1/auth/device", &()).await?;
+        self.login_with(Provider::Github, show).await
+    }
+
+    /// Signs in with `provider`'s device flow. Identities from different providers that
+    /// share a verified email address sign in to the same account.
+    pub async fn login_with(
+        &mut self,
+        provider: Provider,
+        show: impl FnOnce(&DeviceFlowStart),
+    ) -> Result<(String, String)> {
+        let path = match provider {
+            Provider::Github => "/v1/auth/device",
+            Provider::Google => "/v1/auth/google/device",
+        };
+        let start: DeviceFlowStart = self.post(path, &()).await?;
         show(&start);
         let mut interval = Duration::from_secs(start.interval_secs.max(1));
         loop {
@@ -160,7 +173,7 @@ impl CloudClient {
                     interval = Duration::from_secs(interval_secs.max(interval.as_secs() + 5));
                 }
                 DeviceFlowStatus::Expired => bail!("the sign-in code expired; run login again"),
-                DeviceFlowStatus::Denied => bail!("sign-in was denied on GitHub"),
+                DeviceFlowStatus::Denied => bail!("sign-in was denied on {}", provider.display()),
                 DeviceFlowStatus::Complete { session_token, login } => {
                     self.token = Some(session_token.clone());
                     return Ok((session_token, login));
@@ -171,6 +184,16 @@ impl CloudClient {
 
     pub async fn logout(&self) -> Result<()> {
         self.call::<()>(reqwest::Method::POST, "/v1/auth/logout", None::<&()>).await
+    }
+
+    /// Which sign-in providers the cloud offers. Clouds older than Google sign-in answer
+    /// 404, which means GitHub only.
+    pub async fn providers(&self) -> Result<Providers> {
+        match self.get::<Providers>("/v1/auth/providers").await {
+            Ok(p) => Ok(p),
+            Err(e) if format!("{e:#}").contains("404") => Ok(Providers { github: true, google: false }),
+            Err(e) => Err(e),
+        }
     }
 
     pub async fn me(&self) -> Result<Me> {

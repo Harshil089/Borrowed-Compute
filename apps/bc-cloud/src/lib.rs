@@ -11,6 +11,7 @@ pub mod auth;
 pub mod devices;
 pub mod error;
 pub mod github;
+pub mod google;
 pub mod pairings;
 
 use std::sync::Arc;
@@ -23,6 +24,7 @@ use sqlx::any::AnyPoolOptions;
 use sqlx::AnyPool;
 
 pub use github::GitHub;
+pub use google::Google;
 
 /// A device counts as online if it sent a heartbeat this recently.
 pub const ONLINE_WINDOW_SECS: i64 = 90;
@@ -31,6 +33,16 @@ pub const ONLINE_WINDOW_SECS: i64 = 90;
 pub struct AppState {
     pub db: AnyPool,
     pub github: Arc<GitHub>,
+    /// `None` when no Google client is configured; Google sign-in is then not offered.
+    pub google: Option<Arc<Google>>,
+}
+
+/// Google sign-in from `BC_GOOGLE_CLIENT_ID` and `BC_GOOGLE_CLIENT_SECRET`, falling back
+/// to the given defaults. `None`, and no Google button, when either is missing.
+pub fn google_client(default_id: &str, default_secret: Option<&str>) -> Option<Arc<Google>> {
+    let id = std::env::var("BC_GOOGLE_CLIENT_ID").unwrap_or_else(|_| default_id.to_string());
+    let secret = std::env::var("BC_GOOGLE_CLIENT_SECRET").ok().or(default_secret.map(str::to_string))?;
+    (!id.is_empty() && !secret.is_empty()).then(|| Arc::new(Google::new(id, secret)))
 }
 
 pub fn now() -> i64 {
@@ -41,6 +53,9 @@ pub fn now() -> i64 {
 pub async fn connect(database_url: &str) -> anyhow::Result<AnyPool> {
     sqlx::any::install_default_drivers();
     let sqlite = database_url.starts_with("sqlite:");
+    if sqlite {
+        migrate_sqlite(database_url).await?;
+    }
     let db = AnyPoolOptions::new()
         // SQLite allows one writer at a time; a single connection avoids "database is
         // locked" errors at the scale the Mac app runs at.
@@ -48,12 +63,29 @@ pub async fn connect(database_url: &str) -> anyhow::Result<AnyPool> {
         .connect(database_url)
         .await
         .context("opening the database")?;
-    if sqlite {
-        sqlx::migrate!("./migrations/sqlite").run(&db).await?;
-    } else {
+    if !sqlite {
         sqlx::migrate!("./migrations/postgres").run(&db).await?;
     }
     Ok(db)
+}
+
+/// Brings a SQLite database's schema up to date on a connection with foreign keys off.
+/// Some migrations rebuild a table, and SQLite runs a table drop as a delete, which would
+/// cascade into every row that refers to it. Foreign keys are checked once at the end.
+async fn migrate_sqlite(database_url: &str) -> anyhow::Result<()> {
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use std::str::FromStr;
+    let options = SqliteConnectOptions::from_str(database_url)?.foreign_keys(false);
+    let pool = SqlitePoolOptions::new().max_connections(1).connect_with(options).await?;
+    sqlx::migrate!("./migrations/sqlite").run(&pool).await?;
+    let broken: Vec<(String,)> = sqlx::query_as("select \"table\" from pragma_foreign_key_check")
+        .fetch_all(&pool)
+        .await?;
+    pool.close().await;
+    if !broken.is_empty() {
+        anyhow::bail!("database migration left broken references in {broken:?}");
+    }
+    Ok(())
 }
 
 /// A `sqlite://` URL for a database file, created if missing.
@@ -88,6 +120,8 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/health", get(health))
         .route("/v1/auth/device", post(auth::start_device_flow))
         .route("/v1/auth/device/poll", post(auth::poll_device_flow))
+        .route("/v1/auth/google/device", post(auth::start_google_flow))
+        .route("/v1/auth/providers", get(auth::providers))
         .route("/v1/auth/logout", post(auth::logout))
         .route("/v1/me", get(auth::me))
         .route("/v1/devices", get(devices::list).post(devices::register))

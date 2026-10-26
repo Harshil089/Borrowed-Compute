@@ -108,6 +108,7 @@ async function loadStatus() {
   $("app-view").classList.toggle("hidden", !status.signed_in);
   if (!status.signed_in) {
     $("signin-cloud").value = status.cloud_url_set ? status.cloud_url : "";
+    loadProviders();
     return;
   }
   selectedMac = selectedMac || status.default_mac;
@@ -209,10 +210,28 @@ async function selectMac(name) {
 
 // ---- Sign-in ----
 
-$("signin-test").addEventListener("click", () => testCloud($("signin-cloud"), $("signin-cloud-msg")));
+$("signin-test").addEventListener("click", async () => {
+  const url = await testCloud($("signin-cloud"), $("signin-cloud-msg"));
+  // Ask the new address which sign-ins it offers.
+  if (url) { await invoke("set_cloud_url", { url }).catch(() => {}); loadProviders(); }
+});
 
-$("signin-btn").addEventListener("click", async () => {
+// Shows Sign in with Google when the cloud at the typed address offers it.
+async function loadProviders() {
+  try {
+    const p = await invoke("providers");
+    $("signin-google").classList.toggle("hidden", !p.google);
+  } catch {
+    $("signin-google").classList.add("hidden");
+  }
+}
+
+$("signin-btn").addEventListener("click", () => signIn("github"));
+$("signin-google").addEventListener("click", () => signIn("google"));
+
+async function signIn(provider) {
   $("signin-btn").disabled = true;
+  $("signin-google").disabled = true;
   $("signin-error").classList.add("hidden");
   try {
     // Sign in at the address typed above, after checking the Mac answers there.
@@ -222,16 +241,17 @@ $("signin-btn").addEventListener("click", async () => {
       if (!url) return;
       await invoke("set_cloud_url", { url });
     }
-    await invoke("login", { name: $("pc-name").value });
+    await invoke("login", { name: $("pc-name").value, provider });
     await loadStatus();
   } catch (e) {
     $("signin-error").textContent = `Sign-in failed: ${e}`;
     $("signin-error").classList.remove("hidden");
   } finally {
     $("signin-btn").disabled = false;
+    $("signin-google").disabled = false;
     $("signin-code").classList.add("hidden");
   }
-});
+}
 
 $("reopen").addEventListener("click", () => {
   if (verificationUri) invoke("open_url", { url: verificationUri });

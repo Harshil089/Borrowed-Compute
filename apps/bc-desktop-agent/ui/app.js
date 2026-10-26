@@ -402,16 +402,18 @@ async function refresh() {
   } catch (e) {
     showError(String(e));
   }
+  if (status && !status.signed_in) loadProviders();
   render();
 }
 
-$("signin-btn").addEventListener("click", async () => {
+async function signIn(provider) {
   if (signingIn) return;
   signingIn = true;
   showError("");
   $("signin-btn").disabled = true;
+  $("signin-google").disabled = true;
   try {
-    account = await invoke("login", { name: $("mac-name").value });
+    account = await invoke("login", { name: $("mac-name").value, provider });
     $("signin-code").classList.add("hidden");
   } catch (e) {
     showError(`Sign-in failed: ${e}`);
@@ -419,9 +421,19 @@ $("signin-btn").addEventListener("click", async () => {
   } finally {
     signingIn = false;
     $("signin-btn").disabled = false;
+    $("signin-google").disabled = false;
     await refresh();
   }
-});
+}
+
+$("signin-btn").addEventListener("click", () => signIn("github"));
+$("signin-google").addEventListener("click", () => signIn("google"));
+
+// Google sign-in shows only when this Mac's cloud has a Google client. Asked on each
+// refresh while signed out, since the built-in cloud may still be starting.
+function loadProviders() {
+  invoke("providers").then((p) => $("signin-google").classList.toggle("hidden", !p.google)).catch(() => {});
+}
 
 $("reopen").addEventListener("click", () => {
   if (verificationUri) invoke("open_url", { url: verificationUri }).catch((e) => showError(String(e)));

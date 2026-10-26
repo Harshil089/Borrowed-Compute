@@ -12,7 +12,7 @@ use bc_cli::pack::pack;
 use bc_cli::route::RouteMemory;
 use bc_cli::run::{run_on_mac, Exit};
 use bc_net::{load_or_create_key, NetConfig};
-use bc_proto::cloud::{DeviceKind, PairingStatus};
+use bc_proto::cloud::{DeviceKind, PairingStatus, Provider};
 use clap::{Parser, Subcommand};
 
 /// Run code jobs on a paired Mac.
@@ -30,6 +30,10 @@ enum Command {
         /// Name for this device. Defaults to the computer name.
         #[arg(long)]
         name: Option<String>,
+        /// Sign in with Google instead of GitHub. Both reach the same account when they
+        /// share a verified email address.
+        #[arg(long)]
+        google: bool,
     },
     /// Sign out on this device.
     Logout,
@@ -72,10 +76,11 @@ async fn main() -> Result<()> {
     let mut cloud = CloudClient::from_home(cloud_url_for(&home), &home);
 
     match cli.command {
-        Command::Login { name } => {
+        Command::Login { name, google } => {
             let key = load_or_create_key(&key_path)?;
+            let provider = if google { Provider::Google } else { Provider::Github };
             let (token, login) = cloud
-                .login(|s| {
+                .login_with(provider, |s| {
                     println!("Open {} and enter code {}", s.verification_uri, s.user_code);
                 })
                 .await?;
