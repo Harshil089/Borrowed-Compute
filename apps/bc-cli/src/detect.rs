@@ -33,12 +33,14 @@ pub fn detect(root: &Path) -> Option<Detected> {
         .or_else(|| swift(&files))
         .or_else(|| xcode(&files))
         .or_else(|| node(root, &files))
+        .or_else(|| typescript(&files))
         .or_else(|| go(&files))
         .or_else(|| python(root, &files))
         .or_else(|| cmake(&files))
         .or_else(|| jvm(&files))
         .or_else(|| dotnet(&files))
         .or_else(|| make(root, &files))
+        .or_else(|| html(&files))
         .or_else(|| scripts(&files))?;
     // A Makefile next to another project usually holds its real entry points.
     if found.kind != "Make" && files.has("Makefile") {
@@ -143,12 +145,33 @@ fn node(root: &Path, f: &RootFiles) -> Option<Detected> {
             suggestions.push(shell(label, &format!("{install} && {pm} run {name}")));
         }
     }
+    // A TypeScript project with no build script still has a compiler to run.
+    let ts = f.has("tsconfig.json");
+    if ts && !scripts.is_some_and(|s| s.contains_key("build")) {
+        suggestions.insert(0, shell("Build", &format!("{install} && npx --yes -p typescript tsc -p .")));
+    }
     if suggestions.is_empty() {
         let main = package.get("main").and_then(|v| v.as_str()).unwrap_or("index.js");
         suggestions.push(shell("Run", &format!("{install} && node {main}")));
     }
-    let kind = if pm == "npm" { "Node".to_string() } else { format!("Node ({pm})") };
+    let lang = if ts { "TypeScript" } else { "Node" };
+    let kind = if pm == "npm" { lang.to_string() } else { format!("{lang} ({pm})") };
     found(&kind, "package.json", suggestions)
+}
+
+/// TypeScript without a package.json: the compiler and tsx come from npx, into the
+/// job's isolated npm cache.
+fn typescript(f: &RootFiles) -> Option<Detected> {
+    let scripts: Vec<&String> = f.with_ext(".ts").filter(|n| !n.ends_with(".d.ts")).collect();
+    let mut suggestions = Vec::new();
+    if f.has("tsconfig.json") {
+        suggestions.push(s("Build", &["npx", "--yes", "-p", "typescript", "tsc", "-p", "."]));
+    }
+    for script in &scripts {
+        suggestions.push(s(&format!("Run {script}"), &["npx", "--yes", "tsx", script]));
+    }
+    let reason = if f.has("tsconfig.json") { "tsconfig.json".to_string() } else { scripts.first()?.to_string() };
+    found("TypeScript", &reason, suggestions)
 }
 
 fn go(f: &RootFiles) -> Option<Detected> {
@@ -243,6 +266,17 @@ fn make(root: &Path, f: &RootFiles) -> Option<Detected> {
         }
     }
     found("Make", "Makefile", suggestions)
+}
+
+/// A static site: nothing to compile or run as a batch job, so it gets a check and an
+/// optional bundle. html-validate and Vite come from npx, into the job's npm cache.
+fn html(f: &RootFiles) -> Option<Detected> {
+    let page = if f.has("index.html") { "index.html".to_string() } else { f.with_ext(".html").next()?.clone() };
+    found("HTML", &page, vec![
+        // The standard preset checks conformance to the HTML spec, not house style.
+        s("Check HTML", &["npx", "--yes", "html-validate", "--preset", "standard", "**/*.html"]),
+        s("Build with Vite", &["npx", "--yes", "vite", "build"]),
+    ])
 }
 
 fn scripts(f: &RootFiles) -> Option<Detected> {
@@ -343,6 +377,27 @@ mod tests {
         assert_eq!(kind(&[("pom.xml", "")]).unwrap().1, "mvn -B package");
         assert_eq!(kind(&[("App.csproj", "")]).unwrap().1, "dotnet build");
         assert_eq!(kind(&[("run.sh", "")]).unwrap().1, "sh run.sh");
+    }
+
+    #[test]
+    fn typescript_with_and_without_package_json() {
+        let d = detect(project(&[("package.json", r#"{"scripts":{"test":"vitest"}}"#), ("tsconfig.json", "")]).path()).unwrap();
+        assert_eq!(d.kind, "TypeScript");
+        assert_eq!(argv(&d, 0), "sh -c npm install && npx --yes -p typescript tsc -p .");
+        assert_eq!(d.suggestions[1].label, "Test");
+
+        let d = detect(project(&[("main.ts", ""), ("types.d.ts", "")]).path()).unwrap();
+        assert_eq!((d.kind.as_str(), d.reason.as_str()), ("TypeScript", "main.ts"));
+        assert_eq!(argv(&d, 0), "npx --yes tsx main.ts");
+        assert_eq!(d.suggestions.len(), 1, "declaration files are not scripts");
+    }
+
+    #[test]
+    fn html_site_gets_check_and_bundle() {
+        let d = detect(project(&[("index.html", ""), ("about.html", ""), ("app.js", "")]).path()).unwrap();
+        assert_eq!((d.kind.as_str(), d.reason.as_str()), ("HTML", "index.html"));
+        assert_eq!(argv(&d, 0), "npx --yes html-validate --preset standard **/*.html");
+        assert_eq!(d.suggestions[1].label, "Build with Vite");
     }
 
     #[test]
