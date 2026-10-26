@@ -174,10 +174,35 @@ pub async fn share(local_port: u16) -> anyhow::Result<ShareResult> {
     }
 }
 
-/// Stops sharing the HTTPS address. Other serve settings are left alone.
+/// The tailnet HTTPS port the relay is shared on, next to the cloud on 443. Tailscale
+/// serve allows HTTPS on 443, 8443 and 10000.
+pub const RELAY_HTTPS_PORT: u16 = 8443;
+
+/// The relay's address for a cloud shared at `cloud_url` (`https://<mac>.ts.net`).
+pub fn relay_url(cloud_url: &str) -> String {
+    format!("{}:{RELAY_HTTPS_PORT}/", cloud_url.trim_end_matches('/'))
+}
+
+/// Shares the relay listening on `http://127.0.0.1:<relay_port>` at the Mac's tailnet
+/// address on port 8443. Does nothing when it is already shared.
+pub async fn share_relay(relay_port: u16) -> anyhow::Result<()> {
+    let cli = cli().ok_or_else(|| anyhow::anyhow!("Tailscale is not installed"))?;
+    let serve = run(&cli, &["serve", "status", "--json"]).await.unwrap_or_default();
+    if serves_port(&serve, relay_port) {
+        return Ok(());
+    }
+    let https = format!("--https={RELAY_HTTPS_PORT}");
+    let target = format!("http://127.0.0.1:{relay_port}");
+    run(&cli, &["serve", "--bg", &https, &target]).await.map(|_| ())
+}
+
+/// Stops sharing the cloud and the relay. Other serve settings are left alone.
 pub async fn stop() -> anyhow::Result<()> {
     let cli = cli().ok_or_else(|| anyhow::anyhow!("Tailscale is not installed"))?;
-    run(&cli, &["serve", "--https=443", "off"]).await.map(|_| ())
+    run(&cli, &["serve", "--https=443", "off"]).await?;
+    let relay = format!("--https={RELAY_HTTPS_PORT}");
+    let _ = run(&cli, &["serve", &relay, "off"]).await;
+    Ok(())
 }
 
 fn approval_link(line: &str) -> Option<String> {
