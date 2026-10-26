@@ -190,6 +190,7 @@ async fn main() -> Result<()> {
                 &mut std::io::stdout(),
                 &mut std::io::stderr(),
                 cancel,
+                Some(&root),
                 &RouteMemory::at(&home),
                 |text| eprintln!("bc: {text}"),
             )

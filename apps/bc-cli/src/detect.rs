@@ -121,9 +121,12 @@ fn xcode(f: &RootFiles) -> Option<Detected> {
     ])])
 }
 
-fn node(root: &Path, f: &RootFiles) -> Option<Detected> {
+/// The package manager a Node project uses, from its lockfile, and its install command.
+/// `None` without a package.json.
+pub fn node_package_manager(root: &Path) -> Option<(&'static str, &'static str)> {
+    let f = RootFiles::read(root);
     f.has("package.json").then_some(())?;
-    let (pm, install) = if f.has("pnpm-lock.yaml") {
+    Some(if f.has("pnpm-lock.yaml") {
         ("pnpm", "pnpm install --frozen-lockfile")
     } else if f.has("yarn.lock") {
         ("yarn", "yarn install --frozen-lockfile")
@@ -133,7 +136,23 @@ fn node(root: &Path, f: &RootFiles) -> Option<Detected> {
         ("npm", "npm ci")
     } else {
         ("npm", "npm install")
-    };
+    })
+}
+
+/// The virtualenv setup for a Python project with declared dependencies, run inside
+/// the job's workspace. `None` when it declares none.
+pub fn python_setup(root: &Path) -> Option<&'static str> {
+    if root.join("requirements.txt").is_file() {
+        Some("python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt")
+    } else if root.join("pyproject.toml").is_file() || root.join("setup.py").is_file() {
+        Some("python3 -m venv .venv && .venv/bin/pip install -q .")
+    } else {
+        None
+    }
+}
+
+fn node(root: &Path, f: &RootFiles) -> Option<Detected> {
+    let (pm, install) = node_package_manager(root)?;
     let package: serde_json::Value = std::fs::read(root.join("package.json"))
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())

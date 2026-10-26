@@ -166,3 +166,66 @@ async fn agent_reports_job_events() {
         "{finished:?}"
     );
 }
+
+/// A run that fails because a tool is missing gets fixed and run once more: here the
+/// first attempt reports `vite: command not found`, auto-fix installs dependencies
+/// (an empty package.json installs offline), and the second attempt succeeds.
+#[tokio::test(flavor = "multi_thread")]
+async fn auto_fix_installs_dependencies_and_runs_again() {
+    if std::process::Command::new("npm").arg("--version").output().is_err() {
+        eprintln!("npm not installed; skipping");
+        return;
+    }
+    let (relay_map, _url, _relay) = iroh::test_utils::run_relay_server().await.unwrap();
+    let net = NetConfig { relays: Some(relay_map.clone()), relay_only: true, insecure_relay_tls: true };
+    let agent = bind(SecretKey::generate(), net.clone()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), agent.online()).await.unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let paired = PairedDevices::new(state.path().join("paired"));
+    let client_key = SecretKey::generate();
+    paired.add(client_key.public()).unwrap();
+    let work_root = tempfile::tempdir().unwrap();
+    let config = AgentConfig::new(
+        RunnerConfig { work_root: work_root.path().to_path_buf(), default_timeout: Duration::from_secs(120) },
+        paired,
+    );
+    let accept = agent.clone();
+    tokio::spawn(async move {
+        while let Some(incoming) = accept.accept().await {
+            let config = config.clone();
+            tokio::spawn(async move {
+                if let Ok(conn) = incoming.await {
+                    let _ = serve_connection(&config, conn).await;
+                }
+            });
+        }
+    });
+
+    let proj = tempfile::tempdir().unwrap();
+    std::fs::write(proj.path().join("package.json"), r#"{"name":"autofix","version":"1.0.0"}"#).unwrap();
+    // Stands in for a dev tool that only exists after an install.
+    let argv = ["sh", "-c", "test -f package-lock.json && echo built || { echo 'sh: vite: command not found' >&2; exit 127; }"];
+    let spec = JobSpec::from_argv(argv.iter().map(|a| a.to_string()).collect()).unwrap();
+    let archive = pack(proj.path(), &spec.files.exclude).unwrap();
+    let notices = std::sync::Mutex::new(Vec::new());
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let outcome = bc_cli::run::run_on_mac(
+        &client_key,
+        net,
+        agent.addr(),
+        &spec,
+        archive,
+        &mut out,
+        &mut err,
+        std::future::pending(),
+        Some(proj.path()),
+        &bc_cli::route::RouteMemory::none(),
+        |n: &str| notices.lock().unwrap().push(n.to_string()),
+    )
+    .await
+    .unwrap();
+    let notices = notices.into_inner().unwrap();
+    assert_eq!(outcome.exit, Exit::Code(0), "{notices:?} {}", String::from_utf8_lossy(&err));
+    assert!(String::from_utf8_lossy(&out).contains("built"));
+    assert!(notices.iter().any(|n| n.contains("Installing dependencies") && n.contains("Running again")), "{notices:?}");
+}

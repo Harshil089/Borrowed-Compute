@@ -440,6 +440,7 @@ async fn run_job_inner(
             let _ = cancel.await;
             phase(&started_phase, "Cancelling…");
         },
+        Some(&root),
         &RouteMemory::at(&state.home),
         move |text: &str| {
             let _ = writeln!(notice_log.lock().unwrap(), "\n{text}");
