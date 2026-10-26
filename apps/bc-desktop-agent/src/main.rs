@@ -41,6 +41,10 @@ use tokio::task::JoinHandle;
 
 const MAX_JOBS: usize = 50;
 
+/// Port of the relay the Mac runs for its own devices. Like the cloud it listens on
+/// localhost only; Tailscale serve shares it on the tailnet at port 8443.
+const RELAY_PORT: u16 = 3340;
+
 /// Port of the built-in cloud. It listens on localhost only; Tailscale serve exposes it to
 /// the user's tailnet.
 const CLOUD_PORT: u16 = 8080;
@@ -121,6 +125,54 @@ struct AppState {
     run_in_background: AtomicBool,
     /// Set by the menu-bar Quit and by update installs, which must really exit.
     quitting: AtomicBool,
+    /// The relay address devices use, decided once at startup (see `relay_url`).
+    relay: OnceCell<Option<String>>,
+    /// Keeps the relay server running for the life of the app.
+    relay_server: StdMutex<Option<iroh_relay::server::Server>>,
+}
+
+/// The relay this Mac's devices use: the one it runs itself, shared through Tailscale,
+/// so connection metadata never reaches a public relay. `None` (iroh's public relays)
+/// when this Mac does not host the cloud or does not share it through Tailscale yet.
+/// Decided once; sharing for the first time restarts the app to switch over.
+async fn relay_url(handle: &AppHandle) -> Option<String> {
+    let state = handle.state::<AppState>();
+    state
+        .relay
+        .get_or_init(|| async {
+            if !state.host.lock().unwrap().hosting {
+                return None;
+            }
+            match start_relay().await {
+                Ok(server) => *state.relay_server.lock().unwrap() = Some(server),
+                Err(e) => {
+                    log(format_args!("relay could not start: {e:#}; using public relays"));
+                    return None;
+                }
+            }
+            let tailscale::TailscaleState::Sharing { url } = tailscale::state(CLOUD_PORT).await else {
+                return None;
+            };
+            if let Err(e) = tailscale::share_relay(RELAY_PORT).await {
+                log(format_args!("could not share the relay through Tailscale: {e:#}; using public relays"));
+                return None;
+            }
+            let relay = tailscale::relay_url(&url);
+            log(format_args!("devices relay through this Mac at {relay}"));
+            Some(relay)
+        })
+        .await
+        .clone()
+}
+
+/// An iroh relay on localhost, plain HTTP: Tailscale serve adds the HTTPS.
+async fn start_relay() -> anyhow::Result<iroh_relay::server::Server> {
+    use iroh_relay::server::{RelayConfig, Server, ServerConfig};
+    let mut relay = RelayConfig::new((std::net::Ipv4Addr::LOCALHOST, RELAY_PORT));
+    relay.key_cache_capacity = Some(1024);
+    let mut config = ServerConfig::default();
+    config.relay = Some(relay);
+    Ok(Server::spawn(config).await?)
 }
 
 fn background_flag(home: &std::path::Path) -> std::path::PathBuf {
@@ -258,8 +310,26 @@ async fn tailscale_status() -> tailscale::TailscaleState {
 }
 
 #[tauri::command]
-async fn tailscale_share() -> CmdResult<tailscale::ShareResult> {
-    tailscale::share(CLOUD_PORT).await.map_err(|e| format!("{e:#}"))
+async fn tailscale_share(app: AppHandle) -> CmdResult<tailscale::ShareResult> {
+    let result = tailscale::share(CLOUD_PORT).await.map_err(|e| format!("{e:#}"))?;
+    if let tailscale::ShareResult::Shared { .. } = &result {
+        // The relay is chosen at startup, so restart once to move the agent, the cloud and
+        // paired devices onto this Mac's own relay.
+        if handle_relay_switch(&app).await {
+            app.state::<AppState>().quitting.store(true, Ordering::Relaxed);
+            app.restart();
+        }
+    }
+    Ok(result)
+}
+
+/// True when the running app is not yet on its own relay and should restart for it.
+async fn handle_relay_switch(app: &AppHandle) -> bool {
+    let state = app.state::<AppState>();
+    if state.relay.get().is_some_and(Option::is_some) {
+        return false;
+    }
+    tailscale::share_relay(RELAY_PORT).await.is_ok()
 }
 
 #[tauri::command]
@@ -268,7 +338,7 @@ async fn tailscale_stop() -> CmdResult<()> {
 }
 
 /// Runs the cloud from a SQLite file in this Mac's Borrowed Compute folder.
-async fn host_cloud(data_dir: std::path::PathBuf) -> anyhow::Result<()> {
+async fn host_cloud(data_dir: std::path::PathBuf, relay_url: Option<String>) -> anyhow::Result<()> {
     std::fs::create_dir_all(&data_dir)?;
     let db = bc_cloud::connect(&bc_cloud::sqlite_url(&data_dir.join("cloud.db"))).await?;
     let client_id = std::env::var("BC_GITHUB_CLIENT_ID")
@@ -277,6 +347,7 @@ async fn host_cloud(data_dir: std::path::PathBuf) -> anyhow::Result<()> {
         db,
         github: Arc::new(bc_cloud::GitHub::new(client_id)),
         google: bc_cloud::google_client(DEFAULT_GOOGLE_CLIENT_ID, option_env!("BC_GOOGLE_CLIENT_SECRET")),
+        relay_url,
     };
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", CLOUD_PORT))
         .await
@@ -549,6 +620,8 @@ fn main() {
             logs,
             run_in_background: AtomicBool::new(run_in_background),
             quitting: AtomicBool::new(false),
+            relay: OnceCell::new(),
+            relay_server: StdMutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             get_status,
@@ -626,7 +699,8 @@ fn main() {
                 let data_dir = root.join("cloud");
                 tauri::async_runtime::spawn(async move {
                     handle.state::<AppState>().host.lock().unwrap().running = true;
-                    let result = host_cloud(data_dir).await;
+                    let relay = relay_url(&handle).await;
+                    let result = host_cloud(data_dir, relay).await;
                     let state = handle.state::<AppState>();
                     let mut host = state.host.lock().unwrap();
                     host.running = false;
@@ -645,7 +719,8 @@ fn main() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let state = handle.state::<AppState>();
-                match Agent::start(&state.paths, false, Some(tx)).await {
+                let relays = relay_url(&handle).await.and_then(|url| bc_net::relay_map(&url).ok());
+                match Agent::start(&state.paths, false, relays, Some(tx)).await {
                     Ok(agent) => {
                         let agent = Arc::new(agent);
                         let _ = state.agent.set(agent.clone());

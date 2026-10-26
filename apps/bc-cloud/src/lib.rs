@@ -35,6 +35,9 @@ pub struct AppState {
     pub github: Arc<GitHub>,
     /// `None` when no Google client is configured; Google sign-in is then not offered.
     pub google: Option<Arc<Google>>,
+    /// The relay the Mac app runs and shares, advertised to devices; `None` for public
+    /// relays.
+    pub relay_url: Option<String>,
 }
 
 /// Google sign-in from `BC_GOOGLE_CLIENT_ID` and `BC_GOOGLE_CLIENT_SECRET`, falling back
@@ -111,6 +114,10 @@ struct Health {
     version: &'static str,
 }
 
+async fn relay(axum::extract::State(state): axum::extract::State<AppState>) -> Json<bc_proto::cloud::RelayInfo> {
+    Json(bc_proto::cloud::RelayInfo { url: state.relay_url.clone() })
+}
+
 async fn health() -> Json<Health> {
     Json(Health { service: "borrowed-compute-cloud", version: env!("CARGO_PKG_VERSION") })
 }
@@ -122,6 +129,7 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/auth/device/poll", post(auth::poll_device_flow))
         .route("/v1/auth/google/device", post(auth::start_google_flow))
         .route("/v1/auth/providers", get(auth::providers))
+        .route("/v1/relay", get(relay))
         .route("/v1/auth/logout", post(auth::logout))
         .route("/v1/me", get(auth::me))
         .route("/v1/devices", get(devices::list).post(devices::register))

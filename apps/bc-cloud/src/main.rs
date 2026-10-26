@@ -9,6 +9,7 @@ use bc_cloud::{connect, serve, AppState, GitHub};
 /// - `BC_GITHUB_CLIENT_ID` (required): OAuth app client id with device flow enabled.
 /// - `BC_LISTEN`: address to bind, default `127.0.0.1:8080`.
 /// - `BC_GOOGLE_CLIENT_ID`, `BC_GOOGLE_CLIENT_SECRET`: offer Google sign-in too.
+/// - `BC_RELAY_URL`: a relay for devices to use instead of iroh's public ones.
 #[tokio::main]
 async fn main() -> Result<()> {
     let db_url = std::env::var("BC_DATABASE_URL").context("set BC_DATABASE_URL")?;
@@ -20,6 +21,7 @@ async fn main() -> Result<()> {
         db,
         github: Arc::new(GitHub::new(client_id)),
         google: bc_cloud::google_client("", None),
+        relay_url: std::env::var("BC_RELAY_URL").ok(),
     };
     let listener = tokio::net::TcpListener::bind(&listen).await?;
     eprintln!("bc-cloud listening on http://{listen}");

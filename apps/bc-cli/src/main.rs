@@ -176,12 +176,14 @@ async fn main() -> Result<()> {
             let archive = pack(&root, &spec.files.exclude)?;
 
             let key = load_or_create_key(&key_path)?;
+            // Meet the Mac on its own relay when it runs one, keeping public relays out of it.
+            let relays = cloud.relay().await.and_then(|url| bc_net::relay_map(&url).ok());
             let cancel = async {
                 let _ = tokio::signal::ctrl_c().await;
             };
             let outcome = run_on_mac(
                 &key,
-                NetConfig { relay_only, ..Default::default() },
+                NetConfig { relay_only, relays, ..Default::default() },
                 mac.addr,
                 &spec,
                 archive,

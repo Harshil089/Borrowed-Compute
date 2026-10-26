@@ -160,6 +160,7 @@ async fn setup(database_url: &str) -> Env {
         db,
         github: Arc::new(GitHub::with_bases("test-client".into(), gh_url.clone(), gh_url)),
         google: Some(Arc::new(Google::with_bases("g-client".into(), "test-secret".into(), g_url.clone(), g_url))),
+        relay_url: Some("https://studio.tail1234.ts.net:8443/".into()),
     };
     let cloud = serve(app(state)).await;
     Env { cloud, github, google }
@@ -195,6 +196,11 @@ async fn google_and_github_link_by_verified_email() {
 async fn google_and_github_link_by_verified_email_on(env: Env) {
     let providers = CloudClient::new(&env.cloud, None).providers().await.unwrap();
     assert!(providers.github && providers.google);
+    assert_eq!(
+        CloudClient::new(&env.cloud, None).relay().await.as_deref(),
+        Some("https://studio.tail1234.ts.net:8443/"),
+        "the cloud advertises the Mac's relay"
+    );
 
     // Alice signs in with GitHub on her Mac and registers it.
     env.github.emails.lock().unwrap().insert(1, vec!["alice@example.com".into()]);

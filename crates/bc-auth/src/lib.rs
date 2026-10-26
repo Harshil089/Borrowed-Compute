@@ -7,7 +7,7 @@ use anyhow::{bail, Context, Result};
 use bc_proto::cloud::{
     register_message, sha256_hex, ApiErrorBody, ApprovePairing, CreatePairing, DeviceFlowPoll,
     DeviceFlowStart, DeviceFlowStatus, DeviceInfo, DeviceKind, Heartbeat, Me, PairedClients,
-    PairingInfo, RegisterDevice, Provider, Providers};
+    PairingInfo, RegisterDevice, Provider, Providers, RelayInfo};
 use iroh_base::SecretKey;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -194,6 +194,12 @@ impl CloudClient {
             Err(e) if format!("{e:#}").contains("404") => Ok(Providers { github: true, google: false }),
             Err(e) => Err(e),
         }
+    }
+
+    /// The relay the Mac advertises, if any. Any failure, including a cloud too old to
+    /// know about relays, means iroh's public relays.
+    pub async fn relay(&self) -> Option<String> {
+        self.get::<RelayInfo>("/v1/relay").await.ok().and_then(|r| r.url)
     }
 
     pub async fn me(&self) -> Result<Me> {

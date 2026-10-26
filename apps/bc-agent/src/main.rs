@@ -135,7 +135,9 @@ async fn main() -> Result<()> {
             }
         }
         Command::Serve { relay_only } => {
-            let agent = Agent::start(&AgentPaths::new(home.clone()), relay_only, None).await?;
+            // Use the relay the cloud advertises, if any, so devices meet on it.
+            let relays = cloud.relay().await.and_then(|url| bc_net::relay_map(&url).ok());
+            let agent = Agent::start(&AgentPaths::new(home.clone()), relay_only, relays, None).await?;
             eprintln!("bc-agent ready, device id {}", agent.endpoint.id());
             if cloud.token().is_some() {
                 eprintln!("signed in: syncing presence and pairings with {}", cloud_url_for(&home));
