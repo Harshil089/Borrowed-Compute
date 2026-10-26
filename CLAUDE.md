@@ -10,6 +10,7 @@ Product and design docs live outside this repo, in the parent folder `../`: `Bor
 |---|---|
 | `crates/bc-proto` | `bc.toml` spec (`spec.rs`), device-to-device CBOR frames (`wire.rs`), cloud JSON bodies (`cloud.rs`). No networking. |
 | `crates/bc-net` | iroh endpoint setup, device key files, `send_msg`/`recv_msg` over QUIC streams |
+| `crates/bc-secrets` | Device key and session token storage: OS keychain (macOS Keychain, Windows Credential Manager) when a program calls `bc_net::use_keychain()` at startup, migrating old files in; owner-only files otherwise, which is what libraries and tests use |
 | `crates/bc-auth` | HTTP client for `bc-cloud`, session file storage |
 | `apps/bc-agent` | Mac agent: `runner.rs` (workspace, process, output), `server.rs` (per-connection protocol), `paired.rs` (allowlist), `cloud_sync.rs` (heartbeat + paired list), `service.rs` (the running agent, shared by `bc-agent serve` and the menu-bar app), `events.rs` (job and sync events for a UI) |
 | `apps/bc-cli` | `bc` binary: `pack.rs` (tar of project), `run.rs` (client side of a job), `detect.rs` (project type and suggested commands), `flows.rs` (steps shared with the desktop app: resolve Mac, load spec, split command, wait for pairing), `main.rs` (commands) |
@@ -79,7 +80,6 @@ Every merge to `main` runs `.github/workflows/release.yml`. The Mac app (agent) 
 - No sandbox yet: jobs run as the agent's user. The `_bcjob` user plus a Seatbelt profile is Phase two (Q4).
 - The whole project is uploaded per run (up to 2 GiB), by design: the owner decided the Mac stores zero project data, so there is no Mac-side cache or chunked sync (Foundation doc, 2026-10-25). Compressed uploads (zstd) are the planned speed-up.
 - **Route memory** (`apps/bc-cli/src/route.rs`): when a direct path to a Mac fails, the client records it in `route-memory.json` and sends that Mac's runs through the relay first for an hour, or until the Mac's IP addresses change, or until a direct run succeeds.
-- Keys and session tokens are owner-only files, not yet in the OS keychain.
 - Discovery and relays use iroh's public relays (dev only). Our own `iroh-relay` deployment is not written.
 - The Mac app's built-in cloud is reachable from other devices only through Tailscale. Tested on one Mac (share, HTTPS address, sign-in and a job through it); not yet from a second device.
 - The desktop apps are verified on macOS only. CI builds the Windows installers, but nobody has run them on a Windows PC yet.

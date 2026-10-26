@@ -7,6 +7,7 @@ members = [
     "apps/bc-cli",
     "apps/bc-cloud",
     "crates/bc-auth",
+    "crates/bc-secrets",
     "apps/bc-desktop",
     "apps/bc-desktop-agent",
 ]
@@ -21,6 +22,7 @@ publish = false
 bc-proto = { path = "crates/bc-proto" }
 bc-net = { path = "crates/bc-net" }
 bc-auth = { path = "crates/bc-auth" }
+bc-secrets = { path = "crates/bc-secrets" }
 bc-agent = { path = "apps/bc-agent" }
 bc-cli = { path = "apps/bc-cli" }
 bc-cloud = { path = "apps/bc-cloud" }
