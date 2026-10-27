@@ -24,11 +24,24 @@ pub struct AgentConfig {
     /// The built-in cloud's port on localhost, shared over [`bc_net::CLOUD_ALPN`] with any
     /// device (sign-in and pairing come before a device is paired). `None` shares nothing.
     pub cloud_port: Option<u16>,
+    /// Cloud connections served at once; any device may open them.
+    pub cloud_slots: std::sync::Arc<tokio::sync::Semaphore>,
 }
+
+/// Cloud connections served at once, and requests in flight on each.
+pub const MAX_CLOUD_CONNECTIONS: usize = 32;
+pub const MAX_CLOUD_STREAMS: u32 = 16;
 
 impl AgentConfig {
     pub fn new(runner: RunnerConfig, paired: PairedDevices) -> Self {
-        AgentConfig { runner, paired, events: None, services: Services::default(), cloud_port: None }
+        AgentConfig {
+            runner,
+            paired,
+            events: None,
+            services: Services::default(),
+            cloud_port: None,
+            cloud_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CLOUD_CONNECTIONS)),
+        }
     }
 
     fn emit(&self, event: AgentEvent) {
