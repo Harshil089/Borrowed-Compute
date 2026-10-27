@@ -215,20 +215,22 @@ let services = [];
 // Ports forwarded to this PC, from the forwarding task: [{ job_id, remote, local }].
 let forwards = [];
 listen("forwards", (event) => { forwards = event.payload; renderServices(); });
-
-async function loadServices() {
-  const mac = devices?.devices.find((d) => d.name === selectedMac);
-  if (!mac || !mac.online || pairingFor(mac)?.status !== "approved") { services = []; invoke("stop_forwarding").catch(() => {}); renderServices(); return; }
-  try {
-    services = await invoke("services", { mac: selectedMac });
-  } catch {
-    // An older agent or a dropped connection: show nothing rather than an error.
-    services = [];
-  }
-  // Forward ports only while there is something to forward.
-  if (services.length) invoke("start_forwarding", { mac: selectedMac }).catch(() => {});
-  else invoke("stop_forwarding").catch(() => {});
+// The forwarding task's poll of the selected Mac: the only source of this list, so a slow
+// or failed check leaves it as it was instead of emptying it.
+listen("services", (event) => {
+  if (event.payload.mac !== selectedMac) return;
+  services = event.payload.services;
   renderServices();
+});
+let servicesMac = null;
+
+function loadServices() {
+  const mac = devices?.devices.find((d) => d.name === selectedMac);
+  if (servicesMac !== selectedMac) { servicesMac = selectedMac; services = []; forwards = []; renderServices(); }
+  // Only an unpaired or missing Mac stops forwarding. One that looks offline for a moment
+  // (a slow relay, a VPN) keeps its ports; forwarding ends by itself when a service does.
+  if (!mac || pairingFor(mac)?.status !== "approved") { services = []; invoke("stop_forwarding").catch(() => {}); renderServices(); return; }
+  if (mac.online) invoke("start_forwarding", { mac: selectedMac }).catch(() => {});
 }
 
 function uptime(startedAt) {
