@@ -49,10 +49,6 @@ let jobs = [];
 let services = [];
 let verificationUri = null;
 let signingIn = false;
-let tailscale = null;
-let sharing = false;
-let shareMessage = null;
-let approvalUrl = null;
 // Requests already on screen, so only new ones animate in.
 const seenRequests = new Set();
 
@@ -322,7 +318,7 @@ const copyIcon = `<svg class="icon"><use href="#i-copy"/></svg>Copy`;
 function renderConnect() {
   const box = $("connect");
   // Until the PC has a way in, the route is the first thing this window asks for.
-  $("home").classList.toggle("needs-route", status.host.hosting && tailscale?.state !== "sharing");
+  $("home").classList.toggle("needs-route", status.host.hosting && pairings.length === 0);
   if (!status.host.hosting) {
     const html = `
       <p>This Mac uses the cloud at</p>
@@ -331,56 +327,12 @@ function renderConnect() {
     if (box.dataset.html !== html) { box.dataset.html = html; box.innerHTML = html; }
     return;
   }
-  const t = tailscale;
-  let body;
-  if (!t) {
-    body = `<div class="row"><span class="spinner"></span><span class="muted">Checking Tailscale…</span></div>`;
-  } else if (t.state === "sharing") {
-    body = `
-      <p>Your PC reaches this Mac's cloud at:</p>
-      <div class="address"><span id="share-url">${breakableUrl(t.url)}</span><button data-copy="${esc(t.url)}">${copyIcon}</button></div>
-      <p class="muted">In Borrowed Compute on your PC, enter this address. Only devices in your Tailscale network can open it.</p>
-      <div class="actions"><button class="link" data-ts="stop">Stop sharing</button></div>`;
-  } else if (t.state === "ready") {
-    body = `
-      <p>Tailscale is connected as <span class="mono">${esc(t.host)}</span>. Share this Mac's cloud with your other devices:</p>
-      <div class="actions"><button class="primary" data-ts="share" ${sharing ? "disabled" : ""}>${sharing ? "Sharing…" : "Share with my devices"}</button></div>`;
-  } else if (t.state === "https_disabled") {
-    body = `
-      <p>Tailscale is connected, but your tailnet has not turned on HTTPS certificates, which sharing needs.</p>
-      <ol class="steps"><li>Open the Tailscale admin page, DNS tab.</li><li>Turn on MagicDNS and HTTPS Certificates.</li><li>Come back and click Check again.</li></ol>
-      <div class="actions">
-        <button class="primary" data-open="https://login.tailscale.com/admin/dns">Open Tailscale DNS settings</button>
-        <button data-ts="check">Check again</button>
-      </div>`;
-  } else if (t.state === "not_running") {
-    body = `
-      <p>Tailscale is installed but not connected. Open Tailscale from the menu bar and sign in.</p>
-      <div class="actions"><button data-ts="check">Check again</button></div>`;
-  } else if (t.state === "not_installed") {
-    body = `
-      <p>Your PC reaches this Mac through Tailscale, a free private network between your own devices.</p>
-      <ol class="steps">
-        <li>Install Tailscale on this Mac and on your PC.</li>
-        <li>Sign in to Tailscale on both with the same account.</li>
-        <li>Come back here and click Check again.</li>
-      </ol>
-      <div class="actions">
-        <button class="primary" data-open="https://tailscale.com/download">Download Tailscale</button>
-        <button data-ts="check">Check again</button>
-      </div>`;
-  } else {
-    body = `<p>Tailscale reported a problem: ${esc(t.message)}</p><div class="actions"><button data-ts="check">Check again</button></div>`;
-  }
-  if (approvalUrl) {
-    body += `
-      <div class="banner warn">Tailscale needs you to allow sharing for your tailnet once.</div>
-      <div class="actions">
-        <button class="primary" data-open="${esc(approvalUrl)}">Allow in Tailscale</button>
-        <button data-ts="share">Try again</button>
-      </div>`;
-  }
-  if (shareMessage) body += `<div class="banner bad">${esc(shareMessage)}</div>`;
+  const code = status.device_id || "";
+  const body = code ? `
+      <p>Your PC reaches this Mac with its code:</p>
+      <div class="address"><span class="mono code">${esc(code)}</span><button data-copy="${esc(code)}">${copyIcon}</button></div>
+      <p class="muted">In Borrowed Compute on your PC, paste this code where it asks for your Mac. The connection is encrypted end to end, and nothing else needs to be installed. You still approve each device before it can send jobs.</p>`
+    : `<div class="row"><span class="spinner"></span><span class="muted">Starting…</span></div>`;
   if (box.dataset.html !== body) { box.dataset.html = body; box.innerHTML = body; }
 }
 
@@ -419,7 +371,6 @@ async function refresh() {
           if (String(e) === "signed-out") { status = await invoke("get_status"); render(); return; }
         }
       }
-      if (status.host.hosting) tailscale = await invoke("tailscale_status");
       pairings = await invoke("list_pairings");
       jobs = await invoke("recent_jobs");
       services = await invoke("list_services");
@@ -533,7 +484,6 @@ $("signout").addEventListener("click", async () => {
 document.addEventListener("click", async (event) => {
   const copy = event.target.closest("[data-copy]");
   const open = event.target.closest("[data-open]");
-  const ts = event.target.closest("[data-ts]");
   if (copy) {
     await navigator.clipboard.writeText(copy.dataset.copy).catch(() => {});
     copy.textContent = "Copied";
@@ -542,25 +492,6 @@ document.addEventListener("click", async (event) => {
   }
   if (open) {
     invoke("open_url", { url: open.dataset.open }).catch((e) => showError(String(e)));
-    return;
-  }
-  if (ts) {
-    shareMessage = null;
-    if (ts.dataset.ts === "share") {
-      sharing = true; approvalUrl = null; renderConnect();
-      try {
-        const r = await invoke("tailscale_share");
-        if (r.result === "needs_approval") approvalUrl = r.url;
-      } catch (e) {
-        shareMessage = String(e);
-      }
-      sharing = false;
-    } else if (ts.dataset.ts === "stop") {
-      if (!(await ask("Stop sharing? Your PC will not reach this Mac's cloud until you share again.", "Stop sharing", true))) return;
-      await invoke("tailscale_stop").catch((e) => { shareMessage = String(e); });
-    }
-    tailscale = null; renderConnect();
-    await refresh();
     return;
   }
   const approve = event.target.closest("[data-approve]");

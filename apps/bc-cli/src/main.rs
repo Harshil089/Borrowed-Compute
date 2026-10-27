@@ -41,7 +41,7 @@ enum Command {
     Devices,
     /// Ask a Mac for permission to send it jobs, then wait for approval on the Mac.
     Pair { mac: String },
-    /// Show the cloud address, or set it (for example your Mac's Tailscale address).
+    /// Show the cloud address, or set it (your Mac's code from Borrowed Compute Agent, or a web address).
     /// An empty address returns to the default.
     Cloud { url: Option<String> },
     /// Print this device's id.

@@ -53,17 +53,38 @@ impl Agent {
         Ok(Agent { endpoint, config })
     }
 
+    /// Shares the built-in cloud on `127.0.0.1:port` with other devices over iroh.
+    pub fn share_cloud(mut self, port: u16) -> Self {
+        self.config.cloud_port = Some(port);
+        self
+    }
+
+    /// This Mac's code: the endpoint ID other devices enter to reach its cloud.
+    pub fn code(&self) -> String {
+        self.endpoint.id().to_string()
+    }
+
     /// Running services, for the Mac app to show and stop.
     pub fn services(&self) -> &crate::services::Services {
         &self.config.services
     }
 
-    /// Accepts job connections until the endpoint closes.
+    /// Accepts job and cloud connections until the endpoint closes.
     pub async fn accept_loop(&self) {
         while let Some(incoming) = self.endpoint.accept().await {
             let config = self.config.clone();
             tokio::spawn(async move {
-                let result = async { serve_connection(&config, incoming.await?).await }.await;
+                let result = async {
+                    let conn = incoming.await?;
+                    if conn.alpn() == bc_net::CLOUD_ALPN {
+                        if let Some(port) = config.cloud_port {
+                            bc_net::serve_cloud(conn, port).await;
+                        }
+                        return Ok(());
+                    }
+                    serve_connection(&config, conn).await
+                }
+                .await;
                 if let Err(e) = result {
                     eprintln!("job connection ended: {e:#}");
                 }

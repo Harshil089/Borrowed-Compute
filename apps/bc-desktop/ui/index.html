@@ -30,9 +30,9 @@
         <h1 class="pass-title">Run it on your Mac.</h1>
         <p class="muted pass-lede">Builds, tests and scripts from this PC run on your Mac's Apple silicon, with output streaming back here. Sign in with the account you use on the Mac; GitHub and Google with the same verified email are one account.</p>
         <label class="field">
-          <span class="label">Your Mac's address</span>
+          <span class="label">Your Mac's code</span>
           <div class="inline">
-            <input id="signin-cloud" type="text" placeholder="https://your-mac.tailnet-name.ts.net" spellcheck="false" autocomplete="off">
+            <input id="signin-cloud" type="text" placeholder="Paste the code from Borrowed Compute Agent" spellcheck="false" autocomplete="off">
             <button id="signin-test">Test</button>
           </div>
           <span class="hint">Shown in Borrowed Compute Agent on your Mac, under Route.</span>
@@ -70,7 +70,7 @@
       <div class="bar-right">
         <div class="segmented on-bar" role="group" aria-label="Appearance"><button data-appearance="light">Light</button><button data-appearance="dark">Dark</button><button data-appearance="system">System</button></div>
         <span id="account" class="bar-account"></span>
-        <button id="settings" class="bar-link">Mac address</button>
+        <button id="settings" class="bar-link">Mac code</button>
         <button id="updates" class="bar-link">Updates</button>
         <button id="signout" class="bar-link">Sign out</button>
       </div>
@@ -186,8 +186,8 @@
   <div id="cloud-dialog" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="cloud-title">
     <div class="dialog coupon">
       <div class="dialog-body">
-        <h1 id="cloud-title" class="dialog-title">Your Mac's address</h1>
-        <p class="muted">The address Borrowed Compute Agent shows on your Mac under Route. Changing it signs you out, because a different address is a different account list.</p>
+        <h1 id="cloud-title" class="dialog-title">Your Mac's code</h1>
+        <p class="muted">The code Borrowed Compute Agent shows on your Mac under Route. A cloud web address works too. Changing it signs you out, because a different Mac is a different account list.</p>
         <div class="inline">
           <input id="cloud-input" type="text" spellcheck="false" autocomplete="off">
           <button id="cloud-test">Test</button>

@@ -24,7 +24,7 @@ Not pixels (remote desktop, cloud streaming) and not infrastructure (SSH build f
 
 - Two apps:
   - **Borrowed Compute** (Windows client; also runs on macOS): pick a paired Mac, pick a project folder, type a command or use the folder's `bc.toml`, watch live output, see timings (connect, upload, first output, total, direct vs relay) and what the Mac used (CPU time, cores, peak memory, run time). Each run's log is saved locally.
-  - **Borrowed Compute Agent** (Mac): sign in, share the built-in cloud through Tailscale so the PC can reach it, approve pairing requests by matching a 6-digit code, see paired devices, recent jobs with compute usage, logs, Run in background, and updates.
+  - **Borrowed Compute Agent** (Mac): sign in, show the Mac code the PC uses to reach the built-in cloud, approve pairing requests by matching a 6-digit code, see paired devices, recent jobs with compute usage, logs, Run in background, and updates.
 - A `bc` command-line tool does the same as the client app; both share one device identity.
 - Sign-in is GitHub device flow: the app shows a code, the user enters it on github.com.
 - Jobs are batch only: no remote shells, debuggers or language servers.

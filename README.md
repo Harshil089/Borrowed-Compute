@@ -40,15 +40,14 @@ The Windows build of `bc` must run on Windows. Cross-compiling from macOS fails 
 
 ## Where the cloud runs
 
-For development the cloud needs no server: **Borrowed Compute Agent hosts it on the Mac**, in a SQLite file under the app's data folder, listening on `127.0.0.1:8080`. The PC reaches it through [Tailscale](https://tailscale.com), a free private network between your own devices:
+The cloud needs no server and no VPN: **Borrowed Compute Agent hosts it on the Mac**, in a SQLite file under the app's data folder, listening on `127.0.0.1:8080`. The PC reaches it over iroh, the same encrypted device-to-device connection jobs use:
 
-1. Install Tailscale on the Mac and the PC, signed in with the same account.
-2. In Borrowed Compute Agent, under **Connect your PC**, click **Share with my devices**. The app runs `tailscale serve` and shows an address like `https://studio.tail1234.ts.net`. The first time, Tailscale may ask you to turn on HTTPS certificates for your tailnet; the app links to the page.
-3. In Borrowed Compute on the PC, enter that address under **Your Mac's address**, click **Test**, then sign in.
+1. In Borrowed Compute Agent, under **Route**, copy this Mac's code.
+2. In Borrowed Compute on the PC, paste it under **Your Mac's code**, click **Test**, then sign in.
 
-The address is reachable only from devices in your tailnet. Job traffic still goes device to device.
+The PC finds the Mac by its code through iroh's public discovery, connects directly when it can and through iroh's public relays when it cannot. Relays forward encrypted traffic they cannot read. Anyone with the code can reach the sign-in page, but a device can send jobs only after you approve its pairing on the Mac.
 
-The `bc` command uses the same saved address (`bc cloud <address>` sets it). `BC_CLOUD_URL` overrides it for one run.
+The `bc` command uses the same saved address (`bc cloud <code or address>` sets it). `BC_CLOUD_URL` overrides it for one run.
 
 To run the cloud on a server instead (needs a GitHub OAuth app with **Device Flow enabled**; only the client id is used, no client secret):
 

@@ -64,7 +64,7 @@ async fn job_messages_flow_through_relay() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The Mac app's relay: plain HTTP on localhost (Tailscale adds the HTTPS in real use),
+/// A relay served as plain HTTP on localhost (a reverse proxy adds the HTTPS in real use),
 /// reached by both devices through `relay_map`, with direct paths disabled.
 #[tokio::test(flavor = "multi_thread")]
 async fn job_messages_flow_through_a_plain_http_relay() -> anyhow::Result<()> {
@@ -107,8 +107,8 @@ async fn job_messages_flow_through_a_plain_http_relay() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Same exchange through a real deployed relay, such as the Mac app's behind Tailscale:
-/// set `BC_TEST_RELAY_URL=https://<mac>.ts.net:8443/`. Skipped otherwise.
+/// Same exchange through a real deployed relay: set
+/// `BC_TEST_RELAY_URL=https://relay.example.com/`. Skipped otherwise.
 #[tokio::test(flavor = "multi_thread")]
 async fn job_messages_flow_through_a_deployed_relay() -> anyhow::Result<()> {
     let Ok(url) = std::env::var("BC_TEST_RELAY_URL") else {
