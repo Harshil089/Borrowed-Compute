@@ -354,23 +354,6 @@ fn service_error(job_id: &str, e: StopError) -> String {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reports_an_unpaired_device_once_in_a_while() {
-        let rejections = Rejections::default();
-        let a = iroh::SecretKey::from_bytes(&[1; 32]).public();
-        let b = iroh::SecretKey::from_bytes(&[2; 32]).public();
-        assert!(rejections.should_report(a));
-        assert!(!rejections.should_report(a), "a second attempt right away stays quiet");
-        assert!(rejections.should_report(b), "another device is reported");
-        rejections.0.lock().unwrap().insert(a, Instant::now() - REJECTION_QUIET);
-        assert!(rejections.should_report(a), "reported again after a quiet spell");
-    }
-}
-
 struct JobEndGuard<'a> {
     config: &'a AgentConfig,
     job_id: String,
@@ -391,5 +374,22 @@ struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
 impl<T> Drop for AbortOnDrop<T> {
     fn drop(&mut self) {
         self.0.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reports_an_unpaired_device_once_in_a_while() {
+        let rejections = Rejections::default();
+        let a = iroh::SecretKey::from_bytes(&[1; 32]).public();
+        let b = iroh::SecretKey::from_bytes(&[2; 32]).public();
+        assert!(rejections.should_report(a));
+        assert!(!rejections.should_report(a), "a second attempt right away stays quiet");
+        assert!(rejections.should_report(b), "another device is reported");
+        rejections.0.lock().unwrap().insert(a, Instant::now() - REJECTION_QUIET);
+        assert!(rejections.should_report(a), "reported again after a quiet spell");
     }
 }
