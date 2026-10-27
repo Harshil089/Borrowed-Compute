@@ -353,8 +353,31 @@ $("cloud-save").addEventListener("click", async () => {
 
 function updateMessage(cls, text) {
   $("update-msg").className = `banner ${cls}`;
-  $("update-msg").textContent = text;
+  $("update-text").textContent = text;
+  $("update-meter").classList.add("hidden");
 }
+
+// "Downloading 1.9 of 6.9 MB", plus the attempt once a download has started again.
+function updateProgressText(p) {
+  const mb = (b) => (b / 1e6).toFixed(1);
+  let text = p.total ? `Downloading ${mb(p.downloaded)} of ${mb(p.total)} MB` : `Downloading ${mb(p.downloaded)} MB`;
+  if (p.attempt > 1) text += ` (connection dropped, try ${p.attempt} of ${p.attempts})`;
+  return `${text}… The app restarts when it is done.`;
+}
+
+function meterWidth(p) {
+  return p.total ? `${Math.min(100, (100 * p.downloaded) / p.total).toFixed(1)}%` : "";
+}
+
+listen("update-progress", (event) => {
+  const p = event.payload;
+  $("update-msg").className = "banner";
+  $("update-text").textContent = updateProgressText(p);
+  const meter = $("update-meter");
+  meter.classList.remove("hidden");
+  meter.classList.toggle("unknown", !p.total);
+  meter.firstElementChild.style.width = meterWidth(p);
+});
 
 async function checkUpdate() {
   $("update-check").disabled = true;

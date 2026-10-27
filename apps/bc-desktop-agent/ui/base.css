@@ -351,6 +351,11 @@ input[type="text"]:focus { outline: none; border-color: var(--carbon); box-shado
 .banner.bad { color: var(--bad); background: var(--bad-tint); }
 .banner:not(.ok):not(.warn):not(.bad) { color: var(--ink-2); border-color: var(--rule-2); }
 
+/* Download progress, as for an update. */
+.meter { height: 6px; border-radius: 3px; background: var(--rule-2); overflow: hidden; margin-top: 8px; }
+.meter > span { display: block; height: 100%; width: 0; background: currentColor; transition: width 0.2s ease-out; }
+.meter.unknown > span { width: 30%; }
+
 .spinner {
   width: 13px; height: 13px; flex: none; border-radius: 50%;
   border: 2px solid var(--rule-2); border-top-color: var(--red);

@@ -459,6 +459,23 @@ $("check-update").addEventListener("click", async () => {
   }
 });
 
+// "Downloading 1.9 of 6.9 MB", plus the attempt once a download has started again.
+function updateProgressText(p) {
+  const mb = (b) => (b / 1e6).toFixed(1);
+  let text = p.total ? `Downloading ${mb(p.downloaded)} of ${mb(p.total)} MB` : `Downloading ${mb(p.downloaded)} MB`;
+  if (p.attempt > 1) text += ` (connection dropped, try ${p.attempt} of ${p.attempts})`;
+  return `${text}… The app restarts when it is done.`;
+}
+
+function meterWidth(p) {
+  return p.total ? `${Math.min(100, (100 * p.downloaded) / p.total).toFixed(1)}%` : "";
+}
+
+listen("update-progress", (event) => {
+  const p = event.payload;
+  updateStatus(`${esc(updateProgressText(p))}<div class="meter${p.total ? "" : " unknown"}"><span style="width: ${meterWidth(p)}"></span></div>`);
+});
+
 $("update-status").addEventListener("click", async (event) => {
   if (!event.target.closest("#install-update")) return;
   if (!(await ask("Install the update and restart? The agent stops accepting jobs for a few seconds.", "Install and restart"))) return;
