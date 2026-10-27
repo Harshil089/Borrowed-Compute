@@ -526,9 +526,73 @@ async fn install_update(app: AppHandle, state: State<'_, AppState>) -> CmdResult
         return Err("Already up to date.".into());
     };
     log(format_args!("installing update {}", update.version));
-    update.download_and_install(|_, _| {}, || {}).await.map_err(err)?;
+    let bytes = download_update(&app, &update).await?;
     state.quitting.store(true, Ordering::Relaxed);
+    update.install(bytes).map_err(err)?;
     app.restart();
+}
+
+/// Download attempts before an update gives up. Release downloads come from GitHub's file
+/// host, which can be slow and drop connections partway.
+const UPDATE_ATTEMPTS: u32 = 4;
+
+/// A download that receives nothing for this long counts as dropped and starts again.
+const UPDATE_STALL: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// Sent to the window as `update-progress` while an update downloads.
+#[derive(Clone, Serialize)]
+struct UpdateProgress {
+    attempt: u32,
+    attempts: u32,
+    downloaded: u64,
+    total: Option<u64>,
+}
+
+/// Downloads and verifies `update`, starting again after a dropped or stalled connection.
+/// A bad signature is not retried.
+async fn download_update(app: &AppHandle, update: &tauri_plugin_updater::Update) -> Result<Vec<u8>, String> {
+    use std::sync::atomic::AtomicU64;
+    use std::time::Instant;
+    let mut last_error = String::new();
+    for attempt in 1..=UPDATE_ATTEMPTS {
+        if attempt > 1 {
+            tokio::time::sleep(std::time::Duration::from_secs(2 << attempt)).await;
+        }
+        let downloaded = AtomicU64::new(0);
+        let last_chunk = StdMutex::new(Instant::now());
+        let last_emit = StdMutex::new(Instant::now());
+        let on_chunk = |len: usize, total: Option<u64>| {
+            let done = downloaded.fetch_add(len as u64, Ordering::Relaxed) + len as u64;
+            *last_chunk.lock().unwrap() = Instant::now();
+            let mut emitted = last_emit.lock().unwrap();
+            // A few updates a second is plenty for a progress bar.
+            if emitted.elapsed().as_millis() >= 200 || Some(done) == total {
+                *emitted = Instant::now();
+                let _ = app.emit("update-progress", UpdateProgress { attempt, attempts: UPDATE_ATTEMPTS, downloaded: done, total });
+            }
+        };
+        let stalled = async {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                if last_chunk.lock().unwrap().elapsed() > UPDATE_STALL {
+                    return;
+                }
+            }
+        };
+        let _ = app.emit("update-progress", UpdateProgress { attempt, attempts: UPDATE_ATTEMPTS, downloaded: 0, total: None });
+        tokio::select! {
+            result = update.download(on_chunk, || {}) => match result {
+                Ok(bytes) => return Ok(bytes),
+                Err(e @ (tauri_plugin_updater::Error::Reqwest(_) | tauri_plugin_updater::Error::Network(_))) => {
+                    last_error = e.to_string();
+                }
+                Err(e) => return Err(e.to_string()),
+            },
+            _ = stalled => last_error = format!("nothing arrived for {} seconds", UPDATE_STALL.as_secs()),
+        }
+        eprintln!("update download attempt {attempt} failed: {last_error}");
+    }
+    Err(format!("the download failed {UPDATE_ATTEMPTS} times (last: {last_error}). Check your connection and try again."))
 }
 
 /// Hides the app from the Dock and the app switcher and shows the menu-bar icon, so the
