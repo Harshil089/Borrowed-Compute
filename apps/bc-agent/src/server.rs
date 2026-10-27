@@ -4,6 +4,10 @@ use anyhow::{bail, Context, Result};
 use bc_net::{recv_msg, send_msg};
 use bc_proto::wire::{AgentMsg, ClientMsg, PROTOCOL_VERSION};
 use iroh::endpoint::{Connection, RecvStream, SendStream};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+use iroh::EndpointId;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::events::{AgentEvent, EventSender, JobEnd};
@@ -13,6 +17,76 @@ use crate::services::{Attached, Services, StopError};
 
 /// Largest project archive accepted in Phase one, before chunked sync exists.
 pub const MAX_ARCHIVE: u64 = 2 << 30;
+/// Runs (not services) one device may have going at once.
+pub const MAX_JOBS_PER_DEVICE: usize = 4;
+/// Services one device may keep running at once; each also keeps the Mac awake.
+pub const MAX_SERVICES_PER_DEVICE: usize = 8;
+/// Upload bytes held in memory at once across all devices, before they are unpacked.
+pub const MAX_UPLOAD_BYTES: u64 = 4 << 30;
+
+/// What paired devices are using now, so one device cannot exhaust the Mac.
+#[derive(Debug, Clone, Default)]
+pub struct Limits(Arc<Mutex<LimitsInner>>);
+
+#[derive(Debug, Default)]
+struct LimitsInner {
+    jobs: HashMap<EndpointId, usize>,
+    upload_bytes: u64,
+}
+
+/// A job's share of [`Limits`], given back when dropped.
+pub struct Slot {
+    limits: Limits,
+    peer: EndpointId,
+    counts_as_job: bool,
+    upload_bytes: u64,
+}
+
+impl Limits {
+    fn claim(&self, peer: EndpointId, upload_bytes: u64, service: bool, services: &Services) -> Result<Slot, String> {
+        if service && services.list(Some(peer)).len() >= MAX_SERVICES_PER_DEVICE {
+            return Err(format!(
+                "this device already keeps {MAX_SERVICES_PER_DEVICE} services running on the Mac; stop one first"
+            ));
+        }
+        let mut inner = self.0.lock().unwrap();
+        let jobs = inner.jobs.get(&peer).copied().unwrap_or(0);
+        if !service && jobs >= MAX_JOBS_PER_DEVICE {
+            return Err(format!("this device already has {MAX_JOBS_PER_DEVICE} runs going on the Mac; wait for one to finish"));
+        }
+        if inner.upload_bytes + upload_bytes > MAX_UPLOAD_BYTES {
+            return Err("the Mac is receiving too many large projects at once; try again in a moment".into());
+        }
+        inner.upload_bytes += upload_bytes;
+        if !service {
+            *inner.jobs.entry(peer).or_default() += 1;
+        }
+        Ok(Slot { limits: self.clone(), peer, counts_as_job: !service, upload_bytes })
+    }
+}
+
+impl Slot {
+    /// The upload is unpacked or handed on, so its bytes no longer count.
+    fn uploaded(&mut self) {
+        let mut inner = self.limits.0.lock().unwrap();
+        inner.upload_bytes -= std::mem::take(&mut self.upload_bytes);
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.uploaded();
+        if self.counts_as_job {
+            let mut inner = self.limits.0.lock().unwrap();
+            if let Some(n) = inner.jobs.get_mut(&self.peer) {
+                *n -= 1;
+                if *n == 0 {
+                    inner.jobs.remove(&self.peer);
+                }
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
@@ -24,11 +98,19 @@ pub struct AgentConfig {
     /// The built-in cloud's port on localhost, shared over [`bc_net::CLOUD_ALPN`] with any
     /// device (sign-in and pairing come before a device is paired). `None` shares nothing.
     pub cloud_port: Option<u16>,
+    pub limits: Limits,
 }
 
 impl AgentConfig {
     pub fn new(runner: RunnerConfig, paired: PairedDevices) -> Self {
-        AgentConfig { runner, paired, events: None, services: Services::default(), cloud_port: None }
+        AgentConfig {
+            runner,
+            paired,
+            events: None,
+            services: Services::default(),
+            cloud_port: None,
+            limits: Limits::default(),
+        }
     }
 
     fn emit(&self, event: AgentEvent) {
@@ -102,6 +184,10 @@ pub async fn serve_connection(config: &AgentConfig, conn: Connection) -> Result<
         send_msg(&mut send, &AgentMsg::Rejected { reason: reason.clone() }).await?;
         bail!(reason);
     }
+    let mut slot = match config.limits.claim(peer, req.archive_bytes, req.service, &config.services) {
+        Ok(slot) => slot,
+        Err(reason) => return reply_and_close(&conn, send, AgentMsg::Rejected { reason }).await,
+    };
     send_msg(&mut send, &AgentMsg::Accepted { job_id: req.job_id.clone() }).await?;
 
     let mut archive = Vec::with_capacity(req.archive_bytes as usize);
@@ -131,6 +217,7 @@ pub async fn serve_connection(config: &AgentConfig, conn: Connection) -> Result<
     if req.service {
         // The service, not this connection, owns the job from here, and reports its end.
         let attached = config.services.start(config.runner.clone(), req, archive, peer, config.events.clone());
+        drop(slot);
         return stream_service(config, &conn, send, recv, &job_id, attached).await;
     }
     // Reports how the job ended on every return path, including a lost connection.
@@ -151,6 +238,8 @@ pub async fn serve_connection(config: &AgentConfig, conn: Connection) -> Result<
         tokio::select! {
             msg = rx.recv() => match msg {
                 Some(msg) => {
+                    // The runner reports in only after unpacking, which frees the upload.
+                    slot.uploaded();
                     match &msg {
                         AgentMsg::Exited { code, timed_out, usage } => {
                             end.end = JobEnd::Exited { code: *code, timed_out: *timed_out, usage: *usage };
@@ -327,5 +416,28 @@ struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
 impl<T> Drop for AbortOnDrop<T> {
     fn drop(&mut self) {
         self.0.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn limits_runs_per_device_and_upload_bytes() {
+        let limits = Limits::default();
+        let services = Services::default();
+        let a = iroh::SecretKey::from_bytes(&[1; 32]).public();
+        let b = iroh::SecretKey::from_bytes(&[2; 32]).public();
+        let slots: Vec<Slot> = (0..MAX_JOBS_PER_DEVICE).map(|_| limits.claim(a, 10, false, &services).unwrap()).collect();
+        assert!(limits.claim(a, 10, false, &services).err().unwrap().contains("runs going"));
+        assert!(limits.claim(b, 10, false, &services).is_ok(), "another device is not affected");
+        drop(slots);
+        let mut big = limits.claim(a, MAX_UPLOAD_BYTES, false, &services).unwrap();
+        assert!(limits.claim(b, 1, false, &services).err().unwrap().contains("too many large projects"));
+        big.uploaded();
+        assert!(limits.claim(b, 1, false, &services).is_ok(), "unpacked bytes no longer count");
+        drop(big);
+        assert!(limits.0.lock().unwrap().jobs.is_empty());
     }
 }
