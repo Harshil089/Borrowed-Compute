@@ -16,7 +16,7 @@ mod logs;
 mod quit_guard;
 mod tailscale;
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -119,6 +119,8 @@ struct AppState {
     start_error: StdMutex<Option<String>>,
     sync: Mutex<Option<JoinHandle<()>>>,
     jobs: StdMutex<VecDeque<JobRecord>>,
+    /// Output of each running job, written to its job file when it ends.
+    output: StdMutex<HashMap<String, JobOutput>>,
     cloud_state: StdMutex<CloudState>,
     logs: Logs,
     /// Quitting only hides the app while this is on. Saved in `<home>/run-in-background`.
@@ -428,8 +430,12 @@ fn record(state: &AppState, event: &AgentEvent) {
                 job.end = Some(end.clone());
                 job.finished_ms = Some(now_ms());
                 state.logs.append_history(job);
-                state.logs.write_job_file(&job_file_name(job), &job_file_text(job));
+                let output = state.output.lock().unwrap().remove(job_id).unwrap_or_default();
+                state.logs.write_job_file(&job_file_name(job), &job_file_text(job, &output));
             }
+        }
+        AgentEvent::JobOutput { job_id, data } => {
+            state.output.lock().unwrap().entry(job_id.clone()).or_default().push(data);
         }
         AgentEvent::JobRejected { client, reason } => {
             let mut jobs = state.jobs.lock().unwrap();
@@ -445,7 +451,7 @@ fn record(state: &AppState, event: &AgentEvent) {
             jobs.truncate(MAX_JOBS);
             if let Some(job) = jobs.front() {
                 state.logs.append_history(job);
-                state.logs.write_job_file(&job_file_name(job), &job_file_text(job));
+                state.logs.write_job_file(&job_file_name(job), &job_file_text(job, &JobOutput::default()));
             }
         }
         AgentEvent::CloudSync { ok, error } => {
@@ -476,8 +482,27 @@ fn job_file_name(job: &JobRecord) -> String {
     format!("{}-{id}.log", timestamp(job.started_ms).replace(':', "-"))
 }
 
-/// The job's own log: what ran, for whom, how it ended and what it used. Never its output.
-fn job_file_text(job: &JobRecord) -> String {
+/// Output kept per job; a longer run keeps its last part.
+const MAX_JOB_OUTPUT: usize = 1 << 20;
+
+/// What a job printed, stdout and stderr together, in order.
+#[derive(Default)]
+struct JobOutput {
+    data: VecDeque<u8>,
+    dropped: usize,
+}
+
+impl JobOutput {
+    fn push(&mut self, data: &[u8]) {
+        self.data.extend(data);
+        let over = self.data.len().saturating_sub(MAX_JOB_OUTPUT);
+        self.data.drain(..over);
+        self.dropped += over;
+    }
+}
+
+/// The job's own log: what ran, for whom, how it ended, what it used and what it printed.
+fn job_file_text(job: &JobRecord, output: &JobOutput) -> String {
     let mut text = format!(
         "Job: {}\nClient device: {}\nStarted: {}\n",
         job.job_id.as_deref().unwrap_or("none (rejected before it ran)"),
@@ -512,6 +537,17 @@ fn job_file_text(job: &JobRecord) -> String {
             u.max_rss_bytes,
             ms(u.wall_ms),
         );
+    }
+    if !output.data.is_empty() {
+        text += "\nOutput:\n";
+        if output.dropped > 0 {
+            text += &format!("[first {} bytes left out]\n", output.dropped);
+        }
+        let (a, b) = output.data.as_slices();
+        text += &String::from_utf8_lossy(&[a, b].concat());
+        if !text.ends_with('\n') {
+            text.push('\n');
+        }
     }
     text
 }
@@ -634,6 +670,7 @@ fn main() {
             start_error: StdMutex::new(None),
             sync: Mutex::new(None),
             jobs: StdMutex::new(jobs),
+            output: StdMutex::new(HashMap::new()),
             cloud_state: StdMutex::new(CloudState::default()),
             logs,
             run_in_background: AtomicBool::new(run_in_background),
@@ -768,7 +805,10 @@ fn main() {
                             show_window(&handle);
                         }
                     }
-                    let _ = handle.emit("agent-event", &event);
+                    // Output goes to the job's file, not to the window.
+                    if !matches!(event, AgentEvent::JobOutput { .. }) {
+                        let _ = handle.emit("agent-event", &event);
+                    }
                 }
             });
 
@@ -837,10 +877,19 @@ mod tests {
             rejected: None,
         };
         assert_eq!(job_file_name(&job), "2026-10-25T12-39-18Z-18e1c-352c.log");
-        let text = job_file_text(&job);
+        let mut output = JobOutput::default();
+        output.push(b"is a palindrome\n");
+        let text = job_file_text(&job, &output);
         assert!(text.contains("Command: python3 palindrome_checker.py\n"), "{text}");
         assert!(text.contains("Result: exited with code 0\n"), "{text}");
         assert!(text.contains("CPU time: 23 ms user, 17 ms system\n"), "{text}");
         assert!(text.contains("Peak memory: 14729216 bytes\n"), "{text}");
+        assert!(text.ends_with("\nOutput:\nis a palindrome\n"), "{text}");
+
+        let mut long = JobOutput::default();
+        long.push(&vec![b'a'; MAX_JOB_OUTPUT]);
+        long.push(b"end");
+        assert_eq!(long.data.len(), MAX_JOB_OUTPUT);
+        assert!(job_file_text(&job, &long).contains("[first 3 bytes left out]\n"));
     }
 }

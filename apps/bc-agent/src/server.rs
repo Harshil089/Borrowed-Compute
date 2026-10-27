@@ -153,6 +153,9 @@ pub async fn serve_connection(config: &AgentConfig, conn: Connection) -> Result<
                             end.end = JobEnd::Exited { code: *code, timed_out: *timed_out, usage: *usage };
                         }
                         AgentMsg::Failed { reason } => end.end = JobEnd::Failed { reason: reason.clone() },
+                        AgentMsg::Output { data, .. } => {
+                            config.emit(AgentEvent::JobOutput { job_id: end.job_id.clone(), data: data.clone() })
+                        }
                         _ => {}
                     }
                     send_msg(&mut send, &msg).await.context("streaming to client")?

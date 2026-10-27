@@ -104,6 +104,11 @@ impl Services {
                             guard.end = JobEnd::Exited { code: *code, timed_out: *timed_out, usage: *usage };
                         }
                         AgentMsg::Failed { reason } => guard.end = JobEnd::Failed { reason: reason.clone() },
+                        AgentMsg::Output { data, .. } => {
+                            if let Some(events) = &guard.events {
+                                let _ = events.send(AgentEvent::JobOutput { job_id: guard.job_id.clone(), data: data.clone() });
+                            }
+                        }
                         _ => {}
                     }
                     guard.services.record(&guard.job_id, msg);
