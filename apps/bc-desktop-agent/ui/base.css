@@ -353,8 +353,8 @@ input[type="text"]:focus { outline: none; border-color: var(--carbon); box-shado
 
 /* Download progress, as for an update. */
 .meter { height: 6px; border-radius: 3px; background: var(--rule-2); overflow: hidden; margin-top: 8px; }
-.meter > span { display: block; height: 100%; width: 0; background: currentColor; transition: width 0.2s ease-out; }
-.meter.unknown > span { width: 30%; }
+.meter > span { display: block; height: 100%; background: currentColor; transform: scaleX(0); transform-origin: left; transition: transform 0.2s ease-out; }
+.meter.unknown > span { transform: scaleX(0.3); }
 
 .spinner {
   width: 13px; height: 13px; flex: none; border-radius: 50%;

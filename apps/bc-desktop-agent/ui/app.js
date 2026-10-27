@@ -467,13 +467,13 @@ function updateProgressText(p) {
   return `${text}… The app restarts when it is done.`;
 }
 
-function meterWidth(p) {
-  return p.total ? `${Math.min(100, (100 * p.downloaded) / p.total).toFixed(1)}%` : "";
+function meterScale(p) {
+  return p.total ? `scaleX(${Math.min(1, p.downloaded / p.total).toFixed(3)})` : "";
 }
 
 listen("update-progress", (event) => {
   const p = event.payload;
-  updateStatus(`${esc(updateProgressText(p))}<div class="meter${p.total ? "" : " unknown"}"><span style="width: ${meterWidth(p)}"></span></div>`);
+  updateStatus(`${esc(updateProgressText(p))}<div class="meter${p.total ? "" : " unknown"}"><span style="transform: ${meterScale(p)}"></span></div>`);
 });
 
 $("update-status").addEventListener("click", async (event) => {

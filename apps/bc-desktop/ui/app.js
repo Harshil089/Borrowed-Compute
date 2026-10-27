@@ -365,8 +365,8 @@ function updateProgressText(p) {
   return `${text}… The app restarts when it is done.`;
 }
 
-function meterWidth(p) {
-  return p.total ? `${Math.min(100, (100 * p.downloaded) / p.total).toFixed(1)}%` : "";
+function meterScale(p) {
+  return p.total ? `scaleX(${Math.min(1, p.downloaded / p.total).toFixed(3)})` : "";
 }
 
 listen("update-progress", (event) => {
@@ -376,7 +376,7 @@ listen("update-progress", (event) => {
   const meter = $("update-meter");
   meter.classList.remove("hidden");
   meter.classList.toggle("unknown", !p.total);
-  meter.firstElementChild.style.width = meterWidth(p);
+  meter.firstElementChild.style.transform = meterScale(p);
 });
 
 async function checkUpdate() {
