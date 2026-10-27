@@ -1,7 +1,7 @@
 //! Log files on the Mac, in the `logs` folder of the app's home: `agent.log` gets what the
 //! agent prints about itself (startup, cloud errors), and `jobs/` gets one file per job with
-//! its command, result and usage. Job output is never written: nothing from a job stays on
-//! the Mac. A separate history file brings the recent-jobs list back after a restart.
+//! its command, result, usage and output (the last 1 MB). A separate history file brings
+//! the recent-jobs list back after a restart.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};

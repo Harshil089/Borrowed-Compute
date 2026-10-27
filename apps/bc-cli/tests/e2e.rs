@@ -145,13 +145,17 @@ async fn agent_reports_job_events() {
     }
 
     s.paired.add(s.client.id()).unwrap();
-    let (exit, ..) = run(&s, &["sh", "-c", "exit 4"]).await;
+    let (exit, ..) = run(&s, &["sh", "-c", "echo hi; exit 4"]).await;
     assert_eq!(exit, Exit::Code(4));
     let AgentEvent::JobStarted { job_id, client: c, argv } = rx.recv().await.unwrap() else {
         panic!("expected JobStarted");
     };
     assert_eq!(c, client);
-    assert_eq!(argv, ["sh", "-c", "exit 4"]);
+    assert_eq!(argv, ["sh", "-c", "echo hi; exit 4"]);
+    match rx.recv().await.unwrap() {
+        AgentEvent::JobOutput { job_id: id, data } => assert_eq!((id, data), (job_id.clone(), b"hi\n".to_vec())),
+        other => panic!("expected JobOutput, got {other:?}"),
+    }
     // The finish event is sent when the connection handler returns, just after the client
     // sees the exit code.
     let finished = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap().unwrap();

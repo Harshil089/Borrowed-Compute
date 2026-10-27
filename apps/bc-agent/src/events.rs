@@ -11,6 +11,8 @@ pub type EventSender = mpsc::UnboundedSender<AgentEvent>;
 pub enum AgentEvent {
     JobStarted { job_id: String, client: String, argv: Vec<String> },
     JobFinished { job_id: String, end: JobEnd },
+    /// A piece of a job's stdout or stderr, as it is printed.
+    JobOutput { job_id: String, data: Vec<u8> },
     JobRejected { client: String, reason: String },
     /// Result of each cloud sync: heartbeat plus paired-list refresh.
     CloudSync { ok: bool, error: Option<String> },
