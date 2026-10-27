@@ -4,6 +4,11 @@ use anyhow::{bail, Context, Result};
 use bc_net::{recv_msg, send_msg};
 use bc_proto::wire::{AgentMsg, ClientMsg, PROTOCOL_VERSION};
 use iroh::endpoint::{Connection, RecvStream, SendStream};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use iroh::EndpointId;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::events::{AgentEvent, EventSender, JobEnd};
@@ -24,11 +29,49 @@ pub struct AgentConfig {
     /// The built-in cloud's port on localhost, shared over [`bc_net::CLOUD_ALPN`] with any
     /// device (sign-in and pairing come before a device is paired). `None` shares nothing.
     pub cloud_port: Option<u16>,
+    pub rejections: Rejections,
+}
+
+/// How often one unpaired device's attempts are reported. Anyone who knows this Mac's
+/// code can connect, so reporting every attempt would let them flood the job list and
+/// the log files.
+const REJECTION_QUIET: Duration = Duration::from_secs(10 * 60);
+/// Devices remembered at once; past this, new unpaired devices are refused unreported.
+const MAX_REJECTED_DEVICES: usize = 1000;
+
+/// When each unpaired device was last reported.
+#[derive(Debug, Clone, Default)]
+pub struct Rejections(Arc<Mutex<HashMap<EndpointId, Instant>>>);
+
+impl Rejections {
+    /// True for a device's first attempt, and again once it has been quiet for a while.
+    fn should_report(&self, peer: EndpointId) -> bool {
+        let mut seen = self.0.lock().unwrap();
+        let now = Instant::now();
+        if seen.get(&peer).is_some_and(|t| now.duration_since(*t) < REJECTION_QUIET) {
+            return false;
+        }
+        if seen.len() >= MAX_REJECTED_DEVICES {
+            seen.retain(|_, t| now.duration_since(*t) < REJECTION_QUIET);
+            if seen.len() >= MAX_REJECTED_DEVICES {
+                return false;
+            }
+        }
+        seen.insert(peer, now);
+        true
+    }
 }
 
 impl AgentConfig {
     pub fn new(runner: RunnerConfig, paired: PairedDevices) -> Self {
-        AgentConfig { runner, paired, events: None, services: Services::default(), cloud_port: None }
+        AgentConfig {
+            runner,
+            paired,
+            events: None,
+            services: Services::default(),
+            cloud_port: None,
+            rejections: Rejections::default(),
+        }
     }
 
     fn emit(&self, event: AgentEvent) {
@@ -57,11 +100,15 @@ pub async fn serve_connection(config: &AgentConfig, conn: Connection) -> Result<
     // Checked after the handshake so an unpaired device gets a clear message.
     if !config.paired.contains(&peer) {
         let reason = format!("device {peer} is not paired with this Mac");
-        config.emit(AgentEvent::JobRejected { client: peer.to_string(), reason: reason.clone() });
-        send_msg(&mut send, &AgentMsg::Rejected { reason: reason.clone() }).await?;
+        // The device always gets the answer; the Mac's job list and logs hear of it once
+        // in a while. Not an error, so the agent log stays quiet too.
+        if config.rejections.should_report(peer) {
+            config.emit(AgentEvent::JobRejected { client: peer.to_string(), reason: reason.clone() });
+        }
+        send_msg(&mut send, &AgentMsg::Rejected { reason }).await?;
         send.finish()?;
         conn.closed().await;
-        bail!(reason);
+        return Ok(());
     }
     let req = match first {
         ClientMsg::Submit(req) => req,
@@ -304,6 +351,23 @@ fn service_error(job_id: &str, e: StopError) -> String {
     match e {
         StopError::NotFound => format!("no service {job_id} is running on this Mac"),
         StopError::NotOwner => format!("service {job_id} was started by another device"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reports_an_unpaired_device_once_in_a_while() {
+        let rejections = Rejections::default();
+        let a = iroh::SecretKey::from_bytes(&[1; 32]).public();
+        let b = iroh::SecretKey::from_bytes(&[2; 32]).public();
+        assert!(rejections.should_report(a));
+        assert!(!rejections.should_report(a), "a second attempt right away stays quiet");
+        assert!(rejections.should_report(b), "another device is reported");
+        rejections.0.lock().unwrap().insert(a, Instant::now() - REJECTION_QUIET);
+        assert!(rejections.should_report(a), "reported again after a quiet spell");
     }
 }
 
