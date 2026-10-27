@@ -6,9 +6,12 @@
 //! - read and write: the job's workspace (project, caches, temporary files);
 //! - read: system folders, Homebrew, Xcode, and the user's toolchains (rustup, nvm,
 //!   pyenv and similar, plus every PATH folder inside the home folder);
-//! - network: outbound anywhere, since builds download dependencies; inbound only on
-//!   localhost and on Unix sockets inside the workspace, so test servers and tools that
-//!   talk to themselves work but nothing outside can connect in.
+//! - network: outbound TCP and UDP anywhere, since builds download dependencies, except
+//!   well-known services on this Mac's localhost (databases, Redis, Docker, Ollama, ssh);
+//!   inbound only on localhost; Unix sockets only inside the workspace (plus DNS), so the
+//!   owner's ssh agent and other local sockets are out of reach;
+//! - system services, except the clipboard, the keychain, LaunchServices (`open`) and
+//!   Apple Events, and preferences of the system and developer tools only.
 //!
 //! Everything else in the home folder (~/Documents, ~/.ssh, ~/.aws, ~/.cargo except its
 //! bin folder) is unreadable. Jobs still run as the owner's user: the separate `_bcjob`
@@ -26,6 +29,36 @@ const HOME_TOOLCHAINS: &[&str] = &[
     ".rustup", ".nvm", ".volta", ".bun", ".deno", ".pyenv", ".rbenv", ".sdkman", ".asdf",
     ".local/share/mise", ".local/share/uv/python", "go/bin", "Library/Python",
 ];
+
+/// Mach services jobs may not look up: pasteboard (clipboard), keychain, LaunchServices
+/// (`open`, whose apps run unsandboxed) and Apple Events.
+const DENIED_SERVICES: &[&str] = &[
+    "com.apple.pasteboard.1",
+    "com.apple.SecurityServer",
+    "com.apple.securityd",
+    "com.apple.secd",
+    "com.apple.security.agent",
+    "com.apple.coreservices.launchservicesd",
+    "com.apple.coreservices.quarantine-resolver",
+    "com.apple.coreservices.appleevents",
+    "com.apple.lsd.mapdb",
+    "com.apple.lsd.modifydb",
+    "com.apple.lsd.open",
+];
+
+/// Preference domains jobs may read: the global one, which every program reads, and the
+/// developer tools'.
+const PREFERENCE_DOMAINS: &[&str] = &[
+    "kCFPreferencesAnyApplication",
+    "com.apple.dt.Xcode",
+    "com.apple.dt.xcodebuild",
+    "com.apple.dt.SourceKit",
+];
+
+/// Ports on this Mac's localhost that jobs may not connect to: ssh, MySQL, PostgreSQL,
+/// Redis, Memcached, MongoDB, SQL Server, CouchDB, Elasticsearch, InfluxDB, Docker and
+/// Ollama.
+const DENIED_LOCAL_PORTS: &[u16] = &[22, 3306, 5432, 6379, 11211, 27017, 1433, 5984, 9200, 8086, 2375, 2376, 11434];
 
 /// System folders jobs may read.
 const SYSTEM_READ: &[&str] = &[
@@ -63,7 +96,21 @@ pub fn profile(workspace: &Path, home: Option<&Path>, path_env: Option<&OsStr>) 
     let mut sb = String::from("(version 1)\n(import \"bsd.sb\")\n");
     sb += "(allow process-fork process-exec)\n";
     sb += "(allow signal (target same-sandbox))\n";
-    sb += "(allow sysctl-read mach-lookup ipc-posix-shm ipc-posix-sem iokit-open user-preference-read)\n";
+    sb += "(allow sysctl-read mach-lookup ipc-posix-shm ipc-posix-sem iokit-open)\n";
+    // System services that would reach past the workspace: the clipboard, the keychain,
+    // opening apps (which run outside the sandbox) and Apple Events to other apps.
+    sb += "(deny mach-lookup";
+    for name in DENIED_SERVICES {
+        sb += &format!(" (global-name \"{name}\")");
+    }
+    sb += ")\n";
+    // Settings of the system and developer tools only, not every app's (they can hold
+    // account names and tokens).
+    sb += "(allow user-preference-read";
+    for domain in PREFERENCE_DOMAINS {
+        sb += &format!(" (preference-domain \"{domain}\")");
+    }
+    sb += ")\n";
     sb += "(allow file-read-metadata)\n";
     sb += "(allow file-read*";
     for dir in read.iter().map(|d| real(d)).filter(|d| d.exists()) {
@@ -75,7 +122,17 @@ pub fn profile(workspace: &Path, home: Option<&Path>, path_env: Option<&OsStr>) 
     sb += "(allow file-ioctl (regex #\"^/dev/tty\"))\n";
     // xcrun keeps a lookup cache in the system temp folder whatever TMPDIR says.
     sb += "(allow file-read* file-write* (regex #\"^/private/var/folders/[^/]+/[^/]+/T/xcrun_db\"))\n";
-    sb += "(allow network-outbound)\n";
+    // Outbound TCP and UDP anywhere, for downloads. Unix sockets only in the workspace
+    // (below) and DNS, so the owner's ssh agent and other local sockets stay out of reach.
+    sb += "(allow network-outbound (remote ip))\n";
+    sb += "(allow network-outbound (literal \"/private/var/run/mDNSResponder\"))\n";
+    // Well-known local services (databases, caches, Docker, model servers, ssh) that the
+    // owner may run without a password. A job's own servers on other ports still work.
+    sb += "(deny network-outbound";
+    for port in DENIED_LOCAL_PORTS {
+        sb += &format!(" (remote ip \"localhost:{port}\")");
+    }
+    sb += ")\n";
     sb += "(allow network-bind network-inbound (local ip \"localhost:*\"))\n";
     // Unix sockets inside the workspace (tsx and test runners talk to themselves this
     // way). Socket paths are matched as given, so allow both spellings of the path.
@@ -115,6 +172,18 @@ mod tests {
         assert!(!sb.contains(&format!("(subpath {})", quote(&home_real))), "the home folder itself is not readable");
         assert!(!sb.contains(&format!("(subpath {})", quote(&home_real.join(".cargo")))), "~/.cargo holds credentials");
         assert!(sb.contains(&format!("(allow file-read* file-write* (subpath {}))", quote(&real(ws.path())))));
+    }
+
+    #[test]
+    fn profile_shuts_out_clipboard_keychain_and_local_services() {
+        let ws = tempfile::tempdir().unwrap();
+        let sb = profile(ws.path(), None, None);
+        assert!(sb.contains("(global-name \"com.apple.pasteboard.1\")"));
+        assert!(sb.contains("(global-name \"com.apple.SecurityServer\")"));
+        assert!(sb.contains("(global-name \"com.apple.coreservices.launchservicesd\")"));
+        assert!(sb.contains("(remote ip \"localhost:5432\")"));
+        assert!(!sb.contains("(allow network-outbound)\n"), "no blanket outbound, which includes every Unix socket");
+        assert!(!sb.contains(" user-preference-read)"), "no blanket preference reading");
     }
 
     #[test]

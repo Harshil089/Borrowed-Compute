@@ -318,6 +318,7 @@ fn print_forward(event: bc_cli::forward::ForwardEvent) {
         ForwardEvent::Opened(f) if f.local == f.remote => eprintln!("bc: http://localhost:{} now reaches the service on the Mac", f.local),
         ForwardEvent::Opened(f) => eprintln!("bc: http://localhost:{} now reaches port {} on the Mac (port {} is taken here)", f.local, f.remote, f.remote),
         ForwardEvent::Closed { job_id } => eprintln!("bc: stopped forwarding {job_id}"),
+        ForwardEvent::Services(_) => {}
     }
 }
 

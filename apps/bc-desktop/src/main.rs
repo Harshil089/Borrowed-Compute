@@ -22,13 +22,13 @@ use bc_cli::flows::{
 use bc_cli::forward::{forward_services, ForwardEvent, Forwarded};
 use bc_cli::pack::pack;
 use bc_cli::route::RouteMemory;
-use bc_cli::run::{attach_service, list_services, run_on_mac, stop_service, Exit, RunOutcome};
+use bc_cli::run::{attach_service, run_on_mac, stop_service, Exit, RunOutcome};
 use bc_net::load_or_create_key;
 use bc_proto::cloud::{DeviceInfo, DeviceKind, PairingInfo, Provider, Providers};
 use bc_proto::wire::{JobUsage, ServiceInfo};
 use bc_proto::JobSpec;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_updater::UpdaterExt;
@@ -522,15 +522,6 @@ fn job_result(state: &AppState, outcome: &RunOutcome, log: &SharedLog, log_path:
 
 /// The services this PC started on `mac`.
 #[tauri::command]
-async fn services(state: State<'_, AppState>, mac: String) -> CmdResult<Vec<ServiceInfo>> {
-    let resolved = resolve_mac(&state.cloud(), &mac).await.map_err(err_chain)?;
-    let key = load_or_create_key(&key_path(&state.home)).map_err(err)?;
-    list_services(&key, mac_net(&state.cloud(), false).await, resolved.addr, &RouteMemory::at(&state.home))
-        .await
-        .map_err(err_chain)
-}
-
-#[tauri::command]
 async fn stop_job_service(state: State<'_, AppState>, mac: String, job_id: String) -> CmdResult<()> {
     let resolved = resolve_mac(&state.cloud(), &mac).await.map_err(err_chain)?;
     let key = load_or_create_key(&key_path(&state.home)).map_err(err)?;
@@ -546,8 +537,17 @@ struct ForwardView {
     local: u16,
 }
 
+/// The services a Mac runs for this PC, as the forwarding task last heard them.
+#[derive(Clone, Serialize)]
+struct ServicesView {
+    mac: String,
+    services: Vec<ServiceInfo>,
+}
+
 /// Starts forwarding `mac`'s services' ports to this PC's localhost, replacing forwarding
-/// to any other Mac. The window gets the open ports as `forwards` events.
+/// to any other Mac. The window gets the open ports as `forwards` events and the running
+/// services as `services` events; this task is the window's only source of either, so one
+/// endpoint polls the Mac instead of a new one per check.
 #[tauri::command]
 async fn start_forwarding(app: AppHandle, state: State<'_, AppState>, mac: String) -> CmdResult<()> {
     if state.forwarding.lock().unwrap().as_ref().is_some_and(|(m, _)| *m == mac) {
@@ -557,7 +557,7 @@ async fn start_forwarding(app: AppHandle, state: State<'_, AppState>, mac: Strin
     let resolved = resolve_mac(&state.cloud(), &mac).await.map_err(err_chain)?;
     let key = load_or_create_key(&key_path(&state.home)).map_err(err)?;
     let (stop_tx, stop_rx) = oneshot::channel();
-    *state.forwarding.lock().unwrap() = Some((mac, stop_tx));
+    *state.forwarding.lock().unwrap() = Some((mac.clone(), stop_tx));
     let memory = RouteMemory::at(&state.home);
     let net = mac_net(&state.cloud(), false).await;
     let forwards = state.forwards.clone();
@@ -572,6 +572,10 @@ async fn start_forwarding(app: AppHandle, state: State<'_, AppState>, mac: Strin
             match event {
                 ForwardEvent::Opened(f) => list.push(f),
                 ForwardEvent::Closed { job_id } => list.retain(|f| f.job_id != job_id),
+                ForwardEvent::Services(services) => {
+                    let _ = app.emit("services", ServicesView { mac: mac.clone(), services });
+                    return;
+                }
             }
             emit(&list);
         };
@@ -583,6 +587,12 @@ async fn start_forwarding(app: AppHandle, state: State<'_, AppState>, mac: Strin
         }
         forwards.lock().unwrap().clear();
         emit(&Vec::new());
+        // Ended by itself (not replaced or stopped): let the next start_forwarding begin again.
+        let state = app.state::<AppState>();
+        let mut forwarding = state.forwarding.lock().unwrap();
+        if forwarding.as_ref().is_some_and(|(m, stop)| *m == mac && stop.is_closed()) {
+            *forwarding = None;
+        }
     });
     Ok(())
 }
@@ -830,7 +840,6 @@ fn main() {
             project_info,
             run_job,
             cancel_job,
-            services,
             stop_job_service,
             attach_job_service,
             start_forwarding,
