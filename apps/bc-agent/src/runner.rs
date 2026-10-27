@@ -151,6 +151,8 @@ fn isolated_env(cache: &Path) -> Vec<(&'static str, std::ffi::OsString)> {
         ("MAVEN_OPTS", format!("-Dmaven.repo.local={}", cache.join("m2").display()).into()),
         ("NUGET_PACKAGES", dir("nuget")),
         ("DOTNET_CLI_HOME", dir("dotnet")),
+        // git fails outright when it cannot read ~/.gitconfig, which the sandbox hides.
+        ("GIT_CONFIG_GLOBAL", "/dev/null".into()),
     ];
     // rustup normally finds its toolchains through CARGO_HOME's sibling; moving CARGO_HOME
     // must not hide them, so name RUSTUP_HOME explicitly.
