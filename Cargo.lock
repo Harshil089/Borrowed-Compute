@@ -515,6 +515,7 @@ name = "bc-auth"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bc-net",
  "bc-proto",
  "bc-secrets",
  "hex",
@@ -600,7 +601,6 @@ dependencies = [
  "bc-net",
  "bc-proto",
  "humantime",
- "iroh-relay",
  "libc",
  "objc2",
  "serde",

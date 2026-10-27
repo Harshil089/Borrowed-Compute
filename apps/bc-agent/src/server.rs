@@ -21,11 +21,14 @@ pub struct AgentConfig {
     /// Job activity for a UI. `None` when nobody is watching.
     pub events: Option<EventSender>,
     pub services: Services,
+    /// The built-in cloud's port on localhost, shared over [`bc_net::CLOUD_ALPN`] with any
+    /// device (sign-in and pairing come before a device is paired). `None` shares nothing.
+    pub cloud_port: Option<u16>,
 }
 
 impl AgentConfig {
     pub fn new(runner: RunnerConfig, paired: PairedDevices) -> Self {
-        AgentConfig { runner, paired, events: None, services: Services::default() }
+        AgentConfig { runner, paired, events: None, services: Services::default(), cloud_port: None }
     }
 
     fn emit(&self, event: AgentEvent) {

@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 bc-proto.workspace = true
 bc-secrets.workspace = true
+bc-net.workspace = true
 iroh-base.workspace = true
 anyhow.workspace = true
 reqwest.workspace = true

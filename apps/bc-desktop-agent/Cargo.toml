@@ -10,7 +10,6 @@ publish.workspace = true
 tauri-build.workspace = true
 
 [dependencies]
-iroh-relay = { workspace = true, features = ["server"] }
 bc-agent.workspace = true
 bc-cloud.workspace = true
 bc-auth.workspace = true

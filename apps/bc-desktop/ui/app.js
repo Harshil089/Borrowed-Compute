@@ -131,12 +131,12 @@ function cloudMessage(box, ok, text) {
 
 async function testCloud(input, box) {
   const url = input.value.trim();
-  if (!url) { cloudMessage(box, false, "Enter your Mac's address first."); return null; }
+  if (!url) { cloudMessage(box, false, "Paste your Mac's code first."); return null; }
   box.className = "banner hidden";
   try {
     const normalized = await invoke("test_cloud_url", { url });
     input.value = normalized;
-    cloudMessage(box, true, "Connected. Your Mac answers at this address.");
+    cloudMessage(box, true, "Connected. Your Mac answers.");
     return normalized;
   } catch (e) {
     cloudMessage(box, false, `Could not reach it: ${e}`);
@@ -342,7 +342,7 @@ $("cloud-cancel").addEventListener("click", () => $("cloud-dialog").classList.ad
 $("cloud-save").addEventListener("click", async () => {
   const url = await testCloud($("cloud-input"), $("cloud-msg"));
   if (!url) return;
-  if (url !== status.cloud_url && !(await ask("Save this address and sign out? You will sign in again at the new address.", "Save and sign out"))) return;
+  if (url !== status.cloud_url && !(await ask("Save and sign out? You will sign in again on this Mac.", "Save and sign out"))) return;
   await invoke("set_cloud_url", { url }).catch((e) => cloudMessage($("cloud-msg"), false, String(e)));
   $("cloud-dialog").classList.add("hidden");
   devices = null;

@@ -12,8 +12,11 @@ use serde::{de::DeserializeOwned, Serialize};
 
 pub use iroh::{EndpointAddr, EndpointId, RelayMap};
 
-/// A relay map with one relay, such as the one the Mac app runs and shares through
-/// Tailscale. Devices that use it keep their connection metadata off public relays.
+pub mod cloud;
+pub use cloud::{cloud_proxy, serve_cloud, CLOUD_ALPN};
+
+/// A relay map with one relay, such as one deployed next to a hosted cloud. Devices that
+/// use it keep their connection metadata off iroh's public relays.
 pub fn relay_map(url: &str) -> Result<RelayMap> {
     let url: iroh::RelayUrl = url.parse().with_context(|| format!("relay address {url:?}"))?;
     Ok(RelayMap::from(url))
@@ -35,10 +38,16 @@ pub struct NetConfig {
     pub insecure_relay_tls: bool,
 }
 
-/// Binds an endpoint with this device's key, ready to dial and accept job connections.
+/// Binds an endpoint with this device's key, ready to dial and accept job connections and
+/// connections to the Mac's cloud.
 pub async fn bind(secret: SecretKey, config: NetConfig) -> Result<Endpoint> {
+    bind_with(secret, config, vec![JOB_ALPN.to_vec(), CLOUD_ALPN.to_vec()]).await
+}
+
+/// Binds an endpoint that accepts only the given protocols.
+pub(crate) async fn bind_with(secret: SecretKey, config: NetConfig, alpns: Vec<Vec<u8>>) -> Result<Endpoint> {
     // QUIC normally probes for bigger packets once a path works. Through stacked tunnels
-    // (a VPN plus Tailscale, say) a probe can succeed and later packets of that size
+    // (two VPNs, say) a probe can succeed and later packets of that size
     // vanish, which stalls an upload until the connection times out. Staying at QUIC's
     // 1200-byte minimum fits every tunnel and costs little throughput.
     let transport = QuicTransportConfig::builder()
@@ -47,7 +56,7 @@ pub async fn bind(secret: SecretKey, config: NetConfig) -> Result<Endpoint> {
         .build();
     let mut builder = Endpoint::builder(presets::N0)
         .secret_key(secret)
-        .alpns(vec![JOB_ALPN.to_vec()])
+        .alpns(alpns)
         .transport_config(transport);
     if let Some(relays) = config.relays {
         builder = builder.relay_mode(RelayMode::Custom(relays));

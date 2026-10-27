@@ -186,6 +186,7 @@ main { flex: 1; min-width: 0; padding: 18px 18px 28px; display: flex; flex-direc
   -webkit-user-select: text; user-select: text;
 }
 .address button { border: none; border-left: 1.5px solid var(--rule); border-radius: 0; display: inline-flex; align-items: center; }
+.route .address .code { overflow-wrap: anywhere; }
 .route .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .steps { margin: 0; padding-left: 20px; color: var(--ink-2); font-size: 13px; display: flex; flex-direction: column; gap: 4px; }
 .steps li::marker { font: 600 12px var(--cond); color: var(--red-ink); }

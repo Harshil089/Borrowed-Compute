@@ -30,16 +30,25 @@ pub fn cloud_url_for(home: &Path) -> String {
         .unwrap_or_else(|| DEFAULT_CLOUD_URL.to_string())
 }
 
-/// Checks and normalizes a cloud address typed by a person.
+/// Address form of a Mac code: the cloud hosted by the Mac with this endpoint ID, reached
+/// over iroh.
+const MAC_CODE_SCHEME: &str = "iroh://";
+
+/// Checks and normalizes a cloud address typed by a person: a Mac code (the Mac app shows
+/// it) or a web address.
 pub fn normalize_cloud_url(input: &str) -> Result<String> {
+    let code = input.trim().trim_start_matches(MAC_CODE_SCHEME).trim_end_matches('/');
+    if let Ok(id) = code.parse::<iroh_base::PublicKey>() {
+        return Ok(format!("{MAC_CODE_SCHEME}{id}"));
+    }
     let url = input.trim().trim_end_matches('/');
     let url = if url.contains("://") { url.to_string() } else { format!("https://{url}") };
-    let parsed = reqwest::Url::parse(&url).with_context(|| format!("{input:?} is not a web address"))?;
+    let parsed = reqwest::Url::parse(&url).with_context(|| format!("{input:?} is not a Mac code or a web address"))?;
     if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
         bail!("{input:?} must be an http or https address");
     }
     if parsed.path() != "/" || parsed.query().is_some() {
-        bail!("give only the address, without a path: for example https://my-mac.example.ts.net");
+        bail!("give only the address, without a path: for example https://cloud.example.com");
     }
     Ok(url)
 }
@@ -90,6 +99,15 @@ impl CloudClient {
         &self.base
     }
 
+    /// The web address requests go to. For a Mac code it is a local proxy to that Mac.
+    async fn http_base(&self) -> Result<String> {
+        let Some(code) = self.base.strip_prefix(MAC_CODE_SCHEME) else {
+            return Ok(self.base.clone());
+        };
+        let mac = code.parse().with_context(|| format!("{code:?} is not a Mac code"))?;
+        Ok(format!("http://{}", bc_net::cloud_proxy(mac).await?))
+    }
+
     /// Confirms a Borrowed Compute cloud answers at this address.
     pub async fn health(&self) -> Result<()> {
         #[derive(serde::Deserialize)]
@@ -109,7 +127,8 @@ impl CloudClient {
         path: &str,
         body: Option<&(impl Serialize + ?Sized)>,
     ) -> Result<T> {
-        let mut req = self.http.request(method, format!("{}{path}", self.base));
+        let base = self.http_base().await?;
+        let mut req = self.http.request(method, format!("{base}{path}"));
         if let Some(token) = &self.token {
             req = req.bearer_auth(token);
         }
@@ -331,6 +350,9 @@ mod tests {
         assert!(normalize_cloud_url("ftp://x").is_err());
         assert!(normalize_cloud_url("https://x/v1/health").is_err());
         assert!(normalize_cloud_url("not a url at all").is_err());
+        let code = SecretKey::from_bytes(&[7; 32]).public().to_string();
+        assert_eq!(normalize_cloud_url(&format!(" {code} ")).unwrap(), format!("iroh://{code}"));
+        assert_eq!(normalize_cloud_url(&format!("iroh://{code}")).unwrap(), format!("iroh://{code}"));
     }
 
     #[test]
