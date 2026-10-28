@@ -605,7 +605,10 @@ async function approvePairing(id) {
 
 // ---- Guests ----
 
-const WINDOWS_APP = "https://github.com/Harshil089/Borrowed-Compute-releases/releases/latest/download/BorrowedCompute-setup.exe";
+// The product site. Its domain is not final yet: change it here and every invite follows.
+const SITE_URL = "https://borrowed-compute.vercel.app";
+const RELEASES = "https://github.com/Harshil089/Borrowed-Compute-releases/releases/latest/download";
+const WINDOWS_APP = `${RELEASES}/BorrowedCompute-setup.exe`;
 
 function renderGuests() {
   const g = guestsView;
@@ -659,10 +662,11 @@ $("invite-form").addEventListener("submit", async (event) => {
     const invite = await invoke("create_invite", { name });
     const host = account?.device_name || "my Mac";
     // A message ready to paste into any chat or email; the invite itself is never shown again.
-    const message = `You're invited to run code on ${host} with Borrowed Compute.\n\n` +
-      `1. Install the app: ${WINDOWS_APP}\n` +
+    const message = `You're invited to run code on ${host} with Borrowed Compute (${SITE_URL}).\n\n` +
+      `1. Install the app: ${WINDOWS_APP}\n   (all downloads: ${SITE_URL}/download)\n` +
       `2. Open it, choose "Use a shared Mac" and paste this invite:\n${invite}\n\n` +
-      `It works once, within 7 days. Read me the code it shows so I can let you in.`;
+      `It works once, within 7 days. Read me the code it shows so I can let you in.\n` +
+      `How it works: ${SITE_URL}/how-it-works#guests`;
     $("invite-new").innerHTML = `
       <p>Send this to ${esc(name)} by chat or email. It is shown only now.</p>
       <div class="address"><span>${esc(message)}</span><button data-copy="${esc(message)}">${copyIcon}</button></div>`;
