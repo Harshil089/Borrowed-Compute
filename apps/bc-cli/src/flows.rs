@@ -39,9 +39,14 @@ pub struct ResolvedMac {
     pub offline_warning: Option<String>,
 }
 
-/// Finds the Mac's address through the cloud when signed in, else treats `target` as a
-/// device id and relies on public address lookup (development only).
-pub async fn resolve_mac(cloud: &CloudClient, target: &str) -> Result<ResolvedMac> {
+/// Finds the Mac: a Mac shared with this device by name or id (reached through iroh's
+/// discovery, no cloud involved), else through the cloud when signed in, else `target` as
+/// a device id with public address lookup (development only).
+pub async fn resolve_mac(cloud: &CloudClient, home: &Path, target: &str) -> Result<ResolvedMac> {
+    if let Some(shared) = crate::shared::find(home, target) {
+        let id: EndpointId = shared.id.parse()?;
+        return Ok(ResolvedMac { addr: id.into(), offline_warning: None });
+    }
     let raw_id = target.parse::<EndpointId>().ok();
     if cloud.token().is_some() {
         match cloud.find_device(target).await {

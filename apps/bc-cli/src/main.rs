@@ -48,6 +48,18 @@ enum Command {
     Id,
     /// Set the Mac that `bc run` uses by default (name or device id).
     Use { mac: String },
+    /// Join a Mac someone shared with you, using their invite. Needs no sign-in.
+    Join {
+        /// The invite, starting with bc-invite:
+        invite: String,
+        /// Name the Mac's owner sees for this device. Defaults to the computer name.
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// List the Macs shared with this device.
+    Shared,
+    /// Forget a shared Mac on this device.
+    Leave { mac: String },
     /// Run a job on the Mac, for example `bc run -- cargo test`.
     Run {
         /// Mac name or device id. Defaults to the one set with `bc use`.
@@ -178,6 +190,36 @@ async fn main() -> Result<()> {
             let key = load_or_create_key(&key_path)?;
             println!("{}", key.public());
         }
+        Command::Join { invite, name } => {
+            let key = load_or_create_key(&key_path)?;
+            let name = name.unwrap_or_else(default_device_name);
+            println!("Asking the Mac to let this device in…");
+            let mac = bc_cli::shared::join(&home, key, mac_net(&cloud, false).await, &invite, &name, |code| {
+                println!("Code: {code}\nRead this code to the Mac's owner; they type it into Borrowed Compute Agent.");
+                print!("Waiting for approval");
+                let _ = std::io::stdout().flush();
+            })
+            .await?;
+            if default_mac(&home).is_none() {
+                set_default_mac(&home, &mac.name)?;
+            }
+            println!("\nYou can now run jobs on {:?}: bc run --to {:?} -- <command>", mac.name, mac.name);
+        }
+        Command::Shared => {
+            let macs = bc_cli::shared::list(&home);
+            if macs.is_empty() {
+                println!("No shared Macs. Join one with `bc join <invite>`.");
+            }
+            for m in macs {
+                println!("{:<24} {}", m.name, m.id);
+            }
+        }
+        Command::Leave { mac } => {
+            if !bc_cli::shared::remove(&home, &mac)? {
+                bail!("no shared Mac called {mac:?}; see `bc shared`");
+            }
+            println!("Forgot {mac:?} on this device.");
+        }
         Command::Use { mac } => {
             set_default_mac(&home, &mac)?;
             println!("bc run will use {mac}");
@@ -305,7 +347,7 @@ async fn target_mac(home: &std::path::Path, cloud: &CloudClient, to: Option<Stri
         Some(mac) => mac,
         None => default_mac(home).context("no Mac chosen; pass --to <name> or run `bc use <name>`")?,
     };
-    let mac = resolve_mac(cloud, &target).await?;
+    let mac = resolve_mac(cloud, home, &target).await?;
     if let Some(warning) = &mac.offline_warning {
         eprintln!("bc: warning: {warning}");
     }

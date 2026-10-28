@@ -59,6 +59,22 @@ nothing from your project stays on the Mac once the job ends.
    when the codes match.
 7. Choose a project folder, pick or type a command, and press **Run**.
 
+### Share your Mac with someone
+
+People on other accounts can use your Mac only if you invite them; nobody can find it
+otherwise.
+
+1. On the Mac, under **Guests**, turn on **Share this Mac**, type the person's name and
+   click **Invite**. Copy the message it shows and send it to them by chat or email. The
+   invite works once, within 7 days.
+2. They install the PC app, choose **Use a shared Mac** and paste the invite. They need no
+   account. Their PC shows a code.
+3. They read you the code; type it into the request that appears on your Mac.
+
+Your Mac then appears in their list as a shared Mac. Turning sharing off, or removing them
+under Guests, stops their jobs and servers. From the command line, a guest joins with
+`bc join <invite>`.
+
 The PC finds the Mac by its code alone. It connects directly when the network allows and
 through a relay when it does not (a VPN, a strict Wi-Fi). Either way the connection is
 end-to-end encrypted.
@@ -83,6 +99,9 @@ untrusted:
   learns the Mac's code is refused at sign-in. Sign-ins in progress and cloud connections
   are capped, refused devices are logged at most every 10 minutes, and one paired device
   can run at most 4 jobs and 8 servers at once.
+- **Guests only by invite.** Each invite is single use, expires in 7 days and still needs
+  the code approved on the Mac. Only a hash of it is stored. Guests run in the same
+  sandbox, cannot reach the Mac's cloud, and only see their own servers.
 - **Encrypted transport.** Devices talk over iroh QUIC with their own keys. Relays forward
   traffic they cannot read. The cloud never sees job contents.
 - **Secrets.** Sign-in sessions and device keys live in the system keychain. GitHub and
@@ -101,6 +120,8 @@ bc cloud <mac code>        # where your Mac is
 bc login                   # --google for Google
 bc pair studio             # shows a code; approve it on the Mac
 bc use studio              # default Mac for bc run
+bc join <invite>           # use a Mac someone shared with you; no sign-in needed
+bc shared                  # Macs shared with this device; bc leave <name> forgets one
 
 bc run -- cargo test       # run a command; --timings, --relay-only
 bc run --service -- npm run dev   # keep a server running and forward its ports

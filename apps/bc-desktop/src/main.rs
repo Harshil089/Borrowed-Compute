@@ -74,6 +74,8 @@ struct Status {
     /// False while the address is still the built-in default, which only works when this
     /// computer is the Mac itself.
     cloud_url_set: bool,
+    /// Macs shared with this PC through invites; usable without signing in.
+    shared: Vec<bc_cli::shared::SharedMac>,
 }
 
 #[derive(Serialize)]
@@ -190,7 +192,31 @@ fn get_status(state: State<'_, AppState>) -> Status {
         default_mac: default_mac(&state.home),
         cloud_url: cloud_url_for(&state.home),
         cloud_url_set: cloud_url_for(&state.home) != DEFAULT_CLOUD_URL,
+        shared: bc_cli::shared::list(&state.home),
     }
+}
+
+/// Joins a Mac shared through an invite. Sends `join-code` with the code to read to the
+/// Mac's owner, then resolves once they approve it.
+#[tauri::command]
+async fn join_mac(app: AppHandle, state: State<'_, AppState>, invite: String) -> CmdResult<bc_cli::shared::SharedMac> {
+    let key = load_or_create_key(&key_path(&state.home)).map_err(err_chain)?;
+    let net = mac_net(&state.cloud(), false).await;
+    let name = bc_auth::default_device_name();
+    let mac = bc_cli::shared::join(&state.home, key, net, &invite, &name, |code| {
+        let _ = app.emit("join-code", code.to_string());
+    })
+    .await
+    .map_err(err_chain)?;
+    set_default_mac(&state.home, &mac.name).map_err(err_chain)?;
+    Ok(mac)
+}
+
+/// Forgets a shared Mac on this PC.
+#[tauri::command]
+fn leave_mac(state: State<'_, AppState>, mac: String) -> CmdResult<()> {
+    bc_cli::shared::remove(&state.home, &mac).map_err(err_chain)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -424,7 +450,7 @@ async fn run_job_inner(
 
     phase(app, format!("Finding {mac}…"));
     let cloud = state.cloud();
-    let resolved = resolve_mac(&cloud, mac).await?;
+    let resolved = resolve_mac(&cloud, &state.home, mac).await?;
     if let Some(warning) = &resolved.offline_warning {
         let _ = app.emit("job-output", OutputChunk { stream: "notice", text: format!("{warning}\n") });
     }
@@ -523,7 +549,7 @@ fn job_result(state: &AppState, outcome: &RunOutcome, log: &SharedLog, log_path:
 /// The services this PC started on `mac`.
 #[tauri::command]
 async fn stop_job_service(state: State<'_, AppState>, mac: String, job_id: String) -> CmdResult<()> {
-    let resolved = resolve_mac(&state.cloud(), &mac).await.map_err(err_chain)?;
+    let resolved = resolve_mac(&state.cloud(), &state.home, &mac).await.map_err(err_chain)?;
     let key = load_or_create_key(&key_path(&state.home)).map_err(err)?;
     stop_service(&key, mac_net(&state.cloud(), false).await, resolved.addr, &RouteMemory::at(&state.home), &job_id)
         .await
@@ -554,7 +580,7 @@ async fn start_forwarding(app: AppHandle, state: State<'_, AppState>, mac: Strin
         return Ok(());
     }
     stop_forwarding(app.clone(), state.clone());
-    let resolved = resolve_mac(&state.cloud(), &mac).await.map_err(err_chain)?;
+    let resolved = resolve_mac(&state.cloud(), &state.home, &mac).await.map_err(err_chain)?;
     let key = load_or_create_key(&key_path(&state.home)).map_err(err)?;
     let (stop_tx, stop_rx) = oneshot::channel();
     *state.forwarding.lock().unwrap() = Some((mac.clone(), stop_tx));
@@ -612,7 +638,7 @@ async fn attach_job_service(app: AppHandle, state: State<'_, AppState>, mac: Str
     let cancel = claim_job(&state)?;
     let result = async {
         phase(&app, format!("Attaching to {job_id}…"));
-        let resolved = resolve_mac(&state.cloud(), &mac).await?;
+        let resolved = resolve_mac(&state.cloud(), &state.home, &mac).await?;
         let key = load_or_create_key(&key_path(&state.home))?;
         let (log_path, log) = open_job_log(&state.home, &mac, "(attached)", std::slice::from_ref(&job_id))?;
         let mut stdout = EmitWriter::new(app.clone(), "stdout", log.clone());
@@ -852,7 +878,9 @@ fn main() {
             install_update,
             open_url,
             test_cloud_url,
-            set_cloud_url
+            set_cloud_url,
+            join_mac,
+            leave_mac
         ])
         .run(tauri::generate_context!())
         .expect("error while running Borrowed Compute");

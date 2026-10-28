@@ -102,10 +102,25 @@ function ago(secs) {
   return `seen ${Math.floor(secs / 86400)} days ago`;
 }
 
+// Signed out but with a Mac someone shared: the app works as a guest, without an account.
+let wantSignIn = false;
+
 async function loadStatus() {
   status = await invoke("get_status");
-  $("signin-view").classList.toggle("hidden", status.signed_in);
-  $("app-view").classList.toggle("hidden", !status.signed_in);
+  const guest = !status.signed_in && status.shared.length > 0 && !wantSignIn;
+  $("signin-view").classList.toggle("hidden", status.signed_in || guest);
+  $("app-view").classList.toggle("hidden", !status.signed_in && !guest);
+  $("signout").textContent = guest ? "Sign in" : "Sign out";
+  $("settings").classList.toggle("hidden", guest);
+  if (guest) {
+    selectedMac = selectedMac || status.default_mac;
+    myName = null;
+    $("account").textContent = "Guest";
+    devices = { me: status.device_id, devices: [], pairings: [] };
+    renderMacs();
+    loadServices();
+    return;
+  }
   if (!status.signed_in) {
     $("signin-cloud").value = status.cloud_url_set ? status.cloud_url : "";
     loadProviders();
@@ -145,6 +160,7 @@ async function testCloud(input, box) {
 }
 
 async function loadDevices() {
+  if (!status?.signed_in) { await loadStatus(); return; }
   try {
     devices = await invoke("list_devices");
     showError("");
@@ -155,13 +171,26 @@ async function loadDevices() {
 }
 
 function pairingFor(mac) {
+  // A shared Mac let this PC in when it joined; its owner can still remove it there.
+  if (mac.shared) return { status: "approved" };
   return devices?.pairings.find((p) => p.mac_id === mac.endpoint_id);
 }
 
+// Macs on this account, then Macs shared with this PC through invites. Whether a shared
+// Mac is online is unknown until a run tries it, so it is treated as reachable.
+function allMacs() {
+  const own = (devices?.devices || []).filter((d) => d.kind === "mac" && d.endpoint_id !== devices.me);
+  const ownIds = new Set(own.map((m) => m.endpoint_id));
+  const shared = (status?.shared || [])
+    .filter((s) => !ownIds.has(s.id))
+    .map((s) => ({ name: s.name, endpoint_id: s.id, kind: "mac", online: true, shared: true }));
+  return own.concat(shared);
+}
+
 function renderMacs() {
-  const macs = (devices?.devices || []).filter((d) => d.kind === "mac" && d.endpoint_id !== devices.me);
+  const macs = allMacs();
   if (!macs.length) {
-    $("macs").innerHTML = `<p class="empty-note">No Macs on this account yet. Install Borrowed Compute Agent on your Mac and sign in there with the same GitHub account.</p>`;
+    $("macs").innerHTML = `<p class="empty-note">No Macs on this account yet. Install Borrowed Compute Agent on your Mac and sign in there with the same GitHub account, or join one someone shared with you.</p>`;
     setRoute();
     return;
   }
@@ -172,8 +201,10 @@ function renderMacs() {
   $("macs").innerHTML = macs.map((m) => {
     const pairing = pairingFor(m);
     const paired = pairing?.status === "approved";
-    const state = m.online ? `<span class="pill ok">Online</span>` : `<span class="pill">Offline</span>`;
-    const action = paired
+    const state = m.shared ? `<span class="pill">Shared</span>` : m.online ? `<span class="pill ok">Online</span>` : `<span class="pill">Offline</span>`;
+    const action = m.shared
+      ? `<button data-leave="${esc(m.name)}">Leave</button>`
+      : paired
       ? `<span class="pill">Paired</span>`
       : `<button data-pair="${esc(m.name)}">${pairing ? "Show code" : "Pair"}</button>`;
     return `
@@ -181,7 +212,7 @@ function renderMacs() {
         <span class="mac-code">${esc(deviceCode(m.name))}</span>
         <span class="mac-meta">
           <span class="mac-name">${esc(m.name)}</span>
-          <span class="mac-seen">${m.online ? "Ready for runs" : esc(ago(m.last_seen_secs_ago))}</span>
+          <span class="mac-seen">${m.shared ? "Shared with you" : m.online ? "Ready for runs" : esc(ago(m.last_seen_secs_ago))}</span>
         </span>
         <span class="mac-foot">${state}${action}</span>
       </div>`;
@@ -191,7 +222,7 @@ function renderMacs() {
 }
 
 function updateRunButton() {
-  const mac = devices?.devices.find((d) => d.name === selectedMac);
+  const mac = allMacs().find((d) => d.name === selectedMac);
   const paired = mac && pairingFor(mac)?.status === "approved";
   $("run").disabled = running || !selectedMac || !$("folder").value.trim();
   $("run").textContent = selectedMac ? `Run on ${deviceCode(selectedMac)}` : "Run on Mac";
@@ -225,7 +256,7 @@ listen("services", (event) => {
 let servicesMac = null;
 
 function loadServices() {
-  const mac = devices?.devices.find((d) => d.name === selectedMac);
+  const mac = allMacs().find((d) => d.name === selectedMac);
   if (servicesMac !== selectedMac) { servicesMac = selectedMac; services = []; forwards = []; renderServices(); }
   // Only an unpaired or missing Mac stops forwarding. One that looks offline for a moment
   // (a slow relay, a VPN) keeps its ports; forwarding ends by itself when a service does.
@@ -440,6 +471,7 @@ async function updateOnStart() {
 }
 
 $("signout").addEventListener("click", async () => {
+  if (!status.signed_in) { wantSignIn = true; await loadStatus(); return; }
   if (!(await ask("Sign out of Borrowed Compute on this computer?", "Sign out", true))) return;
   await invoke("logout");
   devices = null;
@@ -450,9 +482,18 @@ $("signout").addEventListener("click", async () => {
 
 $("refresh").addEventListener("click", loadDevices);
 
-$("macs").addEventListener("click", (event) => {
+$("macs").addEventListener("click", async (event) => {
   const pair = event.target.closest("[data-pair]");
   if (pair) { startPairing(pair.dataset.pair); return; }
+  const leave = event.target.closest("[data-leave]");
+  if (leave) {
+    const name = leave.dataset.leave;
+    if (!(await ask(`Leave ${name}? This PC forgets it. To use it again you need a new invite from its owner.`, "Leave", true))) return;
+    await invoke("leave_mac", { mac: name }).catch((e) => showError(String(e)));
+    if (selectedMac === name) selectedMac = null;
+    await loadStatus();
+    return;
+  }
   const mac = event.target.closest("[data-mac]");
   if (mac) selectMac(mac.dataset.mac);
 });
@@ -494,6 +535,58 @@ $("pair-close").addEventListener("click", () => {
   $("pair-dialog").classList.add("hidden");
   loadDevices();
 });
+
+// ---- Joining a shared Mac ----
+
+let joining = false;
+
+function openJoin() {
+  $("join-input").value = "";
+  $("join-msg").className = "banner hidden";
+  $("join-stub").classList.add("hidden");
+  $("join-go").disabled = false;
+  $("join-dialog").classList.remove("hidden");
+  $("join-input").focus();
+}
+
+listen("join-code", (event) => {
+  $("join-code").textContent = event.payload;
+  $("join-msg").className = "banner hidden";
+  $("join-stub").classList.remove("hidden");
+  $("join-wait").classList.remove("hidden");
+});
+
+$("join-go").addEventListener("click", async () => {
+  const invite = $("join-input").value.trim();
+  if (!invite) { $("join-input").focus(); return; }
+  joining = true;
+  $("join-go").disabled = true;
+  $("join-msg").className = "banner";
+  $("join-msg").textContent = "Reaching the Mac…";
+  try {
+    const mac = await invoke("join_mac", { invite });
+    if (!joining) return;
+    $("join-wait").classList.add("hidden");
+    $("join-msg").className = "banner ok";
+    $("join-msg").textContent = `You're in. ${mac.name} is in your Macs; pick a folder and press Run.`;
+    selectedMac = mac.name;
+    wantSignIn = false;
+    await loadStatus();
+  } catch (e) {
+    if (!joining) return;
+    $("join-wait").classList.add("hidden");
+    $("join-msg").className = "banner bad";
+    $("join-msg").textContent = String(e);
+    $("join-go").disabled = false;
+  }
+});
+
+$("join-close").addEventListener("click", () => {
+  joining = false;
+  $("join-dialog").classList.add("hidden");
+});
+$("join-open").addEventListener("click", openJoin);
+$("signin-join").addEventListener("click", openJoin);
 
 // ---- Project and command ----
 

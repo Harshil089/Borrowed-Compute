@@ -242,3 +242,16 @@
   .pass-stub { border-left: 1.5px solid var(--rule); border-top: 1.5px dashed var(--copy-rule); border-radius: 0 0 var(--radius) var(--radius); }
 }
 .stub-code button.link { align-self: flex-start; }
+
+/* ---- Joining a shared Mac ---- */
+#join-input {
+  width: 100%; resize: vertical; min-height: 76px; padding: 10px 12px;
+  font: 500 12.5px/1.45 var(--mono); color: var(--ink); background: var(--paper);
+  border: 1.5px solid var(--rule); border-radius: 3px; word-break: break-all;
+}
+#join-input::placeholder { color: var(--ink-3); }
+#join-input:focus { outline: none; border-color: var(--carbon); box-shadow: 0 0 0 3px var(--copy); }
+.join-note { margin-top: 14px; font-size: 13px; }
+.join-result { padding-top: 0; }
+.join-result:has(.hidden) { display: none; }
+.rail-head #join-open { margin-left: auto; margin-right: 10px; font-size: 12px; }

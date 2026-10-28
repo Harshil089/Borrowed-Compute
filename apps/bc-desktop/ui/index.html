@@ -45,6 +45,7 @@
         <button id="signin-btn" class="primary wide">Sign in with GitHub</button>
         <button id="signin-google" class="wide hidden">Sign in with Google</button>
         <div id="signin-error" class="banner bad hidden"></div>
+        <p class="muted join-note">Someone shared their Mac with you? <button id="signin-join" class="link">Use a shared Mac</button></p>
       </section>
       <aside class="pass-stub">
         <div id="signin-code" class="stub-code hidden">
@@ -79,6 +80,7 @@
     <aside class="rail">
       <div class="rail-head">
         <h2 class="heading">Your Macs</h2>
+        <button id="join-open" class="link">Join shared</button>
         <button id="refresh" class="icon-btn" title="Refresh" aria-label="Refresh"><svg class="icon"><use href="#i-refresh"/></svg></button>
       </div>
       <div id="macs" class="macs"></div>
@@ -179,6 +181,30 @@
         <div id="pair-msg" class="banner hidden"></div>
         <div class="dialog-actions"><button id="pair-close">Close</button></div>
       </div>
+    </div>
+  </div>
+
+  <!-- Joining a Mac someone shared -->
+  <div id="join-dialog" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="join-title">
+    <div class="dialog coupon">
+      <div class="dialog-body">
+        <h1 id="join-title" class="dialog-title">Use a shared Mac</h1>
+        <p class="muted">Paste the invite its owner sent you. It starts with <span class="mono">bc-invite:</span> and works once. You don't need an account.</p>
+        <textarea id="join-input" rows="4" spellcheck="false" autocomplete="off" aria-label="Invite" placeholder="bc-invite:…"></textarea>
+        <div class="dialog-actions">
+          <button id="join-close">Close</button>
+          <button id="join-go" class="primary">Join</button>
+        </div>
+      </div>
+      <div id="join-stub" class="hidden">
+        <div class="perf"></div>
+        <div class="dialog-stub">
+          <span class="label">Read this code to the Mac's owner</span>
+          <div id="join-code" class="code big"></div>
+          <div id="join-wait" class="row"><span class="spinner"></span><span class="muted">Waiting for them to type it on the Mac…</span></div>
+        </div>
+      </div>
+      <div class="dialog-body join-result"><div id="join-msg" class="banner hidden"></div></div>
     </div>
   </div>
 
