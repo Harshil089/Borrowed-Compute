@@ -22,6 +22,10 @@ pub fn relay_map(url: &str) -> Result<RelayMap> {
     Ok(RelayMap::from(url))
 }
 
+/// ALPN for invite requests from devices on other accounts ([`bc_proto::guest`]). Kept
+/// apart from the job protocol so adding it changed nothing for existing devices.
+pub const GUEST_ALPN: &[u8] = b"borrowed-compute/guest/1";
+
 /// ALPN for the job protocol. The version suffix tracks [`wire::PROTOCOL_VERSION`].
 pub const JOB_ALPN: &[u8] = b"borrowed-compute/job/2";
 
@@ -38,10 +42,10 @@ pub struct NetConfig {
     pub insecure_relay_tls: bool,
 }
 
-/// Binds an endpoint with this device's key, ready to dial and accept job connections and
-/// connections to the Mac's cloud.
+/// Binds an endpoint with this device's key, ready to dial and accept job connections,
+/// connections to the Mac's cloud and invite requests.
 pub async fn bind(secret: SecretKey, config: NetConfig) -> Result<Endpoint> {
-    bind_with(secret, config, vec![JOB_ALPN.to_vec(), CLOUD_ALPN.to_vec()]).await
+    bind_with(secret, config, vec![JOB_ALPN.to_vec(), CLOUD_ALPN.to_vec(), GUEST_ALPN.to_vec()]).await
 }
 
 /// Binds an endpoint that accepts only the given protocols.

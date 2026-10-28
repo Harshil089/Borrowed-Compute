@@ -123,6 +123,27 @@
         </section>
 
         <section class="block">
+          <h2 class="heading">Guests</h2>
+          <div class="coupon settings">
+            <label class="setting">
+              <span class="setting-text">
+                <strong>Share this Mac</strong>
+                <span>People you invite run jobs here from their own PCs, without your account. Turning it off refuses them all and stops their servers.</span>
+              </span>
+              <span class="switch"><input id="sharing" type="checkbox"><span></span></span>
+            </label>
+            <div id="guests-body" class="guests-body hidden">
+              <form id="invite-form" class="invite-form">
+                <input id="invite-name" type="text" placeholder="Their name" maxlength="64" autocomplete="off" spellcheck="false" aria-label="Name for the invite">
+                <button id="invite-btn" type="submit" class="primary">Invite</button>
+              </form>
+              <div id="invite-new" class="route invite-new hidden"></div>
+              <div id="guests" class="manifest"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="block">
           <h2 class="heading">Station</h2>
           <div class="coupon settings">
             <label class="setting">

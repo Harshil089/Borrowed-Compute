@@ -47,6 +47,8 @@ let account = null;
 let pairings = [];
 let jobs = [];
 let services = [];
+// Sharing with people on other accounts: the switch, open invites, guests and requests.
+let guestsView = { sharing: false, invites: [], guests: [], requests: [] };
 let verificationUri = null;
 let signingIn = false;
 // Requests already on screen, so only new ones animate in.
@@ -201,7 +203,9 @@ function uptime(startedAt) {
 
 function clientName(id) {
   const p = pairings.find((p) => p.client_id === id);
-  return p ? p.client_name : `${id.slice(0, 10)}…`;
+  if (p) return p.client_name;
+  const g = guestsView.guests.find((g) => g.device === id);
+  return g ? `${g.name} (guest)` : `${id.slice(0, 10)}…`;
 }
 
 function renderStatus() {
@@ -245,13 +249,20 @@ function render() {
 
   renderConnect();
 
-  const pending = pairings.filter((p) => p.status === "pending");
+  // Guest requests share the pairing passes; their ids start with "g" to keep them apart.
+  const pending = pairings.filter((p) => p.status === "pending")
+    .map((p) => ({ ...p, about: `Asks to run jobs on this Mac. Type the code ${p.client_name} shows to approve it.` }))
+    .concat(guestsView.requests.map((r) => ({
+      id: `g${r.id}`,
+      client_name: r.device_name,
+      about: `${r.name}, invited as a guest, asks to run jobs on this Mac from ${r.device_name}. Type the code it shows to approve it.`,
+    })));
   $("requests-block").classList.toggle("hidden", !pending.length);
   const pendingHtml = pending.map((p) => `
     <div class="pass die-cut ${seenRequests.has(p.id) ? "" : "arrived"}" data-request="${p.id}">
       <div class="pass-main">
         <span class="pass-from">${esc(p.client_name)}</span>
-        <p>Asks to run jobs on this Mac. Type the code ${esc(p.client_name)} shows to approve it.</p>
+        <p>${esc(p.about)}</p>
       </div>
       <div class="pass-stub">
         <label class="label" for="code-${p.id}">Code on ${esc(p.client_name)}</label>
@@ -282,6 +293,7 @@ function render() {
         </div>`).join("")
     : `<div class="board-empty">No devices cleared yet. On your PC, choose this Mac and press Pair; the request appears here to approve.</div>`);
 
+  renderGuests();
   renderArrivals();
 
   $("services-block").classList.toggle("hidden", !services.length);
@@ -374,6 +386,7 @@ async function refresh() {
       pairings = await invoke("list_pairings");
       jobs = await invoke("recent_jobs");
       services = await invoke("list_services");
+      guestsView = await invoke("guests").catch(() => guestsView);
       showError(status.start_error ? `The agent could not start: ${status.start_error}` : "");
     }
   } catch (e) {
@@ -529,6 +542,22 @@ document.addEventListener("click", async (event) => {
   }
   const approve = event.target.closest("[data-approve]");
   const remove = event.target.closest("[data-unpair]");
+  const removeGuest = event.target.closest("[data-guest-remove]");
+  const dropInvite = event.target.closest("[data-invite-delete]");
+  if (removeGuest) {
+    if (!(await ask(`Remove ${removeGuest.dataset.name}? Their device can no longer send jobs, and their servers stop.`, "Remove", true))) return;
+    removeGuest.disabled = true;
+    await invoke("remove_guest", { device: removeGuest.dataset.guestRemove }).catch((e) => showError(String(e)));
+    await refresh();
+    return;
+  }
+  if (dropInvite) {
+    dropInvite.disabled = true;
+    await invoke("delete_invite", { id: dropInvite.dataset.inviteDelete }).catch((e) => showError(String(e)));
+    $("invite-new").classList.add("hidden");
+    await refresh();
+    return;
+  }
   const stop = event.target.closest("[data-stop]");
   if (stop) {
     if (!(await ask(`Stop ${stop.dataset.cmd}? Its process ends and its workspace is deleted.`, "Stop", true))) return;
@@ -562,7 +591,8 @@ async function approvePairing(id) {
   button.disabled = true;
   msg.textContent = "";
   try {
-    await invoke("approve", { id: Number(id), code });
+    if (String(id).startsWith("g")) await invoke("approve_guest", { id: Number(id.slice(1)), code });
+    else await invoke("approve", { id: Number(id), code });
     await refresh();
   } catch (e) {
     msg.textContent = String(e).replace(/ \(400 Bad Request\)$/, "");
@@ -572,6 +602,79 @@ async function approvePairing(id) {
     if (/cancelled/.test(String(e))) setTimeout(refresh, 2500);
   }
 }
+
+// ---- Guests ----
+
+const WINDOWS_APP = "https://github.com/Harshil089/Borrowed-Compute-releases/releases/latest/download/BorrowedCompute-setup.exe";
+
+function renderGuests() {
+  const g = guestsView;
+  if (document.activeElement !== $("sharing")) $("sharing").checked = g.sharing;
+  $("guests-body").classList.toggle("hidden", !g.sharing);
+  const day = (secs) => new Date(secs * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  setHtml("guests",
+    g.guests.map((x) => `
+      <div class="cleared">
+        <span class="cleared-code">${esc(deviceCode(x.name))}</span>
+        <span class="cleared-meta">
+          <span class="cleared-name">${esc(x.name)}</span>
+          <span class="cleared-id">${esc(x.device_name)} · guest since ${day(x.added)}</span>
+        </span>
+        <button class="danger" data-guest-remove="${esc(x.device)}" data-name="${esc(x.name)}">Remove</button>
+      </div>`).join("") +
+    g.invites.map((i) => `
+      <div class="cleared invited">
+        <span class="cleared-code">${esc(deviceCode(i.name))}</span>
+        <span class="cleared-meta">
+          <span class="cleared-name">${esc(i.name)}</span>
+          <span class="cleared-id">Invited · not used yet · expires ${day(i.expires)}</span>
+        </span>
+        <button data-invite-delete="${esc(i.id)}">Delete</button>
+      </div>`).join(""));
+}
+
+$("sharing").addEventListener("change", async (event) => {
+  const on = event.target.checked;
+  if (!on && guestsView.guests.length &&
+      !(await ask("Stop sharing this Mac? Guests can no longer send jobs, and their servers stop. They stay on the list for when you turn it on again.", "Stop sharing", true))) {
+    event.target.checked = true;
+    return;
+  }
+  try {
+    await invoke("set_sharing", { on });
+  } catch (e) {
+    event.target.checked = !on;
+    showError(String(e));
+  }
+  if (!on) $("invite-new").classList.add("hidden");
+  await refresh();
+});
+
+$("invite-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const name = $("invite-name").value.trim();
+  if (!name) { $("invite-name").focus(); return; }
+  $("invite-btn").disabled = true;
+  try {
+    const invite = await invoke("create_invite", { name });
+    const host = account?.device_name || "my Mac";
+    // A message ready to paste into any chat or email; the invite itself is never shown again.
+    const message = `You're invited to run code on ${host} with Borrowed Compute.\n\n` +
+      `1. Install the app: ${WINDOWS_APP}\n` +
+      `2. Open it, choose "Use a shared Mac" and paste this invite:\n${invite}\n\n` +
+      `It works once, within 7 days. Read me the code it shows so I can let you in.`;
+    $("invite-new").innerHTML = `
+      <p>Send this to ${esc(name)} by chat or email. It is shown only now.</p>
+      <div class="address"><span>${esc(message)}</span><button data-copy="${esc(message)}">${copyIcon}</button></div>`;
+    $("invite-new").classList.remove("hidden");
+    $("invite-name").value = "";
+  } catch (e) {
+    showError(String(e));
+  } finally {
+    $("invite-btn").disabled = false;
+  }
+  await refresh();
+});
 
 document.addEventListener("keydown", (event) => {
   const input = event.target.closest?.("[data-code-for]");

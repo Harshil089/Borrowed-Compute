@@ -22,7 +22,7 @@ fn archive(files: &[(&str, &str)]) -> Vec<u8> {
 
 async fn job(name: &str, argv: &[&str], files: &[(&str, &str)]) {
     let root = tempfile::tempdir().unwrap();
-    let config = RunnerConfig { work_root: root.path().into(), default_timeout: Duration::from_secs(600) };
+    let config = RunnerConfig { work_root: root.path().into(), default_timeout: Duration::from_secs(600), denied_ports: Vec::new() };
     let req = JobRequest {
         job_id: name.into(),
         argv: argv.iter().map(|s| s.to_string()).collect(),

@@ -103,6 +103,8 @@ pub struct AgentConfig {
     /// Cloud connections served at once; any device may open them.
     pub cloud_slots: std::sync::Arc<tokio::sync::Semaphore>,
     pub rejections: Rejections,
+    /// Devices on other accounts the owner approved, allowed while sharing is on.
+    pub guests: crate::guests::Guests,
 }
 
 /// How often one unpaired device's attempts are reported. Anyone who knows this Mac's
@@ -150,6 +152,7 @@ impl AgentConfig {
             limits: Limits::default(),
             cloud_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CLOUD_CONNECTIONS)),
             rejections: Rejections::default(),
+            guests: crate::guests::Guests::default(),
         }
     }
 
@@ -177,7 +180,7 @@ pub async fn serve_connection(config: &AgentConfig, conn: Connection) -> Result<
 
     let first = recv_msg::<ClientMsg>(&mut recv).await?;
     // Checked after the handshake so an unpaired device gets a clear message.
-    if !config.paired.contains(&peer) {
+    if !config.paired.contains(&peer) && !config.guests.allows(&peer) {
         let reason = format!("device {peer} is not paired with this Mac");
         // The device always gets the answer; the Mac's job list and logs hear of it once
         // in a while. Not an error, so the agent log stays quiet too.
@@ -423,6 +426,50 @@ async fn forward_stream(services: &Services, job_id: &str, mut send: SendStream,
     };
     let (up, down) = tokio::join!(upstream, downstream);
     up.and(down)?;
+    Ok(())
+}
+
+/// One invite request over [`bc_net::GUEST_ALPN`]: checks the invite, shows the guest a
+/// code and waits on the same stream until the owner approves, declines or the request
+/// expires. The guest leaving cancels the request.
+pub async fn serve_guest(config: &AgentConfig, conn: Connection) -> Result<()> {
+    use bc_proto::guest::{GuestMsg, GuestReply};
+    let peer = conn.remote_id();
+    let (mut send, mut recv) = conn.accept_bi().await?;
+    let GuestMsg::Request { token, device_name } = recv_msg::<GuestMsg>(&mut recv).await?;
+    let reply = if config.guests.is_guest(&peer) {
+        // Already approved, as when an invite is pasted twice: nothing to use up.
+        GuestReply::Approved
+    } else {
+        match config.guests.request(&token, peer, &device_name) {
+            Err(reason) => GuestReply::Rejected { reason },
+            Ok(pending) => {
+                config.emit(AgentEvent::GuestsChanged);
+                send_msg(&mut send, &GuestReply::Pending { code: pending.code.clone() }).await?;
+                let answer = tokio::select! {
+                    answer = pending.answer => answer.unwrap_or_else(|_| Err("the request was cancelled".into())),
+                    _ = conn.closed() => {
+                        config.guests.cancel(pending.id);
+                        config.emit(AgentEvent::GuestsChanged);
+                        return Ok(());
+                    }
+                    _ = tokio::time::sleep(crate::guests::REQUEST_LIFETIME) => {
+                        config.guests.cancel(pending.id);
+                        Err("nobody approved the request in time; ask for a new invite".into())
+                    }
+                };
+                config.emit(AgentEvent::GuestsChanged);
+                match answer {
+                    Ok(()) => GuestReply::Approved,
+                    Err(reason) => GuestReply::Rejected { reason },
+                }
+            }
+        }
+    };
+    send_msg(&mut send, &reply).await?;
+    send.finish()?;
+    // Give the reply time to arrive, but never wait on the guest for long.
+    let _ = tokio::time::timeout(Duration::from_secs(10), conn.closed()).await;
     Ok(())
 }
 

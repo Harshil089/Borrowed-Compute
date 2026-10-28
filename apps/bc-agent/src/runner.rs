@@ -24,6 +24,9 @@ pub struct RunnerConfig {
     pub work_root: PathBuf,
     /// Used when the job sets no timeout.
     pub default_timeout: Duration,
+    /// Localhost ports jobs may not connect to, beyond the sandbox's own list: the
+    /// built-in cloud's, when this Mac hosts it.
+    pub denied_ports: Vec<u16>,
 }
 
 impl Default for RunnerConfig {
@@ -31,6 +34,7 @@ impl Default for RunnerConfig {
         RunnerConfig {
             work_root: std::env::temp_dir().join("borrowed-compute"),
             default_timeout: Duration::from_secs(60 * 60),
+            denied_ports: Vec::new(),
         }
     }
 }
@@ -235,7 +239,7 @@ async fn execute(
         .unwrap_or_else(|| PathBuf::from(program));
     // The workspace holds both the project and the job's caches.
     let workspace = root.parent().unwrap_or(root);
-    let wrapper = crate::sandbox::wrapper(workspace, path.as_deref());
+    let wrapper = crate::sandbox::wrapper(workspace, path.as_deref(), &config.denied_ports);
     // Under the sandbox, sandbox-exec itself always starts, so check the program here to
     // keep a clear "not found" instead of a bare exit code.
     if wrapper.is_some() {
@@ -458,6 +462,7 @@ mod tests {
         let config = RunnerConfig {
             work_root: root.path().to_path_buf(),
             default_timeout: Duration::from_secs(30),
+            denied_ports: Vec::new(),
         };
         let (tx, mut rx) = mpsc::channel(64);
         let ws = run_job(&config, &req, archive, tx).await;
@@ -524,6 +529,7 @@ mod tests {
         let config = RunnerConfig {
             work_root: root.path().to_path_buf(),
             default_timeout: Duration::from_secs(30),
+            denied_ports: Vec::new(),
         };
         let req = request(&["sh", "-c", "sleep 4711 & sleep 4712"], None);
         let (tx, mut rx) = mpsc::channel(64);

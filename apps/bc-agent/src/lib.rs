@@ -3,6 +3,7 @@
 
 pub mod cloud_sync;
 pub mod events;
+pub mod guests;
 pub mod paired;
 pub mod runner;
 pub mod sandbox;

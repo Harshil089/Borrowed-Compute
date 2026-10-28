@@ -311,6 +311,48 @@ fn stop_service(state: State<'_, AppState>, job_id: String) -> CmdResult<()> {
     agent.services().stop(&job_id, None).map_err(|_| format!("{job_id} is no longer running"))
 }
 
+fn running_agent(state: &AppState) -> CmdResult<&Arc<Agent>> {
+    state.agent.get().ok_or_else(|| "the agent is not running".to_string())
+}
+
+#[tauri::command]
+fn guests(state: State<'_, AppState>) -> CmdResult<bc_agent::guests::GuestsView> {
+    Ok(running_agent(&state)?.guests())
+}
+
+#[tauri::command]
+fn set_sharing(state: State<'_, AppState>, on: bool) -> CmdResult<()> {
+    running_agent(&state)?.set_sharing(on);
+    log(format_args!("sharing turned {}", if on { "on" } else { "off" }));
+    Ok(())
+}
+
+/// The invite text, shown to the owner once to send to the person.
+#[tauri::command]
+fn create_invite(state: State<'_, AppState>, name: String) -> CmdResult<String> {
+    running_agent(&state)?.create_invite(&name)
+}
+
+#[tauri::command]
+fn delete_invite(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    running_agent(&state)?.delete_invite(&id);
+    Ok(())
+}
+
+#[tauri::command]
+fn approve_guest(state: State<'_, AppState>, id: u64, code: String) -> CmdResult<()> {
+    running_agent(&state)?.approve_guest(id, &code)?;
+    log(format_args!("approved a guest request"));
+    Ok(())
+}
+
+#[tauri::command]
+fn remove_guest(state: State<'_, AppState>, device: String) -> CmdResult<()> {
+    running_agent(&state)?.remove_guest(&device);
+    log(format_args!("removed guest {}", short(&device)));
+    Ok(())
+}
+
 #[tauri::command]
 fn recent_jobs(state: State<'_, AppState>) -> Vec<JobRecord> {
     state.jobs.lock().unwrap().iter().cloned().collect()
@@ -370,6 +412,7 @@ fn record(state: &AppState, event: &AgentEvent) {
                 state.logs.write_job_file(&job_file_name(job), &job_file_text(job, &JobOutput::default()));
             }
         }
+        AgentEvent::GuestsChanged => {}
         AgentEvent::CloudSync { ok, error } => {
             *state.cloud_state.lock().unwrap() = CloudState {
                 ok: Some(*ok),
@@ -673,7 +716,13 @@ fn main() {
             get_settings,
             set_run_in_background,
             check_update,
-            install_update
+            install_update,
+            guests,
+            set_sharing,
+            create_invite,
+            delete_invite,
+            approve_guest,
+            remove_guest
         ])
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {

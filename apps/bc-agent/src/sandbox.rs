@@ -68,7 +68,7 @@ const SYSTEM_READ: &[&str] = &[
 
 /// The sandbox-exec argv prefix for a job in `workspace`, or `None` when sandboxing is
 /// not available here (not macOS) or turned off.
-pub fn wrapper(workspace: &Path, path_env: Option<&OsStr>) -> Option<Vec<OsString>> {
+pub fn wrapper(workspace: &Path, path_env: Option<&OsStr>, denied_ports: &[u16]) -> Option<Vec<OsString>> {
     if !cfg!(target_os = "macos") || std::env::var_os("BC_NO_SANDBOX").is_some() {
         return None;
     }
@@ -76,12 +76,12 @@ pub fn wrapper(workspace: &Path, path_env: Option<&OsStr>) -> Option<Vec<OsStrin
         return None;
     }
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    Some(vec![SANDBOX_EXEC.into(), "-p".into(), profile(workspace, home.as_deref(), path_env).into()])
+    Some(vec![SANDBOX_EXEC.into(), "-p".into(), profile(workspace, home.as_deref(), path_env, denied_ports).into()])
 }
 
 /// The Seatbelt profile. Paths are resolved first: Seatbelt matches real paths, and on
 /// macOS /var and /tmp are links into /private.
-pub fn profile(workspace: &Path, home: Option<&Path>, path_env: Option<&OsStr>) -> String {
+pub fn profile(workspace: &Path, home: Option<&Path>, path_env: Option<&OsStr>, denied_ports: &[u16]) -> String {
     let mut read: Vec<PathBuf> = SYSTEM_READ.iter().map(PathBuf::from).collect();
     if let Some(home) = home {
         read.extend(HOME_TOOLCHAINS.iter().map(|d| home.join(d)));
@@ -129,7 +129,7 @@ pub fn profile(workspace: &Path, home: Option<&Path>, path_env: Option<&OsStr>) 
     // Well-known local services (databases, caches, Docker, model servers, ssh) that the
     // owner may run without a password. A job's own servers on other ports still work.
     sb += "(deny network-outbound";
-    for port in DENIED_LOCAL_PORTS {
+    for port in DENIED_LOCAL_PORTS.iter().chain(denied_ports) {
         sb += &format!(" (remote ip \"localhost:{port}\")");
     }
     sb += ")\n";
@@ -165,7 +165,7 @@ mod tests {
         std::fs::create_dir_all(home.path().join(".rustup")).unwrap();
         std::fs::create_dir_all(home.path().join(".cargo/bin")).unwrap();
         let path_env = std::env::join_paths([home.path().join(".cargo/bin"), "/usr/bin".into()]).unwrap();
-        let sb = profile(ws.path(), Some(home.path()), Some(&path_env));
+        let sb = profile(ws.path(), Some(home.path()), Some(&path_env), &[]);
         let home_real = real(home.path());
         assert!(sb.contains(&format!("(subpath {})", quote(&home_real.join(".rustup")))));
         assert!(sb.contains(&format!("(subpath {})", quote(&home_real.join(".cargo/bin")))));
@@ -177,11 +177,12 @@ mod tests {
     #[test]
     fn profile_shuts_out_clipboard_keychain_and_local_services() {
         let ws = tempfile::tempdir().unwrap();
-        let sb = profile(ws.path(), None, None);
+        let sb = profile(ws.path(), None, None, &[8080]);
         assert!(sb.contains("(global-name \"com.apple.pasteboard.1\")"));
         assert!(sb.contains("(global-name \"com.apple.SecurityServer\")"));
         assert!(sb.contains("(global-name \"com.apple.coreservices.launchservicesd\")"));
         assert!(sb.contains("(remote ip \"localhost:5432\")"));
+        assert!(sb.contains("(remote ip \"localhost:8080\")"), "the cloud's port when this Mac hosts it");
         assert!(!sb.contains("(allow network-outbound)\n"), "no blanket outbound, which includes every Unix socket");
         assert!(!sb.contains(" user-preference-read)"), "no blanket preference reading");
     }

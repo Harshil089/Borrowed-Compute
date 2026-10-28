@@ -10,9 +10,10 @@ use iroh::Endpoint;
 use tokio::task::JoinHandle;
 
 use crate::events::EventSender;
+use crate::guests::{Guests, GuestsView};
 use crate::paired::PairedDevices;
 use crate::runner::RunnerConfig;
-use crate::server::{serve_connection, AgentConfig};
+use crate::server::{serve_connection, serve_guest, AgentConfig};
 
 /// Files the agent keeps under its home directory.
 pub struct AgentPaths {
@@ -28,6 +29,9 @@ impl AgentPaths {
     }
     pub fn paired(&self) -> PairedDevices {
         PairedDevices::new(self.home.join("paired"))
+    }
+    pub fn guests(&self) -> Guests {
+        Guests::load(self.home.join("guests.json"))
     }
 }
 
@@ -50,12 +54,15 @@ impl Agent {
         endpoint.online().await;
         let mut config = AgentConfig::new(RunnerConfig::default(), paths.paired());
         config.events = events;
+        config.guests = paths.guests();
         Ok(Agent { endpoint, config })
     }
 
     /// Shares the built-in cloud on `127.0.0.1:port` with other devices over iroh.
     pub fn share_cloud(mut self, port: u16) -> Self {
         self.config.cloud_port = Some(port);
+        // Jobs, a guest's above all, have no business with the cloud's database API.
+        self.config.runner.denied_ports.push(port);
         self
     }
 
@@ -67,6 +74,52 @@ impl Agent {
     /// Running services, for the Mac app to show and stop.
     pub fn services(&self) -> &crate::services::Services {
         &self.config.services
+    }
+
+    pub fn guests(&self) -> GuestsView {
+        self.config.guests.view()
+    }
+
+    pub fn create_invite(&self, name: &str) -> Result<String, String> {
+        self.config.guests.create_invite(name, &self.code())
+    }
+
+    pub fn delete_invite(&self, id: &str) {
+        self.config.guests.delete_invite(id)
+    }
+
+    pub fn approve_guest(&self, id: u64, code: &str) -> Result<(), String> {
+        self.config.guests.approve(id, code)
+    }
+
+    pub fn deny_guest(&self, id: u64) {
+        self.config.guests.deny(id)
+    }
+
+    /// Turning sharing off also stops every guest's services, so nothing of theirs keeps
+    /// running. Their runs in progress finish or time out as usual.
+    pub fn set_sharing(&self, on: bool) {
+        self.config.guests.set_sharing(on);
+        if !on {
+            for guest in self.config.guests.view().guests {
+                self.stop_services_of(&guest.device);
+            }
+        }
+    }
+
+    /// Forgets a guest and stops their services.
+    pub fn remove_guest(&self, device: &str) -> bool {
+        let removed = self.config.guests.remove_guest(device);
+        self.stop_services_of(device);
+        removed
+    }
+
+    fn stop_services_of(&self, device: &str) {
+        for service in self.config.services.list(None) {
+            if service.owner == device {
+                let _ = self.config.services.stop(&service.job_id, None);
+            }
+        }
     }
 
     /// Accepts job and cloud connections until the endpoint closes.
@@ -86,6 +139,9 @@ impl Agent {
                         conn.set_max_concurrent_bi_streams(crate::server::MAX_CLOUD_STREAMS.into());
                         bc_net::serve_cloud(conn, port).await;
                         return Ok(());
+                    }
+                    if conn.alpn() == bc_net::GUEST_ALPN {
+                        return serve_guest(&config, conn).await;
                     }
                     serve_connection(&config, conn).await
                 }

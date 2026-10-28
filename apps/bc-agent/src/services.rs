@@ -315,7 +315,7 @@ mod tests {
     #[tokio::test]
     async fn service_outlives_timeout_keeps_backlog_and_stops_for_owner_only() {
         let root = tempfile::tempdir().unwrap();
-        let runner = RunnerConfig { work_root: root.path().into(), default_timeout: Duration::from_secs(1) };
+        let runner = RunnerConfig { work_root: root.path().into(), default_timeout: Duration::from_secs(1), denied_ports: Vec::new() };
         let services = Services::default();
         let owner = device(1);
         let req = request("svc", &["sh", "-c", "echo up; while true; do sleep 0.1; done"]);
@@ -342,7 +342,7 @@ mod tests {
     #[tokio::test]
     async fn finds_the_ports_a_service_listens_on() {
         let root = tempfile::tempdir().unwrap();
-        let runner = RunnerConfig { work_root: root.path().into(), default_timeout: Duration::from_secs(30) };
+        let runner = RunnerConfig { work_root: root.path().into(), default_timeout: Duration::from_secs(30), denied_ports: Vec::new() };
         let services = Services::default();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -363,7 +363,7 @@ mod tests {
     #[tokio::test]
     async fn service_that_exits_is_removed() {
         let root = tempfile::tempdir().unwrap();
-        let runner = RunnerConfig { work_root: root.path().into(), default_timeout: Duration::from_secs(30) };
+        let runner = RunnerConfig { work_root: root.path().into(), default_timeout: Duration::from_secs(30), denied_ports: Vec::new() };
         let services = Services::default();
         let mut attached = services.start(runner, request("quick", &["sh", "-c", "exit 3"]), empty_archive(), device(1), None);
         loop {
