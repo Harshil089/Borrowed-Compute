@@ -51,5 +51,13 @@
   "client-v0.2.13": [
     "Use a shared Mac: paste an invite someone sent you, read them the code, and run on their Mac. No account needed.",
     "bc join does the same from the command line."
+  ],
+  "agent-v0.2.17": [
+    "A new look: graphite and gold, matching the website, with dark as the default and a new app icon.",
+    "Plainer words throughout: Output, Recent runs, Paired devices, Done and Cancelled."
+  ],
+  "client-v0.2.14": [
+    "A new look: graphite and gold, matching the website, with dark as the default and a new app icon.",
+    "Plainer words throughout: Output, Recent runs, Paired devices, Done and Cancelled."
   ]
 }
