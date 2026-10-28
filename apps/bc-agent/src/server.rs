@@ -439,7 +439,7 @@ pub async fn serve_guest(config: &AgentConfig, conn: Connection) -> Result<()> {
     let GuestMsg::Request { token, device_name } = recv_msg::<GuestMsg>(&mut recv).await?;
     let reply = if config.guests.is_guest(&peer) {
         // Already approved, as when an invite is pasted twice: nothing to use up.
-        GuestReply::Approved
+        GuestReply::Approved { mac_name: bc_auth::default_device_name() }
     } else {
         match config.guests.request(&token, peer, &device_name) {
             Err(reason) => GuestReply::Rejected { reason },
@@ -460,7 +460,7 @@ pub async fn serve_guest(config: &AgentConfig, conn: Connection) -> Result<()> {
                 };
                 config.emit(AgentEvent::GuestsChanged);
                 match answer {
-                    Ok(()) => GuestReply::Approved,
+                    Ok(()) => GuestReply::Approved { mac_name: bc_auth::default_device_name() },
                     Err(reason) => GuestReply::Rejected { reason },
                 }
             }

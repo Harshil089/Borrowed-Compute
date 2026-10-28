@@ -56,7 +56,8 @@ pub enum GuestMsg {
 pub enum GuestReply {
     /// Show `code` to the guest, who reads it to the Mac's owner.
     Pending { code: String },
-    Approved,
+    /// `mac_name` is the Mac's computer name, for the guest's list of Macs.
+    Approved { mac_name: String },
     Rejected { reason: String },
 }
 
