@@ -1,0 +1,16 @@
+{
+  "agent-v0.2.15": ["Share this Mac with people on other accounts by invite: turn on Share this Mac, invite someone, and approve the code their PC shows.", "Jobs can no longer connect to the Mac's built-in sign-in service."],
+  "client-v0.2.12": ["Groundwork for using a Mac someone else shares with you."],
+  "agent-v0.2.14": ["The app now installs a newer release by itself when it starts."],
+  "client-v0.2.11": ["Updates install cleanly while the app is open, instead of stopping at \"Failed to kill Borrowed Compute\".", "The app now installs a newer release by itself when it starts, so an older installer always ends up on the latest version."],
+  "agent-v0.2.13": ["One paired device can run at most four jobs and keep eight servers at once, so no single device can tie up the Mac."],
+  "agent-v0.2.12": ["The Mac's built-in sign-in accepts only its owner's account.", "Sign-ins in progress and connections are capped to stop abuse."],
+  "agent-v0.2.11": ["Devices that are not paired are logged at most once every ten minutes, so they cannot flood the job list."],
+  "agent-v0.2.10": ["A stronger sandbox: jobs can no longer read the clipboard, the keychain or other apps' settings, or reach your ssh agent and local databases."],
+  "client-v0.2.10": ["Port forwarding stays steady over VPNs and relays, and servers no longer flicker in and out of the list."],
+  "agent-v0.2.9": ["Check for updates retries dropped downloads and shows a progress bar."],
+  "client-v0.2.9": ["Check for updates retries dropped downloads and shows a progress bar."],
+  "agent-v0.2.8": ["Your PC now finds the Mac by its code alone. No VPN or other software is needed."],
+  "client-v0.2.8": ["Connect to your Mac by pasting its code. No VPN or other software is needed."],
+  "agent-v0.2.7": ["Each job's output is kept in the Mac's job log too, not only on the PC."]
+}

@@ -54,25 +54,39 @@
     map.forEach((_, id) => { const s = document.getElementById(id); if (s) seen.observe(s); });
   }
 
-  // ---- Live versions on the download page, from the public releases feed ----
+  // ---- Releases: versions on the download page and the What's new timeline ----
+  // Served by /api/releases on this site, which reads the public feed server side.
   const versionSlots = $$("[data-version]");
-  if (versionSlots.length) {
-    fetch("https://api.github.com/repos/Harshil089/Borrowed-Compute-releases/releases?per_page=50")
-      .then((r) => (r.ok ? r.json() : []))
-      .then((list) => {
+  const timeline = $("#timeline");
+  if (versionSlots.length || timeline) {
+    const day = (d) => new Date(d).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+    const esc = (t) => t.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+    fetch("/api/releases")
+      .then((r) => r.json())
+      .then(({ releases = [] }) => {
         for (const slot of versionSlots) {
-          // The newest by version number, whatever order the feed lists them in.
-          const ver = (r) => r.tag_name.replace(/^.*-v/, "").split(".").map(Number);
-          const newer = (a, b) => { const x = ver(a), y = ver(b); for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] > y[i]; return false; };
-          const rel = list.filter((r) => r.tag_name.startsWith(`${slot.dataset.version}-v`) && !r.draft && !r.prerelease)
-            .reduce((best, r) => (!best || newer(r, best) ? r : best), null);
+          const rel = releases.find((r) => r.key === slot.dataset.version);
           if (!rel) continue;
-          slot.textContent = rel.tag_name.replace(/^.*-v/, "");
+          slot.textContent = rel.version;
           const when = slot.parentElement.querySelector("[data-released]");
-          if (when) when.textContent = new Date(rel.published_at).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+          if (when) when.textContent = day(rel.date);
         }
+        if (!timeline) return;
+        if (!releases.length) { timeline.innerHTML = `<li class="timeline-empty">Release history is unavailable right now. Try again in a minute.</li>`; return; }
+        timeline.innerHTML = releases.map((r, i) => `
+          <li class="rel" data-app="${r.key}">
+            <div class="rel-when"><span class="marking">${day(r.date)}</span></div>
+            <div class="rel-body pkg flat">
+              <div class="rel-head"><span class="chip-tag${i < 2 ? " on" : ""}">${r.app}</span><span class="fig">${esc(r.version)}</span></div>
+              <ul>${r.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>
+            </div>
+          </li>`).join("");
       })
-      .catch(() => {});
+      .catch(() => { if (timeline) timeline.innerHTML = `<li class="timeline-empty">Release history is unavailable right now. Try again in a minute.</li>`; });
+    $$("[data-filter]").forEach((btn) => btn.addEventListener("click", () => {
+      $$("[data-filter]").forEach((b) => { b.classList.toggle("on", b === btn); b.setAttribute("aria-pressed", String(b === btn)); });
+      $$(".rel").forEach((li) => { li.hidden = btn.dataset.filter !== "all" && li.dataset.app !== btn.dataset.filter; });
+    }));
   }
 
   // ---- The die ----
@@ -81,154 +95,161 @@
   }
   const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
 
-  // The die is rendered once as a photographic micrograph by die-worker.js and shared by
-  // every canvas on the page. Floorplan in die units (0 to 1), loosely after an Apple Silicon
-  // layout: memory PHYs along two edges, a performance and an efficiency cluster with their
-  // L2, the neural engine, the system cache, the GPU and the media blocks. Not to scale.
-  const GOLD = [217, 164, 65];
-  function plan() {
-    const b = [];
-    b.push({ m: "phy", f: 0.36, x: 0.06, y: 0.045, w: 0.88, h: 0.05 });
-    b.push({ m: "phy", f: 0.36, x: 0.06, y: 0.905, w: 0.88, h: 0.05 });
-    for (let i = 0; i < 4; i++) b.push({ m: "pcore", f: 0.02, core: i, x: 0.06 + (i % 2) * 0.148, y: 0.115 + Math.floor(i / 2) * 0.178, w: 0.14, h: 0.17 });
-    b.push({ m: "sram", f: 0.48, x: 0.06, y: 0.475, w: 0.288, h: 0.06 });
-    for (let i = 0; i < 4; i++) b.push({ m: "ecore", f: 0.12, core: 4 + i, x: 0.06 + i * 0.0735, y: 0.545, w: 0.066, h: 0.085 });
-    b.push({ m: "sram", f: 0.52, x: 0.06, y: 0.64, w: 0.288, h: 0.035 });
-    b.push({ m: "npu", f: 0.78, x: 0.06, y: 0.685, w: 0.288, h: 0.205 });
-    b.push({ m: "sram", f: 0.62, x: 0.36, y: 0.115, w: 0.13, h: 0.775 });
-    for (let i = 0; i < 16; i++) b.push({ m: "gpu", f: 0.24, x: 0.505 + (i % 4) * 0.1095, y: 0.115 + Math.floor(i / 4) * 0.122, w: 0.1, h: 0.113 });
-    b.push({ m: "logic", f: 0.4, x: 0.505, y: 0.605, w: 0.215, h: 0.285 });
-    b.push({ m: "logic", f: 0.9, x: 0.73, y: 0.605, w: 0.21, h: 0.285 });
-    return b;
-  }
-  const CALLOUTS = [
-    { text: "Performance cores", side: -1, x: 0.06, y: 0.2, w: 0.288, h: 0.27 },
-    { text: "Efficiency cores", side: -1, x: 0.06, y: 0.545, w: 0.288, h: 0.085 },
-    { text: "Neural Engine", side: -1, x: 0.06, y: 0.685, w: 0.288, h: 0.205 },
-    { text: "System cache", side: 1, x: 0.36, y: 0.115, w: 0.13, h: 0.3 },
-    { text: "GPU", side: 1, x: 0.505, y: 0.237, w: 0.43, h: 0.24 },
-    { text: "Media and display", side: 1, x: 0.505, y: 0.605, w: 0.435, h: 0.285 },
-  ];
-  const BLOCKS = plan();
+  // The die is vector art built here, so it stays sharp at any zoom. Floorplan in die units
+  // (0 to 1000), loosely after an Apple Silicon layout: memory PHYs along two edges, a
+  // performance and an efficiency cluster with their L2, the neural engine, the system
+  // cache, sixteen GPU cores and the media blocks. Cores of one kind are copies of one
+  // design, as on a real die. Illustrative, not to scale.
+  const NS = "http://www.w3.org/2000/svg";
+  const HUE = {
+    pcore: ["#8a4a98", "#4b2459"], ecore: ["#b8703f", "#6b3a1c"], l2: ["#4a9a86", "#245347"],
+    slc: ["#4580b4", "#203f62"], gpu: ["#c39a4c", "#6f5121"], npu: ["#6466bf", "#30337a"],
+    media: ["#8f9548", "#4f5325"], misc: ["#6d4590", "#382150"], phy: ["#348790", "#17444a"],
+  };
+  // Deterministic "random" so every load draws the same die.
+  function seq(seed) { let s = seed >>> 0; return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296); }
 
-  // One render for the whole page, at a size that stays sharp on a large retina screen.
-  let micrograph = null;
-  function getMicrograph() {
-    if (!micrograph) micrograph = new Promise((resolve) => {
-      const size = 1400;
-      const done = (px) => {
-        const c = document.createElement("canvas");
-        c.width = c.height = size;
-        c.getContext("2d").putImageData(new ImageData(new Uint8ClampedArray(px), size, size), 0, 0);
-        resolve(c);
+  function dieSVG(labels) {
+    const parts = [];
+    const r = (x, y, w, h, a = "") => parts.push(`<rect x="${+x.toFixed(2)}" y="${+y.toFixed(2)}" width="${+w.toFixed(2)}" height="${+h.toFixed(2)}" ${a}/>`);
+    // One functional unit: metallic gradient, its circuitry as a fine pattern, a crisp edge.
+    const unit = (x, y, w, h, hue, tex, tone = 0) => {
+      r(x, y, w, h, `fill="url(#g-${hue})"` + (tone ? ` opacity="${1 - tone}"` : ""));
+      r(x, y, w, h, `fill="url(#p-${tex})"`);
+      r(x + 0.5, y + 0.5, w - 1, h - 1, `fill="none" stroke="rgba(255,255,255,0.28)" stroke-width="0.9"`);
+    };
+    // A block split into the macros a placed design has, with routing gutters between.
+    const macros = (x, y, w, h, hue, seed, depth) => {
+      const rnd = seq(seed);
+      const split = (x, y, w, h, d) => {
+        if (d === 0 || w < 40 || h < 40) { unit(x, y, w, h, hue, rnd() < 0.28 ? "sram" : "logic", rnd() * 0.25); return; }
+        const g = 4, vert = w >= h, k = 0.32 + rnd() * 0.36;
+        if (vert) { const a = Math.round((w - g) * k); split(x, y, a, h, d - 1); split(x + a + g, y, w - a - g, h, d - 1); }
+        else { const a = Math.round((h - g) * k); split(x, y, w, a, d - 1); split(x, y + a + g, w, h - a - g, d - 1); }
       };
-      try {
-        const w = new Worker("/die-worker.js");
-        w.onmessage = (e) => { done(e.data.px); w.terminate(); };
-        w.postMessage({ size, blocks: BLOCKS });
-      } catch (_) { resolve(null); }
+      split(x, y, w, h, depth);
+    };
+    const pcore = (x, y) => {
+      unit(x, y, 36, 170, "l2", "sram");
+      unit(x + 40, y, 100, 38, "pcore", "logic");
+      for (let i = 0; i < 3; i++) for (let j = 0; j < 2; j++) unit(x + 40 + i * 34, y + 42 + j * 36, 32, 34, "pcore", "logic", 0.12 * ((i + j) % 2));
+      unit(x + 40, y + 118, 62, 52, "pcore", "logic", 0.2);
+      unit(x + 106, y + 118, 34, 52, "l2", "sram");
+    };
+    const ecore = (x, y) => {
+      unit(x, y, 66, 20, "l2", "sram");
+      unit(x, y + 24, 66, 34, "ecore", "logic");
+      unit(x, y + 62, 31, 23, "ecore", "logic", 0.2);
+      unit(x + 35, y + 62, 31, 23, "ecore", "logic", 0.1);
+    };
+    const gpu = (x, y) => {
+      for (let i = 0; i < 2; i++) for (let j = 0; j < 2; j++) unit(x + i * 52, y + j * 60, 48, 40, "gpu", "logic", 0.1 * j);
+      unit(x, y + 42, 100, 14, "l2", "sram");
+      unit(x, y + 102, 100, 11, "gpu", "sram", 0.25);
+    };
+
+    // Package around the die: substrate vias and straight traces from each pad.
+    parts.push(`<g class="pkg-art">`);
+    const pads = 30;
+    for (let k = 0; k < pads; k++) {
+      const t = (k + 0.5) / pads * 1000;
+      r(t - 0.6, -400, 1.2, 380, `fill="rgba(217,164,65,0.22)"`); r(t - 0.6, 1020, 1.2, 380, `fill="rgba(217,164,65,0.22)"`);
+      r(-400, t - 0.6, 380, 1.2, `fill="rgba(217,164,65,0.22)"`); r(1020, t - 0.6, 380, 1.2, `fill="rgba(217,164,65,0.22)"`);
+    }
+    parts.push(`</g>`);
+    // Die body, seal ring, pad ring.
+    r(8, 14, 1000, 1000, `fill="rgba(0,0,0,0.55)"`);
+    r(0, 0, 1000, 1000, `fill="#0d0f13"`);
+    r(0, 0, 1000, 1000, `fill="url(#p-fill)"`);
+    r(3, 3, 994, 994, `fill="none" stroke="#c99a45" stroke-width="2.5"`);
+    r(12, 12, 976, 976, `fill="none" stroke="rgba(201,154,69,0.4)" stroke-width="1.2"`);
+    for (let k = 0; k < pads; k++) {
+      const t = (k + 0.5) / pads * 1000;
+      for (const [x, y, w, h] of [[t - 9, 18, 18, 16], [t - 9, 966, 18, 16], [18, t - 9, 16, 18], [966, t - 9, 16, 18]]) {
+        r(x, y, w, h, `fill="url(#g-pad)"`);
+        r(x + 0.5, y + 0.5, w - 1, h - 1, `fill="none" stroke="rgba(255,255,255,0.35)" stroke-width="0.8"`);
+      }
+    }
+
+    // Memory PHYs top and bottom: repeated driver lanes.
+    for (const y of [46, 906]) for (let i = 0; i < 16; i++) unit(60 + i * 55.5, y, 51, 48, "phy", "phy");
+    // Performance cluster, its L2, efficiency cluster, its L2, neural engine.
+    for (let i = 0; i < 4; i++) parts.push(`<g data-core="${i}">`), pcore(60 + (i % 2) * 148, 112 + Math.floor(i / 2) * 178), parts.push(`</g>`);
+    unit(60, 470, 288, 60, "l2", "sram");
+    for (let i = 0; i < 4; i++) parts.push(`<g data-core="${4 + i}">`), ecore(60 + i * 74, 540), parts.push(`</g>`);
+    unit(60, 630, 288, 34, "l2", "sram");
+    for (let i = 0; i < 8; i++) for (let j = 0; j < 4; j++) unit(60 + i * 36.3, 672 + j * 56, 32.3, 52, "npu", j % 2 ? "sram" : "logic", 0.08 * ((i + j) % 2));
+    // System cache: banks of SRAM with a controller down the middle.
+    for (let j = 0; j < 8; j++) { unit(362, 112 + j * 98, 58, 94, "slc", "sram"); unit(428, 112 + j * 98, 58, 94, "slc", "sram", 0.1); }
+    unit(420, 112, 8, 782, "slc", "logic", 0.3);
+    // GPU: sixteen identical cores.
+    for (let i = 0; i < 16; i++) gpu(502 + (i % 4) * 110, 112 + Math.floor(i / 4) * 121);
+    // Media, display and the rest.
+    macros(502, 600, 214, 294, "media", 11, 3);
+    macros(724, 600, 216, 294, "misc", 29, 3);
+
+    // Light raking across the die.
+    r(0, 0, 1000, 1000, `fill="url(#g-sheen)" style="mix-blend-mode:screen"`);
+    // Load overlays for the eight cores, drawn above the sheen.
+    const cores = [];
+    for (let i = 0; i < 4; i++) cores.push([60 + (i % 2) * 148, 112 + Math.floor(i / 2) * 178, 140, 170]);
+    for (let i = 0; i < 4; i++) cores.push([60 + i * 74, 540, 66, 85]);
+    cores.forEach(([x, y, w, h], i) => {
+      parts.push(`<g class="hot" data-hot="${i}" opacity="0">`);
+      r(x, y, w, h, `fill="rgba(240,170,60,0.32)"`);
+      r(x + 1, y + 1, w - 2, h - 2, `fill="none" stroke="#f0c66b" stroke-width="2.2"`);
+      r(x + 6, y + h - 9, w - 12, 3, `fill="#f0c66b" class="bar" data-w="${w - 12}"`);
+      parts.push(`</g>`);
     });
-    return micrograph;
+
+    const callouts = labels ? [
+      ["Performance cores", -1, 204, 290], ["Efficiency cores", -1, 204, 582], ["Neural Engine", -1, 204, 780],
+      ["System cache", 1, 424, 300], ["GPU", 1, 720, 360], ["Media and display", 1, 720, 746],
+    ].map(([t, side, cx, cy]) => {
+      const ex = side < 0 ? -40 : 1040;
+      return `<g class="callout"><line x1="${cx}" y1="${cy}" x2="${ex}" y2="${cy}"/><circle cx="${cx}" cy="${cy}" r="6"/><text x="${ex + side * 14}" y="${cy}" text-anchor="${side < 0 ? "end" : "start"}" dominant-baseline="middle">${t}</text></g>`;
+    }).join("") : "";
+
+    const grad = (id, [a, b]) => `<linearGradient id="g-${id}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${a}"/><stop offset="1" stop-color="${b}"/></linearGradient>`;
+    // Circuit textures. SRAM: dense bit-line rows. Logic: standard-cell rows of fixed widths.
+    let logic = `<rect width="60" height="0.7" fill="rgba(255,255,255,0.22)"/>`;
+    const rl = seq(5);
+    for (let row = 0; row < 2; row++) for (let x = 0; x < 60;) {
+      const w = 2 + Math.floor(rl() * 6);
+      logic += `<rect x="${x}" y="${1.4 + row * 3}" width="${Math.max(1, w - 0.8)}" height="2.2" fill="rgba(255,255,255,${(0.06 + rl() * 0.16).toFixed(2)})"/>`;
+      x += w;
+    }
+    const defs = `<defs>
+      ${Object.entries(HUE).map(([k, v]) => grad(k, v)).join("")}
+      <linearGradient id="g-pad" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#e7e2d6"/><stop offset="1" stop-color="#8d8778"/></linearGradient>
+      <linearGradient id="g-sheen" x1="0" y1="0" x2="1" y2="1"><stop offset="0.25" stop-color="#fff" stop-opacity="0"/><stop offset="0.45" stop-color="#fff" stop-opacity="0.16"/><stop offset="0.62" stop-color="#fff" stop-opacity="0"/></linearGradient>
+      <pattern id="p-sram" width="6" height="2.4" patternUnits="userSpaceOnUse"><rect width="6" height="1" fill="rgba(255,255,255,0.2)"/><rect width="0.6" height="2.4" fill="rgba(0,0,0,0.18)"/></pattern>
+      <pattern id="p-logic" width="60" height="6.4" patternUnits="userSpaceOnUse">${logic}</pattern>
+      <pattern id="p-phy" width="8.5" height="48" patternUnits="userSpaceOnUse"><rect x="1" y="4" width="4" height="40" fill="rgba(255,255,255,0.14)"/><rect x="1" y="4" width="4" height="6" fill="rgba(255,255,255,0.3)"/></pattern>
+      <pattern id="p-fill" width="8" height="8" patternUnits="userSpaceOnUse"><rect x="2" y="2" width="3" height="3" fill="rgba(255,255,255,0.05)"/></pattern>
+    </defs>`;
+    const vb = labels ? "-430 -60 1860 1120" : "-80 -80 1160 1160";
+    return `<svg viewBox="${vb}" xmlns="${NS}" preserveAspectRatio="xMidYMid meet" class="die-art" role="presentation">${defs}${parts.join("")}${callouts}</svg>`;
   }
 
+  // Same interface the hero and proof sections drive: set() a load per core, frame() to apply.
   class Die {
-    constructor(canvas, { labels = true } = {}) {
-      this.canvas = canvas;
-      this.labels = labels;
+    constructor(host, { labels = true } = {}) {
+      this.canvas = host;
+      host.innerHTML = dieSVG(labels);
+      this.hot = $$(".hot", host).map((g) => ({ g, bar: $(".bar", g) }));
       this.heat = new Array(8).fill(0);
       this.target = new Array(8).fill(0);
-      this.img = null;
-      this.fade = 0;
-      getMicrograph().then((img) => { this.img = img; if (reduced) this.fade = 1; this.frame(reduced ? 0 : 16); });
-      this.resize();
-      new ResizeObserver(() => this.resize()).observe(canvas);
-    }
-    resize() {
-      const r = this.canvas.getBoundingClientRect();
-      if (!r.width) return;
-      this.dpr = Math.min(window.devicePixelRatio || 1, 2);
-      this.W = this.canvas.width = Math.round(r.width * this.dpr);
-      this.H = this.canvas.height = Math.round(r.height * this.dpr);
-      const room = this.labels && r.width > 560 ? 0.56 : 0.84;
-      const s = Math.round(Math.min(this.W * room, this.H * 0.84));
-      this.die = { x: Math.round((this.W - s) / 2), y: Math.round((this.H - s) / 2), s };
       this.frame();
-    }
-    box(b) {
-      const { die } = this;
-      const x = Math.round(die.x + b.x * die.s), y = Math.round(die.y + b.y * die.s);
-      return [x, y, Math.round(die.x + (b.x + b.w) * die.s) - x, Math.round(die.y + (b.y + b.h) * die.s) - y];
     }
     set(load) { this.target = load.slice(0, 8); }
     frame(dt = 16) {
-      if (!this.die) return;
-      const g = this.canvas.getContext("2d");
-      const { W, H, die, dpr } = this;
-      const u = Math.max(1, Math.round(dpr));
-      g.setTransform(1, 0, 0, 1, 0, 0);
-      g.clearRect(0, 0, W, H);
-
-      // Package substrate, and straight traces from each pad out to the package edge.
-      g.fillStyle = "rgba(236,233,226,0.06)";
-      const pitch = Math.round(16 * dpr);
-      for (let x = pitch / 2; x < W; x += pitch) for (let y = pitch / 2; y < H; y += pitch) g.fillRect(Math.round(x), Math.round(y), u, u);
-      g.fillStyle = "rgba(217,164,65,0.2)";
-      for (let k = 0; k < 34; k++) {
-        const t = Math.round(die.x + ((k + 0.5) / 34) * die.s), v = Math.round(die.y + ((k + 0.5) / 34) * die.s);
-        g.fillRect(t, 0, u, die.y); g.fillRect(t, die.y + die.s, u, H - die.y - die.s);
-        g.fillRect(0, v, die.x, u); g.fillRect(die.x + die.s, v, W - die.x - die.s, u);
-      }
-      // Shadow under the die, then the die.
-      g.fillStyle = "rgba(0,0,0,0.6)";
-      g.fillRect(die.x + 6 * u, die.y + 10 * u, die.s, die.s);
-      if (this.img) {
-        this.fade = Math.min(1, this.fade + dt / 500);
-        g.fillStyle = "#0c0d10"; g.fillRect(die.x, die.y, die.s, die.s);
-        g.globalAlpha = this.fade;
-        g.imageSmoothingEnabled = true; g.imageSmoothingQuality = "high";
-        g.drawImage(this.img, die.x, die.y, die.s, die.s);
-        g.globalAlpha = 1;
-      } else {
-        g.fillStyle = "#0c0d10"; g.fillRect(die.x, die.y, die.s, die.s);
-      }
-
-      // A working core warms to gold: a lit fill, a crisp outline and a load bar.
-      for (let i = 0; i < 8; i++) this.heat[i] += (this.target[i] - this.heat[i]) * Math.min(1, dt / 160);
-      for (const b of BLOCKS) {
-        if (b.core === undefined) continue;
-        const v = this.heat[b.core];
-        if (v < 0.02) continue;
-        const [x, y, w, h] = this.box(b);
-        g.globalCompositeOperation = "screen";
-        g.fillStyle = `rgba(217,150,50,${0.38 * v})`;
-        g.fillRect(x, y, w, h);
-        g.globalCompositeOperation = "source-over";
-        g.fillStyle = `rgba(240,198,107,${Math.min(1, 0.35 + v)})`;
-        g.fillRect(x, y, w, u); g.fillRect(x, y + h - u, w, u); g.fillRect(x, y, u, h); g.fillRect(x + w - u, y, u, h);
-        g.fillStyle = "rgba(240,198,107,0.95)";
-        g.fillRect(x + 3 * u, y + h - 5 * u, Math.round((w - 6 * u) * v), 2 * u);
-      }
-
-      // Callouts, like an annotated die shot in a keynote: a dot on the block, a hairline
-      // out past the die edge, and the name.
-      if (this.labels && W - die.s > 250 * dpr) {
-        const size = Math.round(11 * dpr);
-        g.font = `600 ${size}px Archivo, sans-serif`;
-        if ("letterSpacing" in g) g.letterSpacing = `${(0.6 * dpr).toFixed(1)}px`;
-        for (const c of CALLOUTS) {
-          const cx = Math.round(die.x + (c.x + c.w / 2) * die.s), cy = Math.round(die.y + (c.y + c.h / 2) * die.s);
-          const ex = c.side < 0 ? die.x - 14 * dpr : die.x + die.s + 14 * dpr;
-          g.fillStyle = "rgba(236,233,226,0.55)";
-          g.fillRect(Math.min(cx, ex), cy, Math.abs(ex - cx), u);
-          g.fillStyle = "#f0c66b";
-          g.beginPath(); g.arc(cx, cy + u / 2, 3 * dpr, 0, Math.PI * 2); g.fill();
-          g.fillStyle = "rgba(236,233,226,0.92)";
-          g.textBaseline = "middle";
-          g.textAlign = c.side < 0 ? "right" : "left";
-          g.fillText(c.text, ex + c.side * 8 * dpr, cy + u);
-        }
-        g.textAlign = "left";
-      }
+      this.hot.forEach(({ g, bar }, i) => {
+        this.heat[i] += (this.target[i] - this.heat[i]) * Math.min(1, dt / 160);
+        const v = this.heat[i];
+        g.setAttribute("opacity", Math.min(1, v * 1.4).toFixed(3));
+        bar.setAttribute("width", (bar.dataset.w * v).toFixed(1));
+      });
     }
   }
 
@@ -260,7 +281,7 @@
   const heroCanvas = $("#hero-die");
   const panel = $(".run-panel");
   if (heroCanvas && panel) {
-    const die = new Die(heroCanvas);
+    const die = new Die(heroCanvas, { labels: heroCanvas.clientWidth > 520 });
     const typed = $(".typed", panel);
     const phases = $$(".phase", panel);
     const clock = $("[data-clock]", panel);
@@ -315,7 +336,6 @@
         }
       });
     }
-    window.addEventListener("themechange", () => die.frame());
   }
 
   // ---- Steps: a gold wire drawn from the PC pad to the Mac die as the reader scrolls ----

@@ -22,7 +22,7 @@ nav: home
 
       <div class="die-stage reveal d1">
         <div class="die-frame">
-          <canvas id="hero-die" role="img" aria-label="Illustration of an Apple Silicon die whose cores light up as a job runs"></canvas>
+          <div id="hero-die" class="die-host" role="img" aria-label="Illustration of an Apple Silicon die, labelled, whose cores light up as a job runs"></div>
           <span class="die-caption marking">Illustration · not to scale</span>
         </div>
         <div class="run-panel pkg" data-state="typing" aria-live="off">
@@ -184,7 +184,7 @@ dist/assets/index-4f1a.js     143.21 kB
           </div>
           <p class="proof-note">Usage comes from the operating system's own accounting of the job and every process it started, never an estimate.</p>
         </div>
-        <div class="proof-die"><canvas id="proof-die" aria-hidden="true"></canvas></div>
+        <div class="proof-die"><div id="proof-die" class="die-host" aria-hidden="true"></div></div>
       </div>
     </div>
   </section>
@@ -226,12 +226,12 @@ dist/assets/index-4f1a.js     143.21 kB
         <p class="lede reveal d1">Free. Install one app on each machine and you're ten minutes from your first run.</p>
       </div>
       <div class="downloads">
-        <a class="pkg dl-tile reveal" href="https://github.com/Harshil089/Borrowed-Compute-releases/releases/latest/download/BorrowedCompute-setup.exe">
+        <a class="pkg dl-tile reveal" href="/download/windows">
           <span class="os"><svg class="icon" aria-hidden="true"><use href="#i-windows"/></svg></span>
           <span><b>Borrowed Compute for Windows</b><span>Windows 10 and 11 · 64-bit installer</span></span>
           <span class="go"><svg class="icon" aria-hidden="true"><use href="#i-down"/></svg></span>
         </a>
-        <a class="pkg dl-tile reveal d1" href="https://github.com/Harshil089/Borrowed-Compute-releases/releases/latest/download/BorrowedComputeAgent.dmg">
+        <a class="pkg dl-tile reveal d1" href="/download/mac">
           <span class="os"><svg class="icon" aria-hidden="true"><use href="#i-apple"/></svg></span>
           <span><b>Borrowed Compute Agent for Mac</b><span>Apple Silicon · disk image</span></span>
           <span class="go"><svg class="icon" aria-hidden="true"><use href="#i-down"/></svg></span>
