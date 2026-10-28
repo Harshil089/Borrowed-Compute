@@ -21,6 +21,12 @@ impl ApiError {
     pub fn conflict(msg: impl Into<String>) -> Self {
         ApiError(StatusCode::CONFLICT, msg.into())
     }
+    pub fn forbidden(msg: impl Into<String>) -> Self {
+        ApiError(StatusCode::FORBIDDEN, msg.into())
+    }
+    pub fn too_many(msg: impl Into<String>) -> Self {
+        ApiError(StatusCode::TOO_MANY_REQUESTS, msg.into())
+    }
 }
 
 impl IntoResponse for ApiError {

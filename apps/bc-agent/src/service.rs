@@ -77,9 +77,14 @@ impl Agent {
                 let result = async {
                     let conn = incoming.await?;
                     if conn.alpn() == bc_net::CLOUD_ALPN {
-                        if let Some(port) = config.cloud_port {
-                            bc_net::serve_cloud(conn, port).await;
-                        }
+                        // A busy cloud turns new connections away rather than queueing them.
+                        let (Some(port), Ok(_slot)) = (config.cloud_port, config.cloud_slots.clone().try_acquire_owned())
+                        else {
+                            conn.close(1u32.into(), b"busy");
+                            return Ok(());
+                        };
+                        conn.set_max_concurrent_bi_streams(crate::server::MAX_CLOUD_STREAMS.into());
+                        bc_net::serve_cloud(conn, port).await;
                         return Ok(());
                     }
                     serve_connection(&config, conn).await

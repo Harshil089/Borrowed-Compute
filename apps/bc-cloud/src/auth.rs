@@ -48,7 +48,24 @@ impl FromRequestParts<AppState> for Account {
 }
 
 /// Starts GitHub sign-in. The original route, kept for clients that predate Google.
+/// Sign-ins in progress at once. Each one asks GitHub or Google for a code with this
+/// cloud's client id, so an unbounded number would let anyone use up its rate limit.
+const MAX_PENDING_FLOWS: i64 = 20;
+
+/// Refuses a new sign-in while too many are in progress.
+async fn check_flow_room(state: &AppState) -> ApiResult<()> {
+    let (pending,): (i64,) = sqlx::query_as("select count(*) from device_flows where expires_at > $1")
+        .bind(now())
+        .fetch_one(&state.db)
+        .await?;
+    if pending >= MAX_PENDING_FLOWS {
+        return Err(ApiError::too_many("too many sign-ins in progress; try again in a few minutes"));
+    }
+    Ok(())
+}
+
 pub async fn start_device_flow(State(state): State<AppState>) -> ApiResult<Json<DeviceFlowStart>> {
+    check_flow_room(&state).await?;
     let code = state.github.start().await?;
     record_flow(&state, Provider::Github, code).await
 }
@@ -58,6 +75,7 @@ pub async fn start_google_flow(State(state): State<AppState>) -> ApiResult<Json<
         .google
         .as_ref()
         .ok_or_else(|| ApiError::not_found("Google sign-in is not set up on this cloud"))?;
+    check_flow_room(&state).await?;
     let code = google.start().await?;
     record_flow(&state, Provider::Google, code).await
 }
@@ -219,6 +237,15 @@ async fn account_for(state: &AppState, id: &Identity, now: i64) -> ApiResult<(i6
         let account_id = match linked {
             Some(account_id) => account_id,
             None => {
+                if state.single_owner {
+                    let (accounts,): (i64,) =
+                        sqlx::query_as("select count(*) from accounts").fetch_one(&state.db).await?;
+                    if accounts > 0 {
+                        return Err(ApiError::forbidden(
+                            "this Mac's cloud belongs to another account; sign in with the account used on the Mac",
+                        ));
+                    }
+                }
                 let (account_id,): (i64,) =
                     sqlx::query_as("insert into accounts (login, created_at) values ($1, $2) returning id")
                         .bind(id.login.clone())

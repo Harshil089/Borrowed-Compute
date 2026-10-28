@@ -265,6 +265,7 @@ async fn host_cloud(data_dir: std::path::PathBuf) -> anyhow::Result<()> {
         github: Arc::new(bc_cloud::GitHub::new(client_id)),
         google: bc_cloud::google_client(DEFAULT_GOOGLE_CLIENT_ID, option_env!("BC_GOOGLE_CLIENT_SECRET")),
         relay_url: None,
+        single_owner: true,
     };
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", CLOUD_PORT))
         .await

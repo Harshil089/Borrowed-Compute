@@ -35,9 +35,12 @@ pub struct AppState {
     pub github: Arc<GitHub>,
     /// `None` when no Google client is configured; Google sign-in is then not offered.
     pub google: Option<Arc<Google>>,
-    /// The relay the Mac app runs and shares, advertised to devices; `None` for public
-    /// relays.
+    /// A relay advertised to devices; `None` for iroh's public relays.
     pub relay_url: Option<String>,
+    /// One account only: once an account exists, sign-ins that would create another are
+    /// refused. The Mac app's built-in cloud runs this way, because anyone who knows the
+    /// Mac's code can reach it.
+    pub single_owner: bool,
 }
 
 /// Google sign-in from `BC_GOOGLE_CLIENT_ID` and `BC_GOOGLE_CLIENT_SECRET`, falling back

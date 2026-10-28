@@ -6,6 +6,7 @@ use bc_proto::wire::{AgentMsg, ClientMsg, PROTOCOL_VERSION};
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use iroh::EndpointId;
 use tokio::sync::{broadcast, mpsc};
@@ -99,7 +100,44 @@ pub struct AgentConfig {
     /// device (sign-in and pairing come before a device is paired). `None` shares nothing.
     pub cloud_port: Option<u16>,
     pub limits: Limits,
+    /// Cloud connections served at once; any device may open them.
+    pub cloud_slots: std::sync::Arc<tokio::sync::Semaphore>,
+    pub rejections: Rejections,
 }
+
+/// How often one unpaired device's attempts are reported. Anyone who knows this Mac's
+/// code can connect, so reporting every attempt would let them flood the job list and
+/// the log files.
+const REJECTION_QUIET: Duration = Duration::from_secs(10 * 60);
+/// Devices remembered at once; past this, new unpaired devices are refused unreported.
+const MAX_REJECTED_DEVICES: usize = 1000;
+
+/// When each unpaired device was last reported.
+#[derive(Debug, Clone, Default)]
+pub struct Rejections(Arc<Mutex<HashMap<EndpointId, Instant>>>);
+
+impl Rejections {
+    /// True for a device's first attempt, and again once it has been quiet for a while.
+    fn should_report(&self, peer: EndpointId) -> bool {
+        let mut seen = self.0.lock().unwrap();
+        let now = Instant::now();
+        if seen.get(&peer).is_some_and(|t| now.duration_since(*t) < REJECTION_QUIET) {
+            return false;
+        }
+        if seen.len() >= MAX_REJECTED_DEVICES {
+            seen.retain(|_, t| now.duration_since(*t) < REJECTION_QUIET);
+            if seen.len() >= MAX_REJECTED_DEVICES {
+                return false;
+            }
+        }
+        seen.insert(peer, now);
+        true
+    }
+}
+
+/// Cloud connections served at once, and requests in flight on each.
+pub const MAX_CLOUD_CONNECTIONS: usize = 32;
+pub const MAX_CLOUD_STREAMS: u32 = 16;
 
 impl AgentConfig {
     pub fn new(runner: RunnerConfig, paired: PairedDevices) -> Self {
@@ -110,6 +148,8 @@ impl AgentConfig {
             services: Services::default(),
             cloud_port: None,
             limits: Limits::default(),
+            cloud_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CLOUD_CONNECTIONS)),
+            rejections: Rejections::default(),
         }
     }
 
@@ -139,11 +179,15 @@ pub async fn serve_connection(config: &AgentConfig, conn: Connection) -> Result<
     // Checked after the handshake so an unpaired device gets a clear message.
     if !config.paired.contains(&peer) {
         let reason = format!("device {peer} is not paired with this Mac");
-        config.emit(AgentEvent::JobRejected { client: peer.to_string(), reason: reason.clone() });
-        send_msg(&mut send, &AgentMsg::Rejected { reason: reason.clone() }).await?;
+        // The device always gets the answer; the Mac's job list and logs hear of it once
+        // in a while. Not an error, so the agent log stays quiet too.
+        if config.rejections.should_report(peer) {
+            config.emit(AgentEvent::JobRejected { client: peer.to_string(), reason: reason.clone() });
+        }
+        send_msg(&mut send, &AgentMsg::Rejected { reason }).await?;
         send.finish()?;
         conn.closed().await;
-        bail!(reason);
+        return Ok(());
     }
     let req = match first {
         ClientMsg::Submit(req) => req,
@@ -439,5 +483,17 @@ mod tests {
         assert!(limits.claim(b, 1, false, &services).is_ok(), "unpacked bytes no longer count");
         drop(big);
         assert!(limits.0.lock().unwrap().jobs.is_empty());
+    }
+
+    #[test]
+    fn reports_an_unpaired_device_once_in_a_while() {
+        let rejections = Rejections::default();
+        let a = iroh::SecretKey::from_bytes(&[1; 32]).public();
+        let b = iroh::SecretKey::from_bytes(&[2; 32]).public();
+        assert!(rejections.should_report(a));
+        assert!(!rejections.should_report(a), "a second attempt right away stays quiet");
+        assert!(rejections.should_report(b), "another device is reported");
+        rejections.0.lock().unwrap().insert(a, Instant::now() - REJECTION_QUIET);
+        assert!(rejections.should_report(a), "reported again after a quiet spell");
     }
 }

@@ -392,7 +392,13 @@ async fn forwards_a_service_port_to_localhost() {
     let forwarding = {
         let (key, net, mac, memory) = (client_key.clone(), net.clone(), agent.addr(), memory.clone());
         tokio::spawn(async move {
-            bc_cli::forward::forward_services(&key, net, mac, &memory, move |e| { let _ = tx.send(e); }, async {
+            // The service list after each poll is not what this test checks.
+            let on_event = move |e| {
+                if !matches!(e, bc_cli::forward::ForwardEvent::Services(_)) {
+                    let _ = tx.send(e);
+                }
+            };
+            bc_cli::forward::forward_services(&key, net, mac, &memory, on_event, async {
                 let _ = stop_rx.await;
             })
             .await
