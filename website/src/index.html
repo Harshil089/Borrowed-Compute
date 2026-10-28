@@ -20,25 +20,59 @@ nav: home
         </div>
       </div>
 
-      <div class="die-stage reveal d1">
-        <div class="die-frame">
-          <div id="hero-die" class="die-host" role="img" aria-label="Illustration of an Apple Silicon die, labelled, whose cores light up as a job runs"></div>
-          <span class="die-caption marking">Illustration · not to scale</span>
-        </div>
-        <div class="run-panel pkg" data-state="typing" aria-live="off">
-          <div class="run-cmd"><span class="prompt" aria-hidden="true">›</span><span class="typed">python3 heavy_benchmark.py</span></div>
-          <div class="run-phases">
-            <div class="phase"><span class="marking">Connect</span><b>direct</b></div>
-            <div class="phase"><span class="marking">Upload</span><b>sent</b></div>
-            <div class="phase"><span class="marking">Run</span><b data-clock>61.0 s</b></div>
-            <div class="phase"><span class="marking">Return</span><b>landed</b></div>
+      <div class="window-stage reveal d1">
+        <div class="app-window" data-state="typing" role="img" aria-label="The Borrowed Compute app on Windows running a Python benchmark on a paired Mac and showing what the Mac used">
+          <div class="win-title">
+            <span class="win-app"><svg aria-hidden="true"><use href="#mark"/></svg>Borrowed Compute</span>
+            <span class="win-controls" aria-hidden="true"><svg viewBox="0 0 46 38"><path d="M18 19h10"/></svg><svg viewBox="0 0 46 38"><rect x="18.5" y="14.5" width="9" height="9"/></svg><svg viewBox="0 0 46 38"><path d="M18 14l10 10M28 14L18 24"/></svg></span>
           </div>
-          <div class="run-out">
-            <div><span class="marking">CPU time</span><span class="fig" data-fig>324.5<small>s</small></span></div>
-            <div><span class="marking">Cores</span><span class="fig" data-fig>5.3</span></div>
-            <div><span class="marking">Memory</span><span class="fig" data-fig>618<small>MB</small></span></div>
+          <div class="win-body">
+            <aside class="win-rail" aria-hidden="true">
+              <span class="win-label">Your Macs</span>
+              <div class="win-mac on"><b>STU</b><span><em>studio</em><small><i class="dot ok"></i>Online · direct</small></span></div>
+              <div class="win-mac"><b>MBA</b><span><em>macbook-air</em><small><i class="dot"></i>Seen 2 h ago</small></span></div>
+              <span class="win-label">Still running</span>
+              <div class="win-svc"><span>npm run dev</span><small>localhost:5173</small></div>
+            </aside>
+            <div class="win-main">
+              <div class="win-run">
+                <div class="win-route">
+                  <div class="win-port"><span class="win-label">From</span><b>PC</b></div>
+                  <ol class="win-phases">
+                    <li data-phase="pack"><span>Pack</span></li>
+                    <li data-phase="upload"><span>Upload</span></li>
+                    <li data-phase="run"><span>Run</span></li>
+                    <li data-phase="return"><span>Return</span></li>
+                  </ol>
+                  <div class="win-port to"><span class="win-label">To</span><b>STU</b></div>
+                </div>
+                <div class="win-cells">
+                  <div><span class="win-label">Project folder</span><code>C:\Users\you\code\bench</code></div>
+                  <div><span class="win-label">Command</span><code class="typed">python3 heavy_benchmark.py</code></div>
+                </div>
+                <div class="win-foot"><span class="win-chip">Python</span><span class="win-hint">Keep running</span><span class="win-btn">Run on STU</span></div>
+              </div>
+              <div class="win-out">
+                <div class="win-out-head"><span>Output</span><span class="win-clock" data-clock>61.0 s</span></div>
+                <div class="win-out-body">
+<pre class="win-log" data-log></pre>
+                  <div class="win-result" data-result>
+                    <span class="win-label">Ran on studio</span>
+                    <b class="win-time">61.0<small>s</small></b>
+                    <span class="win-badge">Done · exit 0</span>
+                    <dl>
+                      <dt>CPU time</dt><dd>324.5<small>s</small></dd>
+                      <dt>Cores</dt><dd>5.3</dd>
+                      <dt>Memory</dt><dd>618<small>MB</small></dd>
+                      <dt>Path</dt><dd>direct</dd>
+                    </dl>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
+        <p class="window-note marking">A real run's numbers, replayed faster</p>
       </div>
     </div>
   </section>
@@ -184,7 +218,6 @@ dist/assets/index-4f1a.js     143.21 kB
           </div>
           <p class="proof-note">Usage comes from the operating system's own accounting of the job and every process it started, never an estimate.</p>
         </div>
-        <div class="proof-die"><div id="proof-die" class="die-host" aria-hidden="true"></div></div>
       </div>
     </div>
   </section>
@@ -192,7 +225,7 @@ dist/assets/index-4f1a.js     143.21 kB
   <section class="section" id="security" aria-labelledby="sealed-title">
     <div class="wrap">
       <div class="section-head split">
-        <h2 class="h2 reveal" id="sealed-title">Sealed like a chip package.</h2>
+        <h2 class="h2 reveal" id="sealed-title">Sealed off from the rest of your Mac.</h2>
         <p class="lede reveal d1">A job is your code plus every package it installs, so the Mac treats it as untrusted. Each one runs in a macOS sandbox, in a fresh workspace that is deleted when it ends.</p>
       </div>
       <div class="pkg sealed reveal">
