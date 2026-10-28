@@ -493,7 +493,12 @@ mod tests {
         assert!(rejections.should_report(a));
         assert!(!rejections.should_report(a), "a second attempt right away stays quiet");
         assert!(rejections.should_report(b), "another device is reported");
-        rejections.0.lock().unwrap().insert(a, Instant::now() - REJECTION_QUIET);
+        // A fresh Windows runner can be up for less than the quiet spell, and an Instant
+        // before boot does not exist there; forgetting the attempt is the same as aging it.
+        match Instant::now().checked_sub(REJECTION_QUIET) {
+            Some(then) => rejections.0.lock().unwrap().insert(a, then),
+            None => rejections.0.lock().unwrap().remove(&a),
+        };
         assert!(rejections.should_report(a), "reported again after a quiet spell");
     }
 }
