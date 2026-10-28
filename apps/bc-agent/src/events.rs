@@ -14,6 +14,8 @@ pub enum AgentEvent {
     /// A piece of a job's stdout or stderr, as it is printed.
     JobOutput { job_id: String, data: Vec<u8> },
     JobRejected { client: String, reason: String },
+    /// A guest request arrived or ended, so the guests list changed.
+    GuestsChanged,
     /// Result of each cloud sync: heartbeat plus paired-list refresh.
     CloudSync { ok: bool, error: Option<String> },
 }
