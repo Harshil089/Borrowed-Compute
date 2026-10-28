@@ -671,8 +671,11 @@ async fn install_update(app: AppHandle, state: State<'_, AppState>) -> CmdResult
     if state.job.lock().unwrap().is_some() {
         return Err("A job is running. Update when it finishes.".into());
     }
-    let update = app.updater().map_err(err)?.check().await.map_err(err)?;
-    let Some(update) = update else {
+    // On Windows install() starts the installer and exits the process at once. Closing the
+    // window and web view first lets the app go quickly, before the installer looks for it.
+    let cleanup = app.clone();
+    let updater = app.updater_builder().on_before_exit(move || cleanup.cleanup_before_exit()).build().map_err(err)?;
+    let Some(update) = updater.check().await.map_err(err)? else {
         return Err("Already up to date.".into());
     };
     let bytes = download_update(&app, &update).await?;

@@ -8,7 +8,10 @@ name: release
 #
 # The apps' Check for updates reads `agent.json` and `client.json` from the releases
 # repo's latest release, so every release carries both: the new one for the app it ships,
-# and the other app's current one, copied from the previous latest release.
+# and the other app's current one, copied from the previous latest release. Each release
+# also carries both installers, the other one copied from its own release, so the stable
+# links `releases/latest/download/BorrowedCompute-setup.exe` and `…/BorrowedComputeAgent.dmg`
+# always give the newest of each.
 #
 # Secrets:
 # - TAURI_SIGNING_PRIVATE_KEY: signs updates; the apps only install updates signed by it.
@@ -203,6 +206,19 @@ jobs:
           fi
           cat dist/agent.json dist/client.json
 
+      # The installer of an app not built this time, from the release its manifest names.
+      - name: Carry over the other installer
+        run: |
+          base="https://github.com/$RELEASES_REPO/releases/download"
+          if [ "$AGENT" != true ]; then
+            v=$(node -p "require('./dist/agent.json').version")
+            curl -fsSL "$base/agent-v$v/BorrowedComputeAgent.dmg" -o dist/BorrowedComputeAgent.dmg
+          fi
+          if [ "$CLIENT" != true ]; then
+            v=$(node -p "require('./dist/client.json').version")
+            curl -fsSL "$base/client-v$v/BorrowedCompute-setup.exe" -o dist/BorrowedCompute-setup.exe
+          fi
+
       # The client goes last when both ship, so the newest release (the one Check for
       # updates reads) holds both new manifests.
       - name: Publish releases
@@ -211,14 +227,14 @@ jobs:
           if [ "$AGENT" = true ]; then
             gh release create "agent-v$AGENT_VERSION" --repo "$RELEASES_REPO" \
               --title "Borrowed Compute Agent $AGENT_VERSION (Mac)" \
-              --notes "Mac app, built from $short. Install BorrowedComputeAgent.dmg; installed apps update themselves." \
-              dist/BorrowedComputeAgent.dmg dist/BorrowedComputeAgent.app.tar.gz dist/agent.json dist/client.json
+              --notes "Mac app, built from $short. Install BorrowedComputeAgent.dmg; installed apps update themselves. BorrowedCompute-setup.exe is the current Windows app." \
+              dist/BorrowedComputeAgent.dmg dist/BorrowedComputeAgent.app.tar.gz dist/BorrowedCompute-setup.exe dist/agent.json dist/client.json
           fi
           if [ "$CLIENT" = true ]; then
             gh release create "client-v$CLIENT_VERSION" --repo "$RELEASES_REPO" \
               --title "Borrowed Compute $CLIENT_VERSION (Windows)" \
-              --notes "Windows app, built from $short. Install BorrowedCompute-setup.exe; installed apps update themselves." \
-              dist/BorrowedCompute-setup.exe dist/agent.json dist/client.json
+              --notes "Windows app, built from $short. Install BorrowedCompute-setup.exe; installed apps update themselves. BorrowedComputeAgent.dmg is the current Mac app." \
+              dist/BorrowedCompute-setup.exe dist/BorrowedComputeAgent.dmg dist/agent.json dist/client.json
           fi
 
       - name: Tag this repo

@@ -407,7 +407,9 @@ $("updates").addEventListener("click", () => {
 });
 $("update-check").addEventListener("click", checkUpdate);
 $("update-close").addEventListener("click", () => $("update-dialog").classList.add("hidden"));
-$("update-install").addEventListener("click", async () => {
+$("update-install").addEventListener("click", installUpdate);
+
+async function installUpdate() {
   $("update-install").disabled = true;
   $("update-check").disabled = true;
   updateMessage("", "Downloading and installing… The app restarts when it is done.");
@@ -418,7 +420,24 @@ $("update-install").addEventListener("click", async () => {
     $("update-install").disabled = false;
     $("update-check").disabled = false;
   }
-});
+}
+
+// Whatever installer put this app here, it moves to the latest release on start, so an
+// old setup file never leaves anyone on an old version.
+async function updateOnStart() {
+  let u;
+  try {
+    u = await invoke("check_update");
+  } catch (_) {
+    return; // Offline or GitHub unreachable: Check for updates still works later.
+  }
+  // Local builds are 0.1.0; replacing one with a release would undo the build under test.
+  if (!u.available || u.current === "0.1.0") return;
+  $("update-version").textContent = `This is version ${u.current}.`;
+  $("update-install").classList.remove("hidden");
+  $("update-dialog").classList.remove("hidden");
+  installUpdate();
+}
 
 $("signout").addEventListener("click", async () => {
   if (!(await ask("Sign out of Borrowed Compute on this computer?", "Sign out", true))) return;
@@ -778,6 +797,7 @@ $("date-tab").textContent = new Date().toLocaleDateString(undefined, { month: "s
 loadStatus()
   .then(() => { loadServices(); return setFolder(store.get("folder") || ""); })
   .catch((e) => showError(String(e)));
+updateOnStart();
 // Keep online states fresh without hammering the cloud.
 setInterval(() => {
   if (status?.signed_in && !running && document.visibilityState === "visible") loadDevices().then(loadServices);

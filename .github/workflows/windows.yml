@@ -53,3 +53,20 @@ jobs:
             target/release/bundle/nsis/*.exe
             target/release/bundle/msi/*.msi
           if-no-files-found: error
+
+      # Check for updates runs the new installer while the app is still open. That must
+      # close the app and finish, never stop at "Failed to kill Borrowed Compute".
+      - name: Update over a running app
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          Start-Process $setup.FullName -ArgumentList '/S' -Wait
+          $exe = Get-ChildItem "$env:LOCALAPPDATA\Borrowed Compute\*.exe" | Where-Object Name -ne 'uninstall.exe' | Select-Object -First 1
+          $app = Start-Process $exe.FullName -PassThru
+          Start-Sleep 8
+          if ($app.HasExited) { throw "the app did not stay open (exit $($app.ExitCode))" }
+          $update = Start-Process $setup.FullName -ArgumentList '/P', '/UPDATE' -Wait -PassThru
+          if ($update.ExitCode -ne 0) { throw "the update installer exited with $($update.ExitCode)" }
+          if (-not $app.HasExited) { throw "the old app is still running" }
+          if (-not (Test-Path $exe.FullName)) { throw "the app is missing after the update" }
