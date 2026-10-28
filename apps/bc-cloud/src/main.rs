@@ -22,6 +22,7 @@ async fn main() -> Result<()> {
         github: Arc::new(GitHub::new(client_id)),
         google: bc_cloud::google_client("", None),
         relay_url: std::env::var("BC_RELAY_URL").ok(),
+        single_owner: std::env::var_os("BC_SINGLE_OWNER").is_some(),
     };
     let listener = tokio::net::TcpListener::bind(&listen).await?;
     eprintln!("bc-cloud listening on http://{listen}");

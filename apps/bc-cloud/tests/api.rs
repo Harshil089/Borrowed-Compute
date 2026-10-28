@@ -151,6 +151,10 @@ async fn databases() -> Vec<(String, Option<tempfile::TempDir>)> {
 }
 
 async fn setup(database_url: &str) -> Env {
+    setup_with(database_url, false).await
+}
+
+async fn setup_with(database_url: &str, single_owner: bool) -> Env {
     let db = connect(database_url).await.unwrap();
     let github = Arc::new(FakeGitHub::default());
     let gh_url = serve(fake_github(github.clone())).await;
@@ -160,7 +164,8 @@ async fn setup(database_url: &str) -> Env {
         db,
         github: Arc::new(GitHub::with_bases("test-client".into(), gh_url.clone(), gh_url)),
         google: Some(Arc::new(Google::with_bases("g-client".into(), "test-secret".into(), g_url.clone(), g_url))),
-        relay_url: Some("https://studio.tail1234.ts.net:8443/".into()),
+        relay_url: Some("https://relay.example.com/".into()),
+        single_owner,
     };
     let cloud = serve(app(state)).await;
     Env { cloud, github, google }
@@ -187,6 +192,35 @@ impl Env {
 }
 
 #[tokio::test]
+async fn single_owner_cloud_refuses_a_second_account() {
+    for (url, _dir) in databases().await {
+        let env = setup_with(&url, true).await;
+        env.login(1, "owner").await;
+        env.login(1, "owner").await;
+        env.github.next.lock().unwrap().push_back((2, "stranger".into()));
+        let err = CloudClient::new(&env.cloud, None).login(|_| {}).await.unwrap_err();
+        assert!(format!("{err:#}").contains("belongs to another account"), "{err:#}");
+    }
+}
+
+#[tokio::test]
+async fn limits_sign_ins_in_progress() {
+    for (url, _dir) in databases().await {
+        let env = setup(&url).await;
+        let http = reqwest::Client::new();
+        let start = || http.post(format!("{}/v1/auth/device", env.cloud)).send();
+        for i in 0..20 {
+            env.github.next.lock().unwrap().push_back((100 + i, format!("u{i}")));
+            assert!(start().await.unwrap().status().is_success());
+        }
+        env.github.next.lock().unwrap().push_back((200, "late".into()));
+        let resp = start().await.unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+        assert!(resp.text().await.unwrap().contains("too many sign-ins"));
+    }
+}
+
+#[tokio::test]
 async fn google_and_github_link_by_verified_email() {
     for (url, _dir) in databases().await {
         google_and_github_link_by_verified_email_on(setup(&url).await).await;
@@ -198,7 +232,7 @@ async fn google_and_github_link_by_verified_email_on(env: Env) {
     assert!(providers.github && providers.google);
     assert_eq!(
         CloudClient::new(&env.cloud, None).relay().await.as_deref(),
-        Some("https://studio.tail1234.ts.net:8443/"),
+        Some("https://relay.example.com/"),
         "the cloud advertises the Mac's relay"
     );
 
