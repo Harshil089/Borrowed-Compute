@@ -1,0 +1,178 @@
+<!--
+title: How it works · Borrowed Compute
+description: Set up Borrowed Compute in four steps, run jobs and dev servers on your Mac from your Windows PC, and see exactly what the sandbox allows.
+nav: how-it-works
+-->
+<main id="main">
+  <section class="page-head">
+    <div class="wrap">
+      <h1 class="display reveal">How it works</h1>
+      <p class="lede reveal d1">Everything from the first install to a dev server running on your Mac at your PC's localhost. About ten minutes the first time, a single click every time after.</p>
+    </div>
+  </section>
+
+  <div class="wrap doc-layout">
+    <nav class="toc" aria-label="On this page">
+      <span class="marking">On this page</span>
+      <a href="#overview">Overview</a>
+      <a href="#setup">Set up</a>
+      <a href="#run">Run a job</a>
+      <a href="#bc-toml">bc.toml</a>
+      <a href="#servers">Dev servers</a>
+      <a href="#guests">Shared Macs</a>
+      <a href="#cli">Command line</a>
+      <a href="#security">Security</a>
+      <a href="#updates">Updates</a>
+      <a href="#troubleshooting">Troubleshooting</a>
+    </nav>
+
+    <article class="doc">
+      <section id="overview">
+        <h2>Overview</h2>
+        <p>Borrowed Compute is two apps. <strong>Borrowed Compute</strong> runs on your Windows PC: you choose a project folder, type a command and watch the output. <strong>Borrowed Compute Agent</strong> runs on your Mac: it signs you in, approves devices, runs each job and shows what ran.</p>
+        <p>For every run, the PC packs your project, sends it with the command over an encrypted connection, and the Mac runs it with its own native arm64 toolchain in a fresh workspace. Output streams back as it is printed. When the job ends, the workspace and every dependency it downloaded are deleted. No Windows program ever runs on the Mac, and nothing from your project stays there.</p>
+        <div class="steps-strip">
+          <div><span class="marking">A</span><b>Install</b><span>One app on each machine.</span></div>
+          <div><span class="marking">B</span><b>Sign in</b><span>Same account on both.</span></div>
+          <div><span class="marking">C</span><b>Pair</b><span>Match a code once.</span></div>
+          <div><span class="marking">D</span><b>Run</b><span>Folder, command, Run.</span></div>
+        </div>
+      </section>
+
+      <section id="setup">
+        <h2>Set up</h2>
+        <h3>On the Mac</h3>
+        <ol>
+          <li>Download <a href="/download/mac">BorrowedComputeAgent.dmg</a>, drag the app to Applications and open it.</li>
+          <li>The app is not notarized yet, so macOS blocks it the first time. Open System Settings, then Privacy &amp; Security, and click <strong>Open Anyway</strong>.</li>
+          <li>Sign in with GitHub or Google. Your Mac now hosts your account: there is no separate server.</li>
+          <li>Under Route, copy <strong>this Mac's code</strong>.</li>
+        </ol>
+        <h3>On the PC</h3>
+        <ol>
+          <li>Install <a href="/download/windows">BorrowedCompute-setup.exe</a>. If SmartScreen warns, choose More info, then Run anyway.</li>
+          <li>Paste the Mac's code where the app asks for your Mac, click Test, then sign in with the <strong>same account</strong> as on the Mac.</li>
+          <li>Click <strong>Pair</strong> next to your Mac. The PC shows an eight-character code.</li>
+          <li>On the Mac, type that code into the request and click Approve.</li>
+        </ol>
+        <p class="note"><b>Why a code</b>Pairing codes are a secret between the PC and the person at the Mac. They expire after ten minutes, and three wrong tries delete the request.</p>
+      </section>
+
+      <section id="run">
+        <h2>Run a job</h2>
+        <p>Choose a project folder, then type a command or pick one of the suggestions for that folder's project type. Press <strong>Run on Mac</strong>.</p>
+        <ul>
+          <li>Your project is packed and uploaded. <code>node_modules</code>, <code>.venv</code>, <code>target</code> and other build output are left out.</li>
+          <li>If the command needs what was left out, it installs dependencies or builds first. After a failure caused by a missing module, command or build file, it fixes the cause and runs once more.</li>
+          <li>Windows files are fixed while packing: scripts get their executable bit and LF line endings back. Binaries and other text files are sent unchanged.</li>
+          <li>When it ends you see the exit code, timings (connect, upload, first output, total, direct or relay) and what the Mac used: CPU time, cores and peak memory.</li>
+        </ul>
+        <p>Each run's output is saved on the PC. The Mac keeps the command, result, usage and the last 1 MB of output for each job in its log.</p>
+        <h3>Recognized projects</h3>
+        <table class="table">
+          <thead><tr><th class="marking">Project</th><th class="marking">Suggests</th></tr></thead>
+          <tbody>
+            <tr><td>Node</td><td>Scripts from <code>package.json</code>, such as build, test and dev</td></tr>
+            <tr><td>Python</td><td>Your entry script, pytest, with a virtual environment made on the Mac</td></tr>
+            <tr><td>Rust</td><td><code>cargo build</code>, <code>cargo test</code>, <code>cargo run</code></td></tr>
+            <tr><td>Go</td><td><code>go build</code>, <code>go test ./...</code></td></tr>
+            <tr><td>HTML</td><td>Serve the folder and open it on the PC</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="bc-toml">
+        <h2>bc.toml</h2>
+        <p>A <code>bc.toml</code> in your project folder always wins over detection. Commands are lists of arguments, never shell strings, and unknown keys are errors so a typo never silently does nothing.</p>
+<pre><span class="c"># bc.toml</span>
+<span class="k">version</span> = 1
+
+[<span class="k">job</span>]
+<span class="k">argv</span> = ["cargo", "test", "--workspace"]
+<span class="k">workdir</span> = "."
+<span class="k">timeout</span> = "20m"
+<span class="k">service</span> = false     <span class="c"># true keeps a server running</span>
+
+[<span class="k">job.env</span>]
+RUST_LOG = "info"
+
+[<span class="k">files</span>]
+<span class="k">exclude</span> = ["data/raw"]</pre>
+      </section>
+
+      <section id="servers">
+        <h2>Dev servers</h2>
+        <p>Tick <strong>Keep running</strong>, which is ticked for you for dev, start and serve scripts, and the server stays up on the Mac until you press Stop. It survives the PC disconnecting, and the Mac stays awake while it runs.</p>
+        <p>Every port the server listens on opens at the same address on your PC, so a Vite server on the Mac's port 5173 is at <code>http://localhost:5173</code> on Windows. Only the server's own ports are forwarded, never anything else on the Mac. Ports reconnect quietly when the network drops.</p>
+      </section>
+
+      <section id="guests">
+        <h2>Shared Macs</h2>
+        <p>A Mac owner can let people on other accounts run jobs on their Mac, one invite per person. A guest needs no Mac and no account of their own.</p>
+        <h3>If someone invited you</h3>
+        <ol>
+          <li>Install <a href="/download/windows">Borrowed Compute for Windows</a>.</li>
+          <li>Open it and choose <strong>Use a shared Mac</strong>, or Join shared once you are signed in.</li>
+          <li>Paste the whole invite, starting with <code>bc-invite:</code>, and click Join.</li>
+          <li>Your PC shows a code. Read it to the person who invited you; they type it on their Mac.</li>
+          <li>Once they approve, their Mac appears in your list, marked as shared. Run on it like any other Mac.</li>
+        </ol>
+        <h3>If you are sharing your Mac</h3>
+        <ol>
+          <li>In Borrowed Compute Agent, under Guests, turn on <strong>Share this Mac</strong>.</li>
+          <li>Type the person's name and click Invite, then copy the message and send it by chat or email. It is shown only once.</li>
+          <li>When their request arrives, type the code their PC shows and click Approve.</li>
+        </ol>
+        <p class="note"><b>Limits</b>Each invite works once, within seven days. Three wrong codes cancel the request. Guests run in the same sandbox as your own jobs, with the same limits per device, and only see their own servers. Turning sharing off, or removing a guest, stops their servers at once.</p>
+      </section>
+
+      <section id="cli">
+        <h2>Command line</h2>
+        <p>The <code>bc</code> command does everything the PC app does and shares its device identity, so pairing once covers both.</p>
+<pre><span class="k">bc cloud</span> &lt;mac code&gt;          <span class="c"># where your Mac is</span>
+<span class="k">bc login</span>                     <span class="c"># --google for Google</span>
+<span class="k">bc pair</span> studio               <span class="c"># shows a code; approve it on the Mac</span>
+<span class="k">bc use</span> studio                <span class="c"># default Mac for bc run</span>
+
+<span class="k">bc run</span> -- cargo test         <span class="c"># --timings, --relay-only</span>
+<span class="k">bc run</span> --service -- npm run dev
+<span class="k">bc services</span>                  <span class="c"># servers this device started</span>
+<span class="k">bc attach</span> &lt;id&gt;               <span class="c"># watch one; Ctrl+C stops watching only</span>
+<span class="k">bc forward</span>                   <span class="c"># forward their ports to localhost</span>
+<span class="k">bc stop</span> &lt;id&gt;</pre>
+      </section>
+
+      <section id="security">
+        <h2>Security</h2>
+        <p>A job is your code plus every package it installs, so the Mac treats it as untrusted.</p>
+        <ul>
+          <li><strong>Sandboxed.</strong> Each job runs in a macOS sandbox. It can read and write its own workspace and read system folders and your toolchains (Homebrew, rustup, nvm, pyenv, Xcode). It cannot read the rest of your home folder, the clipboard, the keychain or other apps' settings, cannot open apps, and cannot reach your ssh agent or well-known local services such as PostgreSQL, Redis, Docker or Ollama.</li>
+          <li><strong>Nothing stays.</strong> The workspace, including every downloaded dependency, is deleted when the job ends, and its processes are stopped. Each run starts from empty caches.</li>
+          <li><strong>Only your devices.</strong> Only devices signed in to the Mac's own account can ask to pair, and only after you approve a code. The Mac's built-in sign-in accepts only its owner's account.</li>
+          <li><strong>Limits.</strong> One device can run at most four jobs and keep eight servers at once, and refused devices are logged at most every ten minutes.</li>
+          <li><strong>Encrypted.</strong> Devices connect over QUIC with their own keys. When a direct path is not possible, a relay forwards traffic it cannot read.</li>
+          <li><strong>Secrets.</strong> Sign-in sessions and device keys live in the system keychain. GitHub and Google tokens are used once at sign-in and dropped.</li>
+        </ul>
+        <p class="note"><b>Known limits</b>Jobs still run as your own macOS user inside the sandbox; a separate job user is planned. The Mac app is not notarized and the Windows installer is not code-signed yet.</p>
+      </section>
+
+      <section id="updates">
+        <h2>Updates</h2>
+        <p>Both apps check for a newer release when they start and install it, so an older installer always ends up on the latest version. Check for updates does the same on demand. Every update is verified against the project's signing key before it installs, and dropped downloads are retried.</p>
+      </section>
+
+      <section id="troubleshooting">
+        <h2>Troubleshooting</h2>
+        <h3>macOS says the app is damaged or can't be opened</h3>
+        <p>Open System Settings, then Privacy &amp; Security, and click Open Anyway. If macOS still refuses, clear the download flag in Terminal:</p>
+        <div class="cmd"><code>xattr -dr com.apple.quarantine "/Applications/Borrowed Compute Agent.app"</code><button type="button" data-copy='xattr -dr com.apple.quarantine "/Applications/Borrowed Compute Agent.app"'>Copy</button></div>
+        <h3>Windows SmartScreen blocks the installer</h3>
+        <p>Choose More info, then Run anyway. The installer is not code-signed yet.</p>
+        <h3>The PC can't find the Mac</h3>
+        <p>Check that Borrowed Compute Agent is open on the Mac, or that Run in background is on, and that the code on the PC matches the one under Route on the Mac. On strict networks the connection goes through a relay automatically.</p>
+        <h3>A tool works in Terminal but not in a job</h3>
+        <p>Jobs use your login shell's PATH and can read your toolchains, but not the rest of your home folder. If a tool keeps its files elsewhere in your home folder, it cannot see them from the sandbox.</p>
+      </section>
+    </article>
+  </div>
+</main>
