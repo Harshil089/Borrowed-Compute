@@ -1,8 +1,8 @@
 // Applies the saved appearance before the page paints, so a window never flashes the
-// wrong theme. Light is the default; "system" follows the Mac or Windows setting.
+// wrong theme. Dark is the default; "system" follows the Mac or Windows setting.
 (() => {
-  let theme = "light";
-  try { theme = localStorage.getItem("appearance") || "light"; } catch { /* storage off */ }
+  let theme = "dark";
+  try { theme = localStorage.getItem("appearance") || "dark"; } catch { /* storage off */ }
   document.documentElement.dataset.theme = theme;
 })();
 

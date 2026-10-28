@@ -54,7 +54,7 @@ let signingIn = false;
 // Requests already on screen, so only new ones animate in.
 const seenRequests = new Set();
 
-// ---- Arrivals: the latest run, flown live ----
+// ---- The latest run, live ----
 
 const ARR_LEGS = ["upload", "run", "return"];
 let arrivalsKey = null;
@@ -89,7 +89,7 @@ function renderArrivals() {
     $("arr-from").textContent = "PC";
     $("arr-from-name").textContent = "Your PC";
     $("arr-cmd").className = "arr-cmd";
-    $("arr-cmd").textContent = "No runs yet. When your PC sends one, it lands here live.";
+    $("arr-cmd").textContent = "No runs yet. When your PC sends one, it shows here live.";
     $("arr-clock").textContent = "";
     $("arr-stub").classList.add("hidden");
     liveSince = null;
@@ -104,7 +104,7 @@ function renderArrivals() {
 
   if (!job.end) {
     // The agent reports a run once its upload is in, so the upload leg is already flown.
-    $("arr-tab").textContent = "In flight";
+    $("arr-tab").textContent = "Running";
     $("arr-stub").classList.add("hidden");
     liveSince = job.started_ms;
     tickClock();
@@ -120,7 +120,7 @@ function renderArrivals() {
   setArrivalLegs(landed ? ARR_LEGS.length : 1, !landed);
   const u = job.end.usage;
   const cores = u && u.wall_ms > 0 ? ((u.user_ms + u.system_ms) / u.wall_ms).toFixed(1) : null;
-  const stampCls = landed ? "ok" : word === "Void" ? "void" : "bad";
+  const stampCls = landed ? "ok" : word === "Cancelled" ? "void" : "bad";
   const stub = $("arr-stub");
   stub.innerHTML = `
     <div class="arr-time"><span class="label">Ran here</span><strong>${u ? fig(u.wall_ms) : "–"}</strong></div>
@@ -131,7 +131,7 @@ function renderArrivals() {
     </div>
     <span class="stamp ${stampCls}">${esc(word)}</span>`;
   stub.classList.remove("hidden");
-  // Tear the copy off only for a run that lands while the window is open.
+  // Animate the result only for a run that ends while the window is open.
   stub.classList.toggle("arrived", !firstRender);
 }
 
@@ -291,7 +291,7 @@ function render() {
           </span>
           <button class="danger" data-unpair="${p.id}" data-name="${esc(p.client_name)}">Remove</button>
         </div>`).join("")
-    : `<div class="board-empty">No devices cleared yet. On your PC, choose this Mac and press Pair; the request appears here to approve.</div>`);
+    : `<div class="board-empty">No devices paired yet. On your PC, choose this Mac and press Pair; the request appears here to approve.</div>`);
 
   renderGuests();
   renderArrivals();
@@ -322,7 +322,7 @@ function render() {
             <span class="pill ${cls}">${label}</span>
           </div>`;
       }).join("")
-    : `<div class="board-empty">Runs from your paired PC depart from here, with what each one used on this Mac.</div>`);
+    : `<div class="board-empty">Runs from your paired PCs show here, with what each one used on this Mac.</div>`);
 }
 
 const copyIcon = `<svg class="icon"><use href="#i-copy"/></svg>Copy`;
@@ -360,13 +360,13 @@ function usageText(j) {
 
 function jobState(j) {
   if (j.rejected) return ["bad", "Refused"];
-  if (!j.end) return ["live", "In flight"];
+  if (!j.end) return ["live", "Running"];
   switch (j.end.kind) {
     case "exited":
       if (j.end.timed_out) return ["bad", "Timed out"];
-      return j.end.code === 0 ? ["ok", "Landed"] : ["bad", `Exit ${j.end.code ?? "?"}`];
+      return j.end.code === 0 ? ["ok", "Done"] : ["bad", `Exit ${j.end.code ?? "?"}`];
     case "failed": return ["bad", "Failed"];
-    case "cancelled": return ["", "Void"];
+    case "cancelled": return ["", "Cancelled"];
     default: return ["", "Lost contact"];
   }
 }

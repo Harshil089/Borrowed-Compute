@@ -84,7 +84,7 @@ function setLeg(leg, failed = false) {
   });
   legs.classList.toggle("idle", leg === "idle");
   legs.classList.toggle("failed", failed);
-  // The jet sits at the start of the active leg, or at the Mac once the run is home.
+  // The marker sits at the start of the active phase, or at the Mac once the run is done.
   const p = leg === "idle" ? 0 : leg === "done" ? 1 : (at + 0.5) / LEGS.length;
   legs.style.setProperty("--p", String(p));
 }
@@ -733,10 +733,10 @@ function fig(v) {
 function mb(bytes) { return `${Math.round(bytes / 1048576)}<i>MB</i>`; }
 function setRunTab(word) { $("run-tab").textContent = word; }
 
-// The stamp struck on the carbon copy, and its color.
+// The outcome badge on the result, and its color.
 function stampFor(r) {
-  if (r.outcome === "success") return ["ok", "Landed"];
-  if (r.outcome === "cancelled") return ["void", "Void"];
+  if (r.outcome === "success") return ["ok", "Done"];
+  if (r.outcome === "cancelled") return ["void", "Cancelled"];
   if (r.outcome === "detached") return ["ok", "Still up"];
   if (r.outcome === "rejected") return ["bad", "Refused"];
   return ["bad", r.status === 124 ? "Timed out" : `Exit ${r.status}`];
@@ -799,7 +799,7 @@ async function runJob() {
   $("cancel").disabled = false;
   setPhase("Starting…", true);
   setLeg("pack");
-  setRunTab("In flight");
+  setRunTab("Running");
   // Once it is up, list it so it can be stopped from the rail.
   const listSoon = service ? setInterval(loadServices, 4000) : null;
   try {
@@ -836,7 +836,7 @@ async function runJob() {
   }
 }
 
-// Shows a running service's recent and live output in the flight log.
+// Shows a running service's recent and live output.
 async function watchService(jobId) {
   if (running) return;
   showError("");
@@ -876,7 +876,7 @@ $("clear").addEventListener("click", () => {
   consoleEl.textContent = "";
   $("result").classList.add("hidden");
   setLeg("idle");
-  setRunTab("Next run");
+  setRunTab("Ready");
   setPhase("Output appears here as the Mac produces it.", false);
 });
 
