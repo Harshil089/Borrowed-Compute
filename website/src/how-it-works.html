@@ -19,6 +19,7 @@ nav: how-it-works
       <a href="#run">Run a job</a>
       <a href="#bc-toml">bc.toml</a>
       <a href="#servers">Dev servers</a>
+      <a href="#guests">Shared Macs</a>
       <a href="#cli">Command line</a>
       <a href="#security">Security</a>
       <a href="#updates">Updates</a>
@@ -103,6 +104,26 @@ RUST_LOG = "info"
         <h2>Dev servers</h2>
         <p>Tick <strong>Keep running</strong>, which is ticked for you for dev, start and serve scripts, and the server stays up on the Mac until you press Stop. It survives the PC disconnecting, and the Mac stays awake while it runs.</p>
         <p>Every port the server listens on opens at the same address on your PC, so a Vite server on the Mac's port 5173 is at <code>http://localhost:5173</code> on Windows. Only the server's own ports are forwarded, never anything else on the Mac. Ports reconnect quietly when the network drops.</p>
+      </section>
+
+      <section id="guests">
+        <h2>Shared Macs</h2>
+        <p>A Mac owner can let people on other accounts run jobs on their Mac, one invite per person. A guest needs no Mac and no account of their own.</p>
+        <h3>If someone invited you</h3>
+        <ol>
+          <li>Install <a href="/download/windows">Borrowed Compute for Windows</a>.</li>
+          <li>Open it and choose <strong>Use a shared Mac</strong>, or Join shared once you are signed in.</li>
+          <li>Paste the whole invite, starting with <code>bc-invite:</code>, and click Join.</li>
+          <li>Your PC shows a code. Read it to the person who invited you; they type it on their Mac.</li>
+          <li>Once they approve, their Mac appears in your list, marked as shared. Run on it like any other Mac.</li>
+        </ol>
+        <h3>If you are sharing your Mac</h3>
+        <ol>
+          <li>In Borrowed Compute Agent, under Guests, turn on <strong>Share this Mac</strong>.</li>
+          <li>Type the person's name and click Invite, then copy the message and send it by chat or email. It is shown only once.</li>
+          <li>When their request arrives, type the code their PC shows and click Approve.</li>
+        </ol>
+        <p class="note"><b>Limits</b>Each invite works once, within seven days. Three wrong codes cancel the request. Guests run in the same sandbox as your own jobs, with the same limits per device, and only see their own servers. Turning sharing off, or removing a guest, stops their servers at once.</p>
       </section>
 
       <section id="cli">
