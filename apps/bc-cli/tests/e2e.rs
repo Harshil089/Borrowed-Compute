@@ -19,6 +19,7 @@ struct Setup {
     agent: Endpoint,
     client: Endpoint,
     paired: PairedDevices,
+    guests: bc_agent::guests::Guests,
     work_root: tempfile::TempDir,
     _state: tempfile::TempDir,
     _relay: iroh_relay::server::Server,
@@ -54,19 +55,24 @@ async fn setup_with(events: Option<bc_agent::events::EventSender>) -> Setup {
     );
     let mut agent_config = agent_config;
     agent_config.events = events;
+    let guests = agent_config.guests.clone();
     let accept = agent.clone();
     tokio::spawn(async move {
         while let Some(incoming) = accept.accept().await {
             let config = agent_config.clone();
             tokio::spawn(async move {
                 if let Ok(conn) = incoming.await {
-                    let _ = serve_connection(&config, conn).await;
+                    if conn.alpn() == bc_net::GUEST_ALPN {
+                        let _ = bc_agent::server::serve_guest(&config, conn).await;
+                    } else {
+                        let _ = serve_connection(&config, conn).await;
+                    }
                 }
             });
         }
     });
 
-    Setup { agent, client, paired, work_root, _state: state, _relay: relay }
+    Setup { agent, client, paired, guests, work_root, _state: state, _relay: relay }
 }
 
 fn project() -> tempfile::TempDir {
@@ -101,6 +107,38 @@ async fn run(s: &Setup, argv: &[&str]) -> (Exit, String, String, bool) {
         String::from_utf8(err).unwrap(),
         outcome.timings.via_relay,
     )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn invited_guest_joins_with_the_owners_approval_and_runs_a_job() {
+    let s = setup().await;
+    let (exit, ..) = run(&s, &["true"]).await;
+    assert!(matches!(exit, Exit::Rejected(_)), "a stranger is refused: {exit:?}");
+
+    s.guests.set_sharing(true);
+    let invite = s.guests.create_invite("Sam", &s.agent.id().to_string()).unwrap();
+    let token = bc_proto::guest::Invite::parse(&invite).unwrap().token;
+    // The owner types the code the guest's device shows.
+    let owner = s.guests.clone();
+    let mac_name = bc_cli::shared::request_access(&s.client, s.agent.addr(), &token, "sam-pc", |code| {
+        let id = owner.view().requests[0].id;
+        owner.approve(id, code).unwrap();
+    })
+    .await
+    .unwrap();
+    assert!(!mac_name.is_empty());
+    assert_eq!(s.guests.view().guests[0].device_name, "sam-pc");
+
+    let (exit, out, ..) = run(&s, &["sh", "-c", "echo guest run"]).await;
+    assert_eq!(exit, Exit::Code(0));
+    assert_eq!(out, "guest run\n");
+
+    let reused = bc_cli::shared::request_access(&s.client, s.agent.addr(), &token, "sam-pc", |_| {}).await;
+    assert!(reused.is_ok(), "an approved guest asking again is let in without using an invite");
+
+    s.guests.set_sharing(false);
+    let (exit, ..) = run(&s, &["true"]).await;
+    assert!(matches!(exit, Exit::Rejected(_)), "sharing off refuses the guest: {exit:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
