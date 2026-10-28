@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://borrowed-compute.vercel.app/sitemap.xml

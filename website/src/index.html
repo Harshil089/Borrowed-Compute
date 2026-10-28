@@ -1,0 +1,242 @@
+<!--
+title: Borrowed Compute: your Mac's Apple Silicon, from your Windows PC
+description: Run builds, tests, scripts and dev servers on your own Mac's Apple Silicon from your Windows PC. Output streams back live. Nothing stays on the Mac.
+nav: home
+-->
+<main id="main">
+  <section class="hero">
+    <div class="wrap hero-in">
+      <div class="hero-copy">
+        <h1 class="display reveal">Your Mac's silicon. <span class="soft">Your PC's keyboard.</span></h1>
+        <p class="lede reveal d1">Pick a project folder on your Windows PC, type a command, and it runs on your own Mac's Apple Silicon. Output streams back live, dev servers open at <code class="inline-code">localhost</code>, and nothing from your project stays on the Mac.</p>
+        <div class="hero-actions reveal d2">
+          <a class="btn gold big" href="/download"><svg class="icon" aria-hidden="true"><use href="#i-down"/></svg>Download for free</a>
+          <a class="arrow-link" href="/how-it-works">See how it works <svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a>
+        </div>
+        <div class="hero-meta reveal d3">
+          <span><svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg>End-to-end encrypted</span>
+          <span><svg class="icon" aria-hidden="true"><use href="#i-bolt"/></svg>Direct when the network allows</span>
+          <span><svg class="icon" aria-hidden="true"><use href="#i-trash"/></svg>Workspace deleted after every job</span>
+        </div>
+      </div>
+
+      <div class="die-stage reveal d1">
+        <div class="die-frame">
+          <canvas id="hero-die" role="img" aria-label="Illustration of an Apple Silicon die whose cores light up as a job runs"></canvas>
+          <span class="die-caption marking">Illustration · not to scale</span>
+        </div>
+        <div class="run-panel pkg" data-state="typing" aria-live="off">
+          <div class="run-cmd"><span class="prompt" aria-hidden="true">›</span><span class="typed">python3 heavy_benchmark.py</span></div>
+          <div class="run-phases">
+            <div class="phase"><span class="marking">Connect</span><b>direct</b></div>
+            <div class="phase"><span class="marking">Upload</span><b>sent</b></div>
+            <div class="phase"><span class="marking">Run</span><b data-clock>61.0 s</b></div>
+            <div class="phase"><span class="marking">Return</span><b>landed</b></div>
+          </div>
+          <div class="run-out">
+            <div><span class="marking">CPU time</span><span class="fig" data-fig>324.5<small>s</small></span></div>
+            <div><span class="marking">Cores</span><span class="fig" data-fig>5.3</span></div>
+            <div><span class="marking">Memory</span><span class="fig" data-fig>618<small>MB</small></span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="compare-title">
+    <div class="wrap">
+      <div class="section-head split">
+        <h2 class="h2 reveal" id="compare-title">Not a remote screen. Not a server to babysit.</h2>
+        <p class="lede reveal d1">Remote desktop streams pixels. A build box needs SSH keys, an IP and upkeep. Borrowed Compute sends your source and a command, runs it on the Mac's own toolchain, and sends the output back.</p>
+      </div>
+      <div class="reveal">
+        <table class="spec">
+          <thead>
+            <tr><th scope="col"><span class="sr-only">Question</span></th><th scope="col"><span class="h3">Remote desktop</span></th><th scope="col"><span class="h3">SSH build box</span></th><th scope="col" class="ours"><span class="h3">Borrowed Compute</span></th></tr>
+          </thead>
+          <tbody>
+            <tr><th scope="row"><span class="marking">What travels</span></th><td data-label="Remote desktop">A video of the Mac's screen</td><td data-label="SSH build box">Your shell, keystroke by keystroke</td><td class="ours" data-label="Borrowed Compute">Your project and one command, then the output</td></tr>
+            <tr><th scope="row"><span class="marking">Setup</span></th><td data-label="Remote desktop">Screen sharing, a second desktop to drive</td><td data-label="SSH build box">Keys, an address, a VPN or port forward</td><td class="ours" data-label="Borrowed Compute">Install both apps, sign in, approve a code</td></tr>
+            <tr><th scope="row"><span class="marking">Where you work</span></th><td data-label="Remote desktop">Inside the Mac</td><td data-label="SSH build box">In a terminal on another machine</td><td class="ours" data-label="Borrowed Compute">In your own folder, on your own PC</td></tr>
+            <tr><th scope="row"><span class="marking">What stays</span></th><td data-label="Remote desktop">Whatever you leave on the Mac</td><td data-label="SSH build box">Whatever the server keeps</td><td class="ours" data-label="Borrowed Compute">Nothing: the workspace is deleted after each job</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section class="section tight" aria-labelledby="steps-title">
+    <div class="wrap">
+      <div class="section-head">
+        <h2 class="h2 reveal" id="steps-title">Four steps, once. Then just run.</h2>
+        <p class="lede reveal d1">No accounts to create on a server, no addresses to type. Your Mac hosts its own sign-in, and your PC finds it by a code.</p>
+      </div>
+      <div class="wire-steps">
+        <div class="wire" aria-hidden="true"><span></span></div>
+        <div class="step reveal">
+          <div class="pad">A</div>
+          <h3 class="h3">Install both apps</h3>
+          <p>Borrowed Compute on the PC, Borrowed Compute Agent on the Mac. Both update themselves.</p>
+          <div class="thumb pkg flat">
+            <div class="row"><span class="marking">This Mac's code</span><span class="dot ok"></span></div>
+            <span class="mono"><b>a9ef452f</b>d9cd71e1d47c…</span>
+            <span class="mono">Paste it on the PC. That is the whole route.</span>
+          </div>
+        </div>
+        <div class="step reveal d1">
+          <div class="pad">B</div>
+          <h3 class="h3">Sign in on both</h3>
+          <p>With the same GitHub or Google account. Only devices on your account can ask to pair.</p>
+          <div class="thumb pkg flat">
+            <div class="row"><div class="who"><span class="avatar"></span><span>Signed in</span></div><span class="chip-tag">GitHub</span></div>
+            <span class="marking">Code for github.com</span>
+            <span class="code">B7F2-K9QX</span>
+          </div>
+        </div>
+        <div class="step reveal d2">
+          <div class="pad">C</div>
+          <h3 class="h3">Pair once</h3>
+          <p>The PC shows a code. You type it on the Mac. Three wrong tries and the request is gone.</p>
+          <div class="thumb pkg flat">
+            <div class="match">
+              <div><span class="marking">PC</span><span class="mono"><b>ABCD-EFGH</b></span></div>
+              <div><span class="marking">Mac</span><span class="mono"><b>ABCD-EFGH</b></span></div>
+            </div>
+            <span class="mini-btn">Approve</span>
+          </div>
+        </div>
+        <div class="step reveal d3">
+          <div class="pad">D</div>
+          <h3 class="h3">Run</h3>
+          <p>Choose a folder, type a command or pick a suggested one, press Run. That's every day after.</p>
+          <div class="thumb pkg flat">
+            <span class="marking">Command</span>
+            <span class="mono"><b>cargo test --workspace</b></span>
+            <div class="row"><span class="chip-tag">Rust</span><span class="mini-btn">Run on Mac</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="live-title">
+    <div class="wrap">
+      <div class="feature">
+        <div class="feature-copy">
+          <h2 class="h2 reveal" id="live-title">Output as it happens. Fixes before you ask.</h2>
+          <p class="reveal d1">Every line streams back the moment the Mac prints it, with timings for connect, upload, first output and total, and whether the path was direct or relayed.</p>
+          <ul class="reveal d2">
+            <li><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg><span>Knows Node, Python, Rust, Go and plain HTML, and suggests the right commands. A <code class="inline-code">bc.toml</code> always wins.</span></li>
+            <li><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg><span><code class="inline-code">node_modules</code>, <code class="inline-code">.venv</code> and build output never upload; it installs and builds first when a command needs them.</span></li>
+            <li><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg><span>After a failure from a missing module, command or build file, it fixes the cause and runs once more.</span></li>
+          </ul>
+        </div>
+        <div class="pkg reveal d1">
+          <div class="pkg-head"><span class="marking">Output · studio</span><span class="chip-tag"><span class="dot live"></span>Running</span></div>
+<pre class="log"><span class="dim">connected  direct · 38 ms</span>
+<span class="dim">uploaded   2.4 MB in 0.6 s</span>
+<span class="gold">$ npm run build</span>
+sh: vite: command not found
+<span class="dim">autofix    node_modules was not uploaded · running npm ci first</span>
+added 214 packages in 9s
+<span class="gold">$ npm run build</span>
+vite v6.0.7 building for production...
+✓ 412 modules transformed.
+dist/index.html                 0.46 kB
+dist/assets/index-4f1a.js     143.21 kB
+<span class="ok">✓ built in 3.12s</span></pre>
+          <div class="detect"><span class="marking detect-label">Detected</span><span class="chip-tag on">Node</span><span class="chip-tag">Python</span><span class="chip-tag">Rust</span><span class="chip-tag">Go</span><span class="chip-tag">HTML</span><span class="marking detect-note">Example output</span></div>
+        </div>
+      </div>
+
+      <div class="feature flip">
+        <div class="feature-copy">
+          <h2 class="h2 reveal">Dev servers stay up. Ports come home.</h2>
+          <p class="reveal d1">Tick Keep running, or run a dev, start or serve script, and the server stays up on the Mac until you press Stop, even after the PC disconnects. Its ports open at the same address on your PC.</p>
+          <ul class="reveal d2">
+            <li><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg><span>Only ports the server itself listens on are forwarded. Nothing else on the Mac is reachable.</span></li>
+            <li><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg><span>The Mac stays awake while a server runs, and the ports reconnect quietly on flaky networks.</span></li>
+          </ul>
+        </div>
+        <div class="pkg forward reveal d1">
+          <div class="end"><span class="marking">On the Mac</span><span class="addr">127.0.0.1:<b>5173</b></span><span class="chip-tag"><span class="dot live"></span>npm run dev · 1h 02m</span></div>
+          <div class="link-line" aria-hidden="true"></div>
+          <div class="end"><span class="marking">On your PC</span><span class="addr">localhost:<b>5173</b></span><span class="chip-tag"><span class="dot ok"></span>Open in browser</span></div>
+          <div class="foot"><span><svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg>Encrypted end to end</span><span><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg>Reconnects on its own</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section tight" aria-labelledby="proof-title">
+    <div class="wrap">
+      <div class="proof reveal">
+        <div class="proof-in">
+          <div class="section-head flush">
+            <h2 class="h2" id="proof-title">Numbers, measured on the Mac.</h2>
+            <p class="lede">When a job ends you see exactly what it used. This is a real CPU-heavy Python benchmark, as the app reported it.</p>
+          </div>
+          <div class="proof-big" aria-label="61.0 seconds">61.0<small>s</small></div>
+          <div class="proof-figs">
+            <div><span class="marking">CPU time</span><span class="fig">324.5<small>s</small></span></div>
+            <div><span class="marking">Cores busy</span><span class="fig">5.3</span></div>
+            <div><span class="marking">Peak memory</span><span class="fig">618<small>MB</small></span></div>
+          </div>
+          <p class="proof-note">Usage comes from the operating system's own accounting of the job and every process it started, never an estimate.</p>
+        </div>
+        <div class="proof-die"><canvas id="proof-die" aria-hidden="true"></canvas></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="security" aria-labelledby="sealed-title">
+    <div class="wrap">
+      <div class="section-head split">
+        <h2 class="h2 reveal" id="sealed-title">Sealed like a chip package.</h2>
+        <p class="lede reveal d1">A job is your code plus every package it installs, so the Mac treats it as untrusted. Each one runs in a macOS sandbox, in a fresh workspace that is deleted when it ends.</p>
+      </div>
+      <div class="pkg sealed reveal">
+        <ul class="sealed-list" aria-label="What a job can and cannot reach">
+          <li><span>Its own workspace</span><span class="verdict yes"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg>Read and write</span></li>
+          <li><span>Your toolchains<code>Homebrew · rustup · nvm · pyenv · Xcode</code></span><span class="verdict yes"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg>Read</span></li>
+          <li><span>Downloads and its own servers</span><span class="verdict yes"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg>Allowed</span></li>
+          <li><span>The rest of your home folder<code>~/Documents · ~/.ssh · ~/.aws</code></span><span class="verdict no"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg>Blocked</span></li>
+          <li><span>Clipboard, keychain, other apps' settings</span><span class="verdict no"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg>Blocked</span></li>
+          <li><span>Your ssh agent and local databases<code>PostgreSQL · Redis · Docker · Ollama</code></span><span class="verdict no"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg>Blocked</span></li>
+          <li><span>Opening apps on the Mac</span><span class="verdict no"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg>Blocked</span></li>
+        </ul>
+        <div class="sealed-side">
+          <h3 class="h3">The Mac stays yours.</h3>
+          <ul>
+            <li><svg class="icon" aria-hidden="true"><use href="#i-key"/></svg><span>Only your own account's devices can ask to pair, and only after you approve a code shown on both screens.</span></li>
+            <li><svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg><span>Devices talk over encrypted QUIC with their own keys. Relays forward traffic they cannot read.</span></li>
+            <li><svg class="icon" aria-hidden="true"><use href="#i-eye"/></svg><span>Every run, approval and paired device is listed on the Mac. Remove a device and its new jobs stop within 15 seconds.</span></li>
+            <li><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg><span>Updates install only when signed with the project's key.</span></li>
+          </ul>
+          <a class="arrow-link" href="/how-it-works#security">The full security model <svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="close" aria-labelledby="close-title">
+    <div class="wrap">
+      <div class="section-head flush">
+        <h2 class="h2 reveal" id="close-title">Put the Mac on the desk to work.</h2>
+        <p class="lede reveal d1">Free. Install one app on each machine and you're ten minutes from your first run.</p>
+      </div>
+      <div class="downloads">
+        <a class="pkg dl-tile reveal" href="https://github.com/Harshil089/Borrowed-Compute-releases/releases/latest/download/BorrowedCompute-setup.exe">
+          <span class="os"><svg class="icon" aria-hidden="true"><use href="#i-windows"/></svg></span>
+          <span><b>Borrowed Compute for Windows</b><span>Windows 10 and 11 · 64-bit installer</span></span>
+          <span class="go"><svg class="icon" aria-hidden="true"><use href="#i-down"/></svg></span>
+        </a>
+        <a class="pkg dl-tile reveal d1" href="https://github.com/Harshil089/Borrowed-Compute-releases/releases/latest/download/BorrowedComputeAgent.dmg">
+          <span class="os"><svg class="icon" aria-hidden="true"><use href="#i-apple"/></svg></span>
+          <span><b>Borrowed Compute Agent for Mac</b><span>Apple Silicon · disk image</span></span>
+          <span class="go"><svg class="icon" aria-hidden="true"><use href="#i-down"/></svg></span>
+        </a>
+      </div>
+    </div>
+  </section>
+</main>
