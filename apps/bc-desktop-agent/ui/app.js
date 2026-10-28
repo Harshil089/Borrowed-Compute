@@ -479,13 +479,29 @@ listen("update-progress", (event) => {
 $("update-status").addEventListener("click", async (event) => {
   if (!event.target.closest("#install-update")) return;
   if (!(await ask("Install the update and restart? The agent stops accepting jobs for a few seconds.", "Install and restart"))) return;
+  installUpdate();
+});
+
+async function installUpdate() {
   updateStatus("Downloading and installing… The app restarts when it is done.");
   try {
     await invoke("install_update");
   } catch (e) {
     updateStatus(`Could not install the update: ${esc(String(e))}`, "bad");
   }
-});
+}
+
+// Whatever disk image put this app here, it moves to the latest release on start, so an
+// old download never leaves the Mac on an old version. No job can be running yet.
+async function updateOnStart() {
+  try {
+    const u = await invoke("check_update");
+    // Local builds are 0.1.0; replacing one with a release would undo the build under test.
+    if (u.available && u.current !== "0.1.0") installUpdate();
+  } catch (_) {
+    // Offline or GitHub unreachable: Check for updates still works later.
+  }
+}
 
 $("open-logs").addEventListener("click", () => {
   invoke("open_logs").catch((e) => showError(String(e)));
@@ -573,5 +589,6 @@ listen("status-changed", refresh);
 // Pairing requests come from the cloud, so poll while the window is open.
 setInterval(() => { if (document.visibilityState === "visible") refresh(); }, 5000);
 loadSettings();
+updateOnStart();
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") refresh(); });
 refresh();

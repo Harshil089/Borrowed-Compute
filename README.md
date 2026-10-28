@@ -38,18 +38,20 @@ nothing from your project stays on the Mac once the job ends.
   while packing; binaries and other text files are sent unchanged.
 - **Keeps a log on both sides.** Each run's output is saved on the PC, and the Mac keeps
   the command, result, usage and the last 1 MB of output per job.
-- **Updates itself.** Check for updates downloads, verifies and installs signed releases,
-  retrying dropped downloads.
+- **Updates itself.** Each app moves to the latest release when it starts, whichever
+  installer put it there, and Check for updates does the same on demand. Releases are
+  signed and verified, and dropped downloads are retried.
 
 ## Get started
 
-1. **On the Mac**, download `BorrowedComputeAgent.dmg` from the
-   [latest release](https://github.com/Harshil089/Borrowed-Compute-releases/releases),
+1. **On the Mac**, download
+   [`BorrowedComputeAgent.dmg`](https://github.com/Harshil089/Borrowed-Compute-releases/releases/latest/download/BorrowedComputeAgent.dmg),
    drag the app to Applications and open it. It is not notarized yet, so the first time
    macOS blocks it: open System Settings › Privacy & Security and click **Open Anyway**.
 2. **Sign in** on the Mac with GitHub (or Google). The Mac now hosts your account.
 3. Under **Route**, copy this Mac's **code**.
-4. **On the PC**, install `BorrowedCompute-setup.exe` from the same release page. Windows
+4. **On the PC**, install
+   [`BorrowedCompute-setup.exe`](https://github.com/Harshil089/Borrowed-Compute-releases/releases/latest/download/BorrowedCompute-setup.exe). Windows
    SmartScreen may warn; choose More info › Run anyway.
 5. Paste the code under **Your Mac's code**, click **Test**, then sign in with the **same
    account** as on the Mac.
