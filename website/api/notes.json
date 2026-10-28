@@ -43,5 +43,13 @@
   ],
   "agent-v0.2.7": [
     "Each job's output is kept in the Mac's job log too, not only on the PC."
+  ],
+  "agent-v0.2.16": [
+    "Guests can now join a Mac you share: they paste your invite in the Windows app, and you approve the code it shows.",
+    "Each invite message includes links to the app and to a walkthrough."
+  ],
+  "client-v0.2.13": [
+    "Use a shared Mac: paste an invite someone sent you, read them the code, and run on their Mac. No account needed.",
+    "bc join does the same from the command line."
   ]
 }
