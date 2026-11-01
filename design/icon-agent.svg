@@ -1,15 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1f2329"/><stop offset="1" stop-color="#0a0b0d"/></linearGradient>
-    <linearGradient id="die" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f3cf7a"/><stop offset="0.55" stop-color="#d9a441"/><stop offset="1" stop-color="#a87a22"/></linearGradient>
-    <linearGradient id="core" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2a2418"/><stop offset="1" stop-color="#0d0c09"/></linearGradient>
-  </defs>
+  <defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7a73ff"/><stop offset="1" stop-color="#533afd"/></linearGradient></defs>
   <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
-  <rect x="101.5" y="101.5" width="821" height="821" rx="183.5" fill="none" stroke="#ffffff" stroke-opacity="0.12" stroke-width="3"/>
-  <g stroke="#d9a441" stroke-width="26" stroke-linecap="round">
-    <path d="M404 262v62M512 262v62M620 262v62M404 700v62M512 700v62M620 700v62M262 404h62M262 512h62M262 620h62M700 404h62M700 512h62M700 620h62"/>
+  <rect x="101.5" y="101.5" width="821" height="821" rx="183.5" fill="none" stroke="#ffffff" stroke-opacity="0.18" stroke-width="3"/>
+  <g stroke="#ffffff" stroke-width="40" stroke-linecap="round">
+    <path d="M430 250v70M594 250v70M430 704v70M594 704v70M250 430h70M250 594h70M704 430h70M704 594h70"/>
   </g>
-  <rect x="324" y="324" width="376" height="376" rx="44" fill="url(#die)"/>
-  <rect x="404" y="404" width="216" height="216" rx="22" fill="url(#core)"/>
-  <rect x="452" y="452" width="120" height="120" rx="12" fill="#d9a441" opacity="0.9"/>
+  <rect x="330" y="330" width="364" height="364" rx="56" fill="none" stroke="#ffffff" stroke-width="40"/>
+  <rect x="442" y="442" width="140" height="140" rx="22" fill="#ffffff"/>
 </svg>

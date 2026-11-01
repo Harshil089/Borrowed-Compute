@@ -11,105 +11,127 @@
 <body>
   <svg class="sprite" aria-hidden="true">
     <symbol id="i-mark" viewBox="0 0 32 32">
-      <rect x="1" y="1" width="30" height="30" rx="8" fill="#14171b"/>
-      <rect x="1.5" y="1.5" width="29" height="29" rx="7.5" fill="none" stroke="rgba(236,233,226,.22)"/>
-      <path d="M12 6.5v3M16 6.5v3M20 6.5v3M12 22.5v3M16 22.5v3M20 22.5v3M22.5 12h3M22.5 16h3M22.5 20h3" stroke="#d9a441" stroke-width="1.3" stroke-linecap="round"/>
-      <rect x="10" y="10" width="12" height="12" rx="1.6" fill="#d9a441"/>
-      <rect x="12.6" y="12.6" width="6.8" height="6.8" rx=".8" fill="#0b0c0e" opacity=".5"/>
-      <path d="M3.5 16c2.6 0 3.4-3.2 6.5-3.2" fill="none" stroke="#d9a441" stroke-width="1.3" stroke-linecap="round"/>
+      <rect width="32" height="32" rx="8" fill="#635bff"/>
+      <rect x="9.5" y="9.5" width="13" height="13" rx="2.5" fill="none" stroke="#fff" stroke-width="2"/>
+      <path d="M13 6.5v3M19 6.5v3M13 22.5v3M19 22.5v3M6.5 13h3M6.5 19h3M22.5 13h3M22.5 19h3" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
+      <rect x="13.5" y="13.5" width="5" height="5" rx="1" fill="#fff"/>
     </symbol>
     <symbol id="i-plane" viewBox="0 0 16 16"><path d="M2.5 8h10M9 4.5 12.5 8 9 11.5"/></symbol>
     <symbol id="i-refresh" viewBox="0 0 16 16"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2.5v3.2h-3.2"/></symbol>
     <symbol id="i-folder" viewBox="0 0 16 16"><path d="M1.75 4.25c0-.7.55-1.25 1.25-1.25h3.2l1.5 1.6H13c.7 0 1.25.55 1.25 1.25v6.4c0 .7-.55 1.25-1.25 1.25H3c-.7 0-1.25-.55-1.25-1.25z"/></symbol>
     <symbol id="i-doc" viewBox="0 0 16 16"><path d="M4 1.75h5.5l3 3v9.5H4z"/><path d="M9.5 1.75v3h3M6 8.5h4.5M6 11h4.5"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></symbol>
+    <symbol id="i-key" viewBox="0 0 16 16"><circle cx="5.5" cy="10.5" r="3"/><path d="m7.6 8.4 5.4-5.4M11 5l1.6 1.6"/></symbol>
+    <symbol id="i-down" viewBox="0 0 16 16"><path d="M8 2.5v8M4.5 7.5 8 11l3.5-3.5M3 13.5h10"/></symbol>
+    <symbol id="i-out" viewBox="0 0 16 16"><path d="M6 13.5H3.5a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1H6M10.5 11 13.5 8l-3-3M13.5 8H6"/></symbol>
   </svg>
 
   <!-- Signed out -->
-  <div id="signin-view" class="checkin hidden">
-    <div class="pass">
-      <section class="pass-main coupon">
-        <div class="pass-head">
-          <div class="brand on-paper"><svg><use href="#i-mark"/></svg><span class="wordmark">Borrowed Compute</span></div>
+  <div id="signin-view" class="signin hidden">
+    <div class="signin-card card">
+      <div class="signin-main">
+        <div class="brand"><svg><use href="#i-mark"/></svg><span class="wordmark">Borrowed Compute</span></div>
+        <div class="signin-head">
+          <h1 class="signin-title">Run your code on your Mac</h1>
+          <p class="muted">Builds, tests and scripts from this PC run on your Mac's Apple silicon, with output streaming back here. Sign in with the account you use on the Mac.</p>
         </div>
-        <h1 class="pass-title">Run it on your Mac.</h1>
-        <p class="muted pass-lede">Builds, tests and scripts from this PC run on your Mac's Apple silicon, with output streaming back here. Sign in with the account you use on the Mac; GitHub and Google with the same verified email are one account.</p>
         <label class="field">
           <span class="label">Your Mac's code</span>
           <div class="inline">
             <input id="signin-cloud" type="text" placeholder="Paste the code from Borrowed Compute Agent" spellcheck="false" autocomplete="off">
             <button id="signin-test">Test</button>
           </div>
-          <span class="hint">Shown in Borrowed Compute Agent on your Mac, under Route.</span>
+          <span class="hint">Shown in Borrowed Compute Agent on your Mac, under Devices.</span>
         </label>
         <div id="signin-cloud-msg" class="banner hidden"></div>
         <label class="field">
           <span class="label">Name for this PC</span>
           <input id="pc-name" type="text" placeholder="laptop" maxlength="64" autocomplete="off" spellcheck="false">
         </label>
-        <button id="signin-btn" class="primary wide">Sign in with GitHub</button>
-        <button id="signin-google" class="wide hidden">Sign in with Google</button>
+        <div class="signin-actions">
+          <button id="signin-btn" class="primary wide">Sign in with GitHub</button>
+          <button id="signin-google" class="wide hidden">Sign in with Google</button>
+        </div>
         <div id="signin-error" class="banner bad hidden"></div>
-        <p class="muted join-note">Someone shared their Mac with you? <button id="signin-join" class="link">Use a shared Mac</button></p>
-      </section>
-      <aside class="pass-stub">
-        <div id="signin-code" class="stub-code hidden">
-          <span class="label">Enter this code</span>
+        <p class="join-note">Someone shared their Mac with you? <button id="signin-join" class="link">Use a shared Mac</button></p>
+      </div>
+      <aside class="signin-side">
+        <div id="signin-code" class="signin-code hidden">
+          <span class="label">Enter this code on the sign-in page</span>
           <div id="user-code" class="code"></div>
-          <div class="row"><span class="spinner"></span><span>Waiting for sign-in…</span></div>
+          <div class="row muted"><span class="spinner"></span><span>Waiting for sign-in…</span></div>
           <button id="reopen" class="link">Open the page again</button>
         </div>
-        <div class="stub-route" aria-hidden="true">
-          <div><span class="label">From</span><strong>PC</strong></div>
-          <svg class="icon plane"><use href="#i-plane"/></svg>
-          <div><span class="label">To</span><strong>MAC</strong></div>
-        </div>
-        <p class="stub-note">A job’s workspace is deleted when it ends. The Mac keeps a log of what it ran and printed.</p>
+        <ol class="signin-steps">
+          <li><b>Install the Agent on your Mac</b><span>It shows the Mac's code and approves this PC.</span></li>
+          <li><b>Sign in with the same account</b><span>GitHub or Google, on both machines.</span></li>
+          <li><b>Pair and run</b><span>Each job runs in a fresh workspace that is deleted when it ends.</span></li>
+        </ol>
       </aside>
     </div>
   </div>
 
   <!-- Signed in -->
   <div id="app-view" class="app hidden">
-    <header class="bar">
-      <div class="brand"><svg><use href="#i-mark"/></svg><span class="wordmark">Borrowed Compute</span></div>
-      <div class="bar-right">
-        <div class="segmented on-bar" role="group" aria-label="Appearance"><button data-appearance="light">Light</button><button data-appearance="dark">Dark</button><button data-appearance="system">System</button></div>
-        <span id="account" class="bar-account"></span>
-        <button id="settings" class="bar-link">Mac code</button>
-        <button id="updates" class="bar-link">Updates</button>
-        <button id="signout" class="bar-link">Sign out</button>
-      </div>
-    </header>
+    <aside class="sidebar">
+      <div class="side-brand brand"><svg><use href="#i-mark"/></svg><span class="wordmark">Borrowed Compute</span></div>
 
-    <aside class="rail">
-      <div class="rail-head">
-        <h2 class="heading">Your Macs</h2>
-        <button id="join-open" class="link">Join shared</button>
-        <button id="refresh" class="icon-btn" title="Refresh" aria-label="Refresh"><svg class="icon"><use href="#i-refresh"/></svg></button>
-      </div>
-      <div id="macs" class="macs"></div>
-
-      <div id="services-box" class="services hidden">
-        <div class="rail-head">
-          <h2 class="heading">Still running</h2>
+      <div class="side-section">
+        <div class="side-title">
+          <span>Macs</span>
+          <span class="side-actions">
+            <button id="join-open" class="icon-btn" title="Use a shared Mac" aria-label="Use a shared Mac"><svg class="icon"><use href="#i-plus"/></svg></button>
+            <button id="refresh" class="icon-btn" title="Refresh" aria-label="Refresh"><svg class="icon"><use href="#i-refresh"/></svg></button>
+          </span>
         </div>
-        <p class="empty-note">Services keep running and keep the Mac awake until you stop them.</p>
+        <div id="macs" class="macs"></div>
+      </div>
+
+      <div id="services-box" class="side-section hidden">
+        <div class="side-title"><span>Running</span></div>
         <ul id="services" class="service-list"></ul>
+        <p class="side-note">Servers keep running and keep the Mac awake until you stop them.</p>
+      </div>
+
+      <div class="side-foot">
+        <div class="who"><span class="avatar" aria-hidden="true">PC</span><span class="who-text"><b id="account"></b><span>This PC</span></span></div>
+        <div class="segmented" role="group" aria-label="Appearance"><button data-appearance="light">Light</button><button data-appearance="dark">Dark</button><button data-appearance="system">Auto</button></div>
+        <button id="settings" class="nav-item"><svg class="icon"><use href="#i-key"/></svg>Mac code</button>
+        <button id="updates" class="nav-item"><svg class="icon"><use href="#i-down"/></svg>Updates</button>
+        <button id="signout" class="nav-item"><svg class="icon"><use href="#i-out"/></svg><span>Sign out</span></button>
       </div>
     </aside>
 
-    <main class="deck">
-      <div id="error" class="banner bad hidden"></div>
-
-      <section class="ticket">
+    <main class="main">
+      <header class="page-head">
+        <div>
+          <h1 class="page-title">New run</h1>
+          <p class="page-sub"><span id="route-from-name">This PC</span> <span class="arrow">→</span> <span id="route-to-name">Choose a Mac</span></p>
+          <span id="route-from" class="hidden">PC</span><span id="route-to" class="hidden">MAC</span>
+        </div>
         <div class="tabs"><span id="run-tab" class="tab red">Ready</span><span id="date-tab" class="tab"></span></div>
-        <div class="coupon run die-cut">
-          <div class="route">
-            <div class="port">
-              <span class="label">From</span>
-              <strong id="route-from" class="port-code">PC</strong>
-              <span id="route-from-name" class="port-name">This PC</span>
+      </header>
+
+      <div class="main-scroll">
+        <div id="error" class="banner bad hidden"></div>
+
+        <section class="card run">
+          <div class="run-fields">
+            <label class="field" for="folder">
+              <span class="label">Project folder</span>
+              <div class="inline">
+                <input id="folder" type="text" placeholder="Choose the folder to send" spellcheck="false">
+                <button id="choose" type="button"><svg class="icon"><use href="#i-folder"/></svg>Choose</button>
+              </div>
+            </label>
+            <div class="field">
+              <label class="label" for="command">Command</label>
+              <input id="command" class="command-input" type="text" placeholder="cargo test" spellcheck="false" autocomplete="off">
+              <div id="detect" class="detect hidden" role="group" aria-label="Suggested commands"></div>
             </div>
+          </div>
+
+          <div class="run-progress">
             <ol id="legs" class="legs" aria-label="Run progress">
               <li data-leg="pack"><span>Pack</span></li>
               <li data-leg="upload"><span>Upload</span></li>
@@ -117,132 +139,105 @@
               <li data-leg="return"><span>Return</span></li>
               <span class="jet" aria-hidden="true"></span>
             </ol>
-            <div class="port to">
-              <span class="label">To</span>
-              <strong id="route-to" class="port-code">MAC</strong>
-              <span id="route-to-name" class="port-name">Choose a Mac</span>
-            </div>
-          </div>
-
-          <div class="cells">
-            <label class="cell folder" for="folder">
-              <span class="label">Project folder</span>
-              <div class="inline">
-                <input id="folder" type="text" placeholder="Choose the folder to send" spellcheck="false">
-                <button id="choose" type="button"><svg class="icon"><use href="#i-folder"/></svg>Choose</button>
-              </div>
-            </label>
-            <div class="cell command">
-              <label class="label" for="command">Command</label>
-              <input id="command" type="text" placeholder="cargo test" spellcheck="false" autocomplete="off">
-              <div id="detect" class="detect hidden" role="group" aria-label="Suggested commands"></div>
-            </div>
           </div>
 
           <div class="run-foot">
-            <div class="run-notes">
-              <span id="hint" class="hint"></span>
+            <div class="run-options">
               <label class="check" title="For servers: no time limit, keeps running after you close this window or the PC sleeps, and keeps the Mac awake until you stop it.">
-                <input id="as-service" type="checkbox">
-                <span>Keep running <span class="faint">as a service</span></span>
+                <input id="as-service" type="checkbox"><span>Keep running</span>
               </label>
               <label class="check relay">
-                <input id="relay-only" type="checkbox">
-                <span>Relay only <span class="faint">for testing strict networks</span></span>
+                <input id="relay-only" type="checkbox"><span>Relay only</span>
               </label>
+              <span id="hint" class="hint"></span>
             </div>
-            <button id="cancel" class="danger hidden">Cancel run</button>
+            <button id="cancel" class="danger hidden">Cancel</button>
             <button id="run" class="primary run-btn">Run on Mac</button>
           </div>
-        </div>
-      </section>
+        </section>
 
-      <section class="log">
-        <div class="log-head">
-          <h2 class="heading">Output</h2>
-          <span id="phase" class="phase">Output appears here as the Mac produces it.</span>
-          <button id="clear" class="link">Clear</button>
-        </div>
-        <div class="log-body">
-          <pre id="console" class="console selectable" aria-live="polite"></pre>
-          <div id="result" class="result hidden"></div>
-        </div>
-      </section>
+        <section class="card output">
+          <div class="card-head">
+            <div class="output-title"><h2 class="heading">Output</h2><span id="phase" class="phase">Output appears here as the Mac produces it.</span></div>
+            <button id="clear" class="link">Clear</button>
+          </div>
+          <div class="output-body">
+            <pre id="console" class="console selectable" aria-live="polite"></pre>
+            <div id="result" class="result hidden"></div>
+          </div>
+        </section>
+      </div>
     </main>
   </div>
 
   <!-- Pairing: the code the Mac owner types -->
   <div id="pair-dialog" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="pair-title">
-    <div class="dialog coupon">
+    <div class="dialog">
       <div class="dialog-body">
         <h1 id="pair-title" class="dialog-title">Pair with <span id="pair-mac"></span></h1>
         <p class="muted">On the Mac, open <strong>Borrowed Compute Agent</strong> and type this code into the pairing request. Only this PC is shown the code.</p>
       </div>
-      <div class="perf"></div>
       <div class="dialog-stub">
         <div id="pair-code" class="code big"></div>
-        <div id="pair-wait" class="row"><span class="spinner"></span><span class="muted">Waiting for approval on the Mac…</span></div>
+        <div id="pair-wait" class="row muted"><span class="spinner"></span><span>Waiting for approval on the Mac…</span></div>
         <div id="pair-msg" class="banner hidden"></div>
-        <div class="dialog-actions"><button id="pair-close">Close</button></div>
       </div>
+      <div class="dialog-actions"><button id="pair-close">Close</button></div>
     </div>
   </div>
 
   <!-- Joining a Mac someone shared -->
   <div id="join-dialog" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="join-title">
-    <div class="dialog coupon">
+    <div class="dialog">
       <div class="dialog-body">
         <h1 id="join-title" class="dialog-title">Use a shared Mac</h1>
         <p class="muted">Paste the invite its owner sent you. It starts with <span class="mono">bc-invite:</span> and works once. You don't need an account.</p>
         <textarea id="join-input" rows="4" spellcheck="false" autocomplete="off" aria-label="Invite" placeholder="bc-invite:…"></textarea>
-        <div class="dialog-actions">
-          <button id="join-close">Close</button>
-          <button id="join-go" class="primary">Join</button>
-        </div>
       </div>
-      <div id="join-stub" class="hidden">
-        <div class="perf"></div>
-        <div class="dialog-stub">
-          <span class="label">Read this code to the Mac's owner</span>
-          <div id="join-code" class="code big"></div>
-          <div id="join-wait" class="row"><span class="spinner"></span><span class="muted">Waiting for them to type it on the Mac…</span></div>
-        </div>
+      <div id="join-stub" class="dialog-stub hidden">
+        <span class="label">Read this code to the Mac's owner</span>
+        <div id="join-code" class="code big"></div>
+        <div id="join-wait" class="row muted"><span class="spinner"></span><span>Waiting for them to type it on the Mac…</span></div>
       </div>
       <div class="dialog-body join-result"><div id="join-msg" class="banner hidden"></div></div>
+      <div class="dialog-actions">
+        <button id="join-close">Close</button>
+        <button id="join-go" class="primary">Join</button>
+      </div>
     </div>
   </div>
 
-  <!-- Cloud address -->
+  <!-- Mac code -->
   <div id="cloud-dialog" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="cloud-title">
-    <div class="dialog coupon">
+    <div class="dialog">
       <div class="dialog-body">
         <h1 id="cloud-title" class="dialog-title">Your Mac's code</h1>
-        <p class="muted">The code Borrowed Compute Agent shows on your Mac under Route. A cloud web address works too. Changing it signs you out, because a different Mac is a different account list.</p>
+        <p class="muted">The code Borrowed Compute Agent shows on your Mac under Devices. A cloud web address works too. Changing it signs you out, because a different Mac is a different account list.</p>
         <div class="inline">
           <input id="cloud-input" type="text" spellcheck="false" autocomplete="off">
           <button id="cloud-test">Test</button>
         </div>
         <div id="cloud-msg" class="banner hidden"></div>
-        <div class="dialog-actions">
-          <button id="cloud-cancel">Cancel</button>
-          <button id="cloud-save" class="primary">Save</button>
-        </div>
+      </div>
+      <div class="dialog-actions">
+        <button id="cloud-cancel">Cancel</button>
+        <button id="cloud-save" class="primary">Save</button>
       </div>
     </div>
   </div>
 
   <!-- Updates -->
   <div id="update-dialog" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="update-title">
-    <div class="dialog coupon">
+    <div class="dialog">
       <div class="dialog-body">
         <h1 id="update-title" class="dialog-title">Updates</h1>
         <p id="update-version" class="muted"></p>
         <div id="update-msg" class="banner hidden"><span id="update-text"></span><div id="update-meter" class="meter hidden"><span></span></div></div>
-        <div class="dialog-actions">
-          <button id="update-close">Close</button>
-          <button id="update-check">Check for updates</button>
-          <button id="update-install" class="primary hidden">Install and restart</button>
-        </div>
+      </div>
+      <div class="dialog-actions">
+        <button id="update-close">Close</button>
+        <button id="update-check">Check for updates</button>
+        <button id="update-install" class="primary hidden">Install and restart</button>
       </div>
     </div>
   </div>
