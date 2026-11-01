@@ -70,3 +70,20 @@ jobs:
           if ($update.ExitCode -ne 0) { throw "the update installer exited with $($update.ExitCode)" }
           if (-not $app.HasExited) { throw "the old app is still running" }
           if (-not (Test-Path $exe.FullName)) { throw "the app is missing after the update" }
+
+      # The uninstaller must finish even when another program still holds the app's file
+      # open, as File Explorer does while it reads the icon; Windows will not close those
+      # for the installer, which used to stop with "Failed to kill Borrowed Compute".
+      - name: Uninstall while another program holds the app's file
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $dir = "$env:LOCALAPPDATA\Borrowed Compute"
+          $exe = Get-ChildItem "$dir\*.exe" | Where-Object Name -ne 'uninstall.exe' | Select-Object -First 1
+          Get-Process | Where-Object { $_.Path -eq $exe.FullName } | Stop-Process -Force
+          $holder = Start-Process pwsh -PassThru -ArgumentList '-NoProfile', '-Command', "`$f = [IO.File]::Open('$($exe.FullName)', 'Open', 'Read', 'ReadWrite, Delete'); Start-Sleep 120"
+          Start-Sleep 3
+          $un = Start-Process "$dir\uninstall.exe" -ArgumentList '/S', "_?=$dir" -Wait -PassThru
+          $holder | Stop-Process -Force -ErrorAction SilentlyContinue
+          if ($un.ExitCode -ne 0) { throw "the uninstaller exited with $($un.ExitCode)" }
+          if (Test-Path $exe.FullName) { throw "the app is still installed" }
