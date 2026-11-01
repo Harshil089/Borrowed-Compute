@@ -47,6 +47,13 @@ pub fn normalize_cloud_url(input: &str) -> Result<String> {
     if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
         bail!("{input:?} must be an http or https address");
     }
+    // Session tokens travel in every request, so plain http only stays on this computer.
+    let host = parsed.host_str().unwrap_or_default().trim_start_matches('[').trim_end_matches(']');
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    if parsed.scheme() == "http" && !loopback {
+        bail!("{input:?} must use https; plain http is only for this computer (localhost)");
+    }
     if parsed.path() != "/" || parsed.query().is_some() {
         bail!("give only the address, without a path: for example https://cloud.example.com");
     }
@@ -347,6 +354,10 @@ mod tests {
         assert_eq!(normalize_cloud_url("my-mac.tail1234.ts.net").unwrap(), "https://my-mac.tail1234.ts.net");
         assert_eq!(normalize_cloud_url(" https://my-mac.tail1234.ts.net/ ").unwrap(), "https://my-mac.tail1234.ts.net");
         assert_eq!(normalize_cloud_url("http://127.0.0.1:8080").unwrap(), "http://127.0.0.1:8080");
+        assert_eq!(normalize_cloud_url("http://localhost:8080").unwrap(), "http://localhost:8080");
+        assert_eq!(normalize_cloud_url("http://[::1]:8080").unwrap(), "http://[::1]:8080");
+        assert!(normalize_cloud_url("http://cloud.example.com").is_err(), "tokens would travel in the clear");
+        assert!(normalize_cloud_url("http://192.168.1.20:8080").is_err());
         assert!(normalize_cloud_url("ftp://x").is_err());
         assert!(normalize_cloud_url("https://x/v1/health").is_err());
         assert!(normalize_cloud_url("not a url at all").is_err());
