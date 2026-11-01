@@ -1,7 +1,7 @@
 //! Handles one connection from a client: handshake, upload, run, stream back.
 
 use anyhow::{bail, Context, Result};
-use bc_net::{recv_msg, send_msg};
+use bc_net::{recv_msg, recv_msg_max, send_msg};
 use bc_proto::wire::{AgentMsg, ClientMsg, PROTOCOL_VERSION};
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use std::collections::HashMap;
@@ -102,6 +102,8 @@ pub struct AgentConfig {
     pub limits: Limits,
     /// Cloud connections served at once; any device may open them.
     pub cloud_slots: std::sync::Arc<tokio::sync::Semaphore>,
+    /// Job and guest connections still before the paired or invite check.
+    pub handshake_slots: std::sync::Arc<tokio::sync::Semaphore>,
     pub rejections: Rejections,
     /// Devices on other accounts the owner approved, allowed while sharing is on.
     pub guests: crate::guests::Guests,
@@ -140,6 +142,11 @@ impl Rejections {
 /// Cloud connections served at once, and requests in flight on each.
 pub const MAX_CLOUD_CONNECTIONS: usize = 32;
 pub const MAX_CLOUD_STREAMS: u32 = 16;
+/// Connections from devices not yet checked, handled at once. Anyone who knows this
+/// Mac's code can open them, so they are few, small and short.
+pub const MAX_HANDSHAKES: usize = 64;
+pub const HANDSHAKE_FRAME: usize = 1 << 20;
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl AgentConfig {
     pub fn new(runner: RunnerConfig, paired: PairedDevices) -> Self {
@@ -151,6 +158,7 @@ impl AgentConfig {
             cloud_port: None,
             limits: Limits::default(),
             cloud_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CLOUD_CONNECTIONS)),
+            handshake_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_HANDSHAKES)),
             rejections: Rejections::default(),
             guests: crate::guests::Guests::default(),
         }
@@ -163,22 +171,38 @@ impl AgentConfig {
     }
 }
 
+/// Takes a handshake slot, or turns the connection away when all are in use.
+fn handshake_slot(config: &AgentConfig, conn: &Connection) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    let slot = config.handshake_slots.clone().try_acquire_owned().ok();
+    if slot.is_none() {
+        conn.close(1u32.into(), b"busy");
+    }
+    slot
+}
+
 pub async fn serve_connection(config: &AgentConfig, conn: Connection) -> Result<()> {
     let peer = conn.remote_id();
-    let (mut send, mut recv) = conn.accept_bi().await?;
-
-    match recv_msg::<ClientMsg>(&mut recv).await? {
-        ClientMsg::Hello { protocol } if protocol == PROTOCOL_VERSION => {}
-        ClientMsg::Hello { protocol } => {
-            let reason = format!("protocol {protocol} not supported, agent speaks {PROTOCOL_VERSION}");
-            send_msg(&mut send, &AgentMsg::Rejected { reason: reason.clone() }).await?;
-            bail!(reason);
+    let Some(slot) = handshake_slot(config, &conn) else {
+        return Ok(());
+    };
+    let handshake = async {
+        let (mut send, mut recv) = conn.accept_bi().await?;
+        match recv_msg_max::<ClientMsg>(&mut recv, HANDSHAKE_FRAME).await? {
+            ClientMsg::Hello { protocol } if protocol == PROTOCOL_VERSION => {}
+            ClientMsg::Hello { protocol } => {
+                let reason = format!("protocol {protocol} not supported, agent speaks {PROTOCOL_VERSION}");
+                send_msg(&mut send, &AgentMsg::Rejected { reason: reason.clone() }).await?;
+                bail!(reason);
+            }
+            other => bail!("expected Hello, got {other:?}"),
         }
-        other => bail!("expected Hello, got {other:?}"),
-    }
-    send_msg(&mut send, &AgentMsg::Hello { protocol: PROTOCOL_VERSION }).await?;
-
-    let first = recv_msg::<ClientMsg>(&mut recv).await?;
+        send_msg(&mut send, &AgentMsg::Hello { protocol: PROTOCOL_VERSION }).await?;
+        let first = recv_msg_max::<ClientMsg>(&mut recv, HANDSHAKE_FRAME).await?;
+        Ok((send, recv, first))
+    };
+    let (mut send, mut recv, first) = tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake)
+        .await
+        .context("handshake timed out")??;
     // Checked after the handshake so an unpaired device gets a clear message.
     if !config.paired.contains(&peer) && !config.guests.allows(&peer) {
         let reason = format!("device {peer} is not paired with this Mac");
@@ -189,9 +213,11 @@ pub async fn serve_connection(config: &AgentConfig, conn: Connection) -> Result<
         }
         send_msg(&mut send, &AgentMsg::Rejected { reason }).await?;
         send.finish()?;
-        conn.closed().await;
+        // Give the answer time to arrive, but never hold a handshake slot for long.
+        let _ = tokio::time::timeout(Duration::from_secs(10), conn.closed()).await;
         return Ok(());
     }
+    drop(slot);
     let req = match first {
         ClientMsg::Submit(req) => req,
         ClientMsg::Attach { job_id } => {
@@ -435,8 +461,16 @@ async fn forward_stream(services: &Services, job_id: &str, mut send: SendStream,
 pub async fn serve_guest(config: &AgentConfig, conn: Connection) -> Result<()> {
     use bc_proto::guest::{GuestMsg, GuestReply};
     let peer = conn.remote_id();
-    let (mut send, mut recv) = conn.accept_bi().await?;
-    let GuestMsg::Request { token, device_name } = recv_msg::<GuestMsg>(&mut recv).await?;
+    let Some(slot) = handshake_slot(config, &conn) else {
+        return Ok(());
+    };
+    let request = async {
+        let (send, mut recv) = conn.accept_bi().await?;
+        anyhow::Ok((send, recv_msg_max::<GuestMsg>(&mut recv, HANDSHAKE_FRAME).await?))
+    };
+    let (mut send, GuestMsg::Request { token, device_name }) = tokio::time::timeout(HANDSHAKE_TIMEOUT, request)
+        .await
+        .context("guest request timed out")??;
     let reply = if config.guests.is_guest(&peer) {
         // Already approved, as when an invite is pasted twice: nothing to use up.
         GuestReply::Approved { mac_name: bc_auth::default_device_name() }
@@ -444,6 +478,8 @@ pub async fn serve_guest(config: &AgentConfig, conn: Connection) -> Result<()> {
         match config.guests.request(&token, peer, &device_name) {
             Err(reason) => GuestReply::Rejected { reason },
             Ok(pending) => {
+                // A valid invite: waiting for the owner no longer counts as a stranger's slot.
+                drop(slot);
                 config.emit(AgentEvent::GuestsChanged);
                 send_msg(&mut send, &GuestReply::Pending { code: pending.code.clone() }).await?;
                 let answer = tokio::select! {

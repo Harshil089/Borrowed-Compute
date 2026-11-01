@@ -169,6 +169,21 @@ async fn unpaired_device_is_rejected() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn agent_refuses_large_frames_before_the_paired_check() {
+    let s = setup().await;
+    let conn = s.client.connect(s.agent.addr(), bc_net::JOB_ALPN).await.unwrap();
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+    // A length prefix just over the handshake limit, with no body: the agent must not
+    // wait for (or allocate) the body.
+    let prefix = ((bc_agent::server::HANDSHAKE_FRAME + 1) as u32).to_be_bytes();
+    send.write_all(&prefix).await.unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(10), bc_net::recv_msg::<bc_proto::wire::AgentMsg>(&mut recv))
+        .await
+        .expect("the agent drops the stream instead of waiting");
+    assert!(reply.is_err(), "no reply to an oversized frame: {reply:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn agent_reports_job_events() {
     use bc_agent::events::{AgentEvent, JobEnd};
 
