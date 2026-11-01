@@ -110,7 +110,7 @@ async function loadStatus() {
   const guest = !status.signed_in && status.shared.length > 0 && !wantSignIn;
   $("signin-view").classList.toggle("hidden", status.signed_in || guest);
   $("app-view").classList.toggle("hidden", !status.signed_in && !guest);
-  $("signout").textContent = guest ? "Sign in" : "Sign out";
+  $("signout").lastElementChild.textContent = guest ? "Sign in" : "Sign out";
   $("settings").classList.toggle("hidden", guest);
   if (guest) {
     selectedMac = selectedMac || status.default_mac;
@@ -225,7 +225,7 @@ function updateRunButton() {
   const mac = allMacs().find((d) => d.name === selectedMac);
   const paired = mac && pairingFor(mac)?.status === "approved";
   $("run").disabled = running || !selectedMac || !$("folder").value.trim();
-  $("run").textContent = selectedMac ? `Run on ${deviceCode(selectedMac)}` : "Run on Mac";
+  $("run").textContent = selectedMac ? `Run on ${selectedMac}` : "Run on Mac";
   if (selectedMac && mac && !paired) {
     $("run").title = `Pair with ${selectedMac} first`;
   } else {
@@ -761,8 +761,8 @@ function renderResult(r) {
       <button class="link" data-log="${esc(r.log_path)}"><svg class="icon"><use href="#i-doc"/></svg>Open log</button>
     </div>
     <p class="result-trip">
-      <span><b>Door to door</b> <span class="num">${fig(t.total_ms)}</span></span>
-      <span><b>Route</b> ${t.via_relay ? "via relay" : "direct"}</span>
+      <span><b>Total</b> <span class="num">${fig(t.total_ms)}</span></span>
+      <span><b>Path</b> ${t.via_relay ? "via relay" : "direct"}</span>
     </p>
     <dl class="ledger">
       ${u ? row("CPU", `${fig(u.user_ms + u.system_ms)}`) : row("CPU", "<small>n/a</small>")}

@@ -43,7 +43,7 @@ Not pixels (remote desktop, cloud streaming) and not infrastructure (SSH build f
 
 ## Brand Commitments
 
-None fixed. The product name "Borrowed Compute", the app names, and the current icons (`design/icon-client.svg`, `design/icon-agent.svg`, `design/tray.svg`) may all be revisited.
+Owner decision, 2026-11-01: the apps follow the established design language of best-in-class software, not a themed or novel world. The bar is Stripe (light, precise, indigo accent, impeccable type and tables) and native macOS apps (sidebar navigation, system type and greys, quiet motion). Light is the default with a matching dark mode. Earlier themed looks (the jet-age ticket wallet, Silicon Die) were rejected; do not reintroduce metaphors, novelty palettes or decorative motion.
 
 ## Evidence on Hand
 

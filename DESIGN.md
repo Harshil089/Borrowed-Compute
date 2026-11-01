@@ -1,119 +1,96 @@
 ---
 name: Borrowed Compute
-description: Silicon Die. The product borrows a chip, so the apps and the website are cut from one.
+description: The established language of Stripe and native macOS apps, applied to both desktop apps.
 colors:
-  ground: "#07080a"
-  package: "#111316"
-  cell: "#16191d"
-  raised: "#1c2025"
-  ink: "#ece9e2"
-  ink-2: "#aeaca6"
-  ink-3: "#8b8984"
-  rule: "rgba(236,233,226,0.18)"
-  rule-2: "rgba(236,233,226,0.09)"
-  gold: "#d9a441"
-  gold-ink: "#e7b95a"
-  gold-press: "#f0c66b"
-  on-gold: "#0b0a07"
-  gold-wash: "rgba(217,164,65,0.08)"
-  gold-rule: "rgba(217,164,65,0.32)"
-  ok: "#5ad19a"
-  warn: "#f2bd57"
-  bad: "#ff7a72"
-  day-ground: "#f2f0eb"
-  day-package: "#ffffff"
-  day-ink: "#121316"
-  day-ink-2: "#4a4c52"
-  day-ink-3: "#62646a"
-  day-gold-ink: "#835a0c"
-  day-ok: "#17784b"
-  day-bad: "#b3261e"
+  bg: "#f6f8fa"
+  sidebar: "#eef1f5"
+  surface: "#ffffff"
+  subtle: "#f6f8fa"
+  hover: "#edf0f4"
+  border: "#e3e8ee"
+  border-strong: "#c1c9d2"
+  ink: "#1a1f36"
+  ink-2: "#545969"
+  ink-3: "#687385"
+  accent: "#635bff"
+  accent-hover: "#5851ea"
+  accent-ink: "#4f46e5"
+  accent-soft: "#eeedff"
+  ok: "#0e6245"
+  ok-soft: "#d7f7c2"
+  warn: "#983705"
+  warn-soft: "#fcedb9"
+  bad: "#c0123c"
+  bad-soft: "#ffe7f2"
+  dark-bg: "#1b1b1f"
+  dark-sidebar: "#232328"
+  dark-surface: "#26262b"
+  dark-border: "#36363d"
+  dark-ink: "#f2f2f5"
+  dark-ink-2: "#b4b4bd"
+  dark-ink-3: "#9a9aa4"
+  dark-accent: "#7a73ff"
 typography:
-  display:
-    fontFamily: "Archivo, Helvetica Neue, Arial, sans-serif"
-    fontWeight: 700
-    fontStretch: "125%"
-    letterSpacing: "-0.035em"
-  heading:
-    fontFamily: "Archivo"
-    fontSize: "15px"
-    fontWeight: 650
-    fontStretch: "112%"
-  label:
-    fontFamily: "Archivo"
-    fontSize: "10.5px"
-    fontWeight: 600
-    fontStretch: "125%"
-    letterSpacing: "0.16em"
-    textTransform: uppercase
   body:
-    fontFamily: "Archivo, -apple-system, Segoe UI, sans-serif"
-    fontSize: "14px"
+    fontFamily: "-apple-system, BlinkMacSystemFont, Segoe UI Variable Text, Segoe UI, system-ui, sans-serif"
+    fontSize: "13.5px"
     lineHeight: 1.5
-  mono:
-    fontFamily: "Martian Mono, ui-monospace, Cascadia Mono, monospace"
-    fontSize: "12px"
-    letterSpacing: "-0.01em"
-  figure:
-    fontFamily: "Martian Mono"
+  page-title:
+    fontSize: "22px"
+    fontWeight: 600
+    letterSpacing: "-0.02em"
+  heading:
+    fontSize: "15px"
+    fontWeight: 600
+  label:
+    fontSize: "12.5px"
     fontWeight: 500
-    letterSpacing: "-0.05em"
-    fontFeature: "tnum"
+  mono:
+    fontFamily: "ui-monospace, SF Mono, Cascadia Mono, Menlo, Consolas, monospace"
+    fontSize: "12.5px"
 rounded:
-  package: "12px"
-  field: "9px"
-  control: "999px"
+  card: "10px"
+  control: "6px"
+  pill: "999px"
 spacing:
   xs: "6px"
   sm: "8px"
   md: "12px"
-  lg: "16px"
-  xl: "20px"
-  2xl: "26px"
+  lg: "18px"
+  xl: "22px"
+  2xl: "28px"
 ---
 
 # Design System: Borrowed Compute
 
 ## Overview
 
-**Creative North Star: "Silicon Die"**
-
-Borrowed Compute borrows the chip in your Mac, so every surface is cut from one: a die-black ground, graphite packages that hold each part of the interface, and bond-wire gold for the one thing to press and for every number the Mac measured. The apps and the website share one token set. The website's hero is a live replica of the Windows app running a real job, so the product is the picture.
-
-Dark is the default and the native light of the world; Daylight reprints the same parts on a pale wafer, with gold darkened to stay readable as text.
-
-The system refuses the developer-tool defaults (glowing terminals, neon accents, gradient blobs, feature-card grids) and decoration that is not a part of the machine.
+The owner chose the established design language of best-in-class software over any themed world: Stripe's precision (ink, cool greys, one indigo accent, immaculate type and tables) and the structure of native macOS apps (a sidebar, system fonts, quiet motion). Light is the default; dark matches it role for role.
 
 ## Colors
 
-- **Ground** is the window and page background. **Package** is every container; **Cell** fills a ruled part inside one; **Raised** is a switch track or a hover.
-- **Ink** ramp: ink for text, ink-2 for secondary text, ink-3 for labels and placeholders. All pass 4.5:1 on package in both themes.
-- **Gold** fills the one primary button, the switch when on, the progress of a run's phases and its marker, and the focus ring. **Gold ink** is gold as text: measured figures (time, CPU, cores, memory), codes to type or match, a selected Mac, the destination of a run. **Gold wash** and **gold rule** tint the result of a run, requests to approve and the selected Mac.
-- **Ok, warn, bad** are only for state: badges, banners, the online dot.
-
-**The Gold Rule.** Gold means "act here" or "this was measured". Nothing else is gold.
-
-**The One Button Rule.** A package carries at most one filled gold button.
+Cool grey window, white cards, Stripe ink text in three steps. Indigo is the only accent: the primary button, the selected item, progress, links and focus. Green, amber and red appear only in status badges and banners, always as tinted pills.
 
 ## Typography
 
-Archivo is the only text face; its width axis carries hierarchy. Expanded 125% at 700 for display, the big device monograms (WPC, HMA) and run times' units; 112% for headings; 125% caps with wide tracking for small engraved labels. Body text is Archivo at normal width. Martian Mono is the machine's voice: commands, paths, output, ids, codes and measured figures, with tabular numerals.
+System fonts only: SF on the Mac, Segoe UI on Windows, so each app reads as native. Page titles 22px semibold, section headings 15px semibold, labels 12.5px medium, body 13.5px. Commands, paths, output, codes and measured figures use the system monospace.
 
-## Layout and shape
+## Layout
 
-Packages have 12px corners and a hairline (rule) border with a soft, long shadow; fields have 9px corners; buttons, chips, badges and segmented controls are fully round. Inside a package, cells are separated by rule-2 hairlines rather than nested cards. Spacing runs on 6, 8, 12, 16, 20 and 26px.
+Both apps are a sidebar and a main area. The PC app's sidebar lists Macs (selected one raised on a white tile with its badges and actions) and running servers, with the account, appearance, Mac code, updates and sign out at the bottom. The main area is a page header (New run, PC to Mac, status badge), the run card (folder, command with suggestions, a four-step progress bar, options and the Run button in a grey footer) and the output card (log on the left, measured summary on the right).
 
-The PC app is a header bar, a rail of Macs and a deck: the run (route with phases, folder, command, Run) over the output, with the result docked to the output's right edge. The Mac app is one column on narrow windows and two at 900px and up: live work (requests, the latest run, servers, recent runs) on the left, setup (connect, paired devices, guests, settings) on the right.
+The Mac app's sidebar switches pages like System Settings: Overview (requests to approve, the current run, running servers), Activity (recent runs table), Devices (the Mac's code, paired devices), Sharing (guests and invites) and Settings. A count badge on Overview shows pending requests.
 
 ## Components
 
-- **Buttons:** transparent with a rule border; hover lifts to the cell fill. Primary is filled gold with dark text. Danger is bad-colored text and border. Links are underlined in gold.
-- **Phases:** a hairline track per phase that fills gold when done and flows while active, with a gold marker riding the run's progress.
-- **Badges:** Done, Exit N, Cancelled, Refused, Running: round, outlined in their state color with a dot.
-- **Result:** the run's time large in gold mono, then a two-column ledger of measured figures.
-- **Inputs:** cell fill, rule border, mono text; focus turns the border gold with a soft gold ring.
-- **Switch:** raised track, gold when on.
+- **Cards** have 10px corners and Stripe's layered shadow with no border.
+- **Buttons** are white with a hairline shadow ring; primary is filled indigo with a soft indigo glow; danger is red text. Links are indigo text.
+- **Fields** have a 1px ring that turns indigo with a soft focus halo.
+- **Badges** are rounded pills: tinted green for done or online, red for failed or refused, indigo for running, grey otherwise.
+- **Progress** is four bars that fill indigo, the active one animated.
+- **Tables** have a grey header row and hairline row rules; rows tint on hover.
+- **Switches and segmented controls** follow macOS.
 
 ## Motion
 
-Phases fill and flow, the result slides in once when a run ends, requests rise in when they arrive. Everything respects reduced motion.
+Short and functional: pages fade up 4px when switched, results slide in when a run ends, requests rise in when they arrive, the active progress bar flows. Reduced motion turns all of it off.

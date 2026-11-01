@@ -699,3 +699,26 @@ loadSettings();
 updateOnStart();
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") refresh(); });
 refresh();
+
+// ---- Sections: one page at a time, remembered between launches ----
+function showPage(name) {
+  document.querySelectorAll("[data-page]").forEach((p) => p.classList.toggle("hidden", p.dataset.page !== name));
+  document.querySelectorAll("[data-nav]").forEach((b) => b.setAttribute("aria-current", b.dataset.nav === name ? "page" : "false"));
+  $("page-title").textContent = document.querySelector(`[data-nav="${name}"]`).dataset.title;
+  try { localStorage.setItem("page", name); } catch { /* storage off */ }
+}
+document.querySelectorAll("[data-nav]").forEach((b) => b.addEventListener("click", () => showPage(b.dataset.nav)));
+let savedPage = null;
+try { savedPage = localStorage.getItem("page"); } catch { /* storage off */ }
+showPage(savedPage || "overview");
+
+// Requests waiting show as a count on Overview, whichever page is open; a Mac with no
+// paired PC yet opens on Devices, where its code is.
+new MutationObserver(() => {
+  const n = $("requests").querySelectorAll("[data-request]").length;
+  $("nav-count").textContent = String(n);
+  $("nav-count").classList.toggle("hidden", n === 0);
+}).observe($("requests"), { childList: true });
+new MutationObserver(() => {
+  if (!savedPage && $("home").classList.contains("needs-route")) { savedPage = "devices"; showPage("devices"); }
+}).observe($("home"), { attributes: true, attributeFilter: ["class"] });
