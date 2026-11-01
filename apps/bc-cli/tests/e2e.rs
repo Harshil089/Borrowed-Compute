@@ -49,7 +49,7 @@ async fn setup_with(events: Option<bc_agent::events::EventSender>) -> Setup {
         RunnerConfig {
             work_root: work_root.path().to_path_buf(),
             default_timeout: Duration::from_secs(30),
-            denied_ports: Vec::new(),
+            denied_ports: Vec::new(), guest: false,
         },
         paired.clone(),
     );
@@ -244,7 +244,7 @@ async fn auto_fix_installs_dependencies_and_runs_again() {
     paired.add(client_key.public()).unwrap();
     let work_root = tempfile::tempdir().unwrap();
     let config = AgentConfig::new(
-        RunnerConfig { work_root: work_root.path().to_path_buf(), default_timeout: Duration::from_secs(120), denied_ports: Vec::new() },
+        RunnerConfig { work_root: work_root.path().to_path_buf(), default_timeout: Duration::from_secs(120), denied_ports: Vec::new(), guest: false },
         paired,
     );
     let accept = agent.clone();
@@ -301,7 +301,7 @@ async fn service_keeps_running_after_detach_until_stopped() {
     let work_root = tempfile::tempdir().unwrap();
     // A 1 s default timeout, which a service must ignore.
     let config = AgentConfig::new(
-        RunnerConfig { work_root: work_root.path().to_path_buf(), default_timeout: Duration::from_secs(1), denied_ports: Vec::new() },
+        RunnerConfig { work_root: work_root.path().to_path_buf(), default_timeout: Duration::from_secs(1), denied_ports: Vec::new(), guest: false },
         paired,
     );
     let accept = agent.clone();
@@ -399,7 +399,7 @@ async fn forwards_a_service_port_to_localhost() {
     paired.add(client_key.public()).unwrap();
     let work_root = tempfile::tempdir().unwrap();
     let config = AgentConfig::new(
-        RunnerConfig { work_root: work_root.path().to_path_buf(), default_timeout: Duration::from_secs(30), denied_ports: Vec::new() },
+        RunnerConfig { work_root: work_root.path().to_path_buf(), default_timeout: Duration::from_secs(30), denied_ports: Vec::new(), guest: false },
         paired,
     );
     let accept = agent.clone();

@@ -9,7 +9,10 @@
 //! - network: outbound TCP and UDP anywhere, since builds download dependencies, except
 //!   well-known services on this Mac's localhost (databases, Redis, Docker, Ollama, ssh);
 //!   inbound only on localhost; Unix sockets only inside the workspace (plus DNS), so the
-//!   owner's ssh agent and other local sockets are out of reach;
+//!   owner's ssh agent and other local sockets are out of reach. A guest's job (someone
+//!   on another account) reaches only ports 80 and 443 off this Mac: Seatbelt matches
+//!   hosts only as `*` or `localhost`, so it cannot single out the local network, and
+//!   fewer ports at least keep a guest off the LAN's other services;
 //! - system services, except the clipboard, the keychain, LaunchServices (`open`) and
 //!   Apple Events, and preferences of the system and developer tools only.
 //!
@@ -68,7 +71,7 @@ const SYSTEM_READ: &[&str] = &[
 
 /// The sandbox-exec argv prefix for a job in `workspace`, or `None` when sandboxing is
 /// not available here (not macOS) or turned off.
-pub fn wrapper(workspace: &Path, path_env: Option<&OsStr>, denied_ports: &[u16]) -> Option<Vec<OsString>> {
+pub fn wrapper(workspace: &Path, path_env: Option<&OsStr>, denied_ports: &[u16], guest: bool) -> Option<Vec<OsString>> {
     if !cfg!(target_os = "macos") || std::env::var_os("BC_NO_SANDBOX").is_some() {
         return None;
     }
@@ -76,12 +79,12 @@ pub fn wrapper(workspace: &Path, path_env: Option<&OsStr>, denied_ports: &[u16])
         return None;
     }
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    Some(vec![SANDBOX_EXEC.into(), "-p".into(), profile(workspace, home.as_deref(), path_env, denied_ports).into()])
+    Some(vec![SANDBOX_EXEC.into(), "-p".into(), profile(workspace, home.as_deref(), path_env, denied_ports, guest).into()])
 }
 
 /// The Seatbelt profile. Paths are resolved first: Seatbelt matches real paths, and on
 /// macOS /var and /tmp are links into /private.
-pub fn profile(workspace: &Path, home: Option<&Path>, path_env: Option<&OsStr>, denied_ports: &[u16]) -> String {
+pub fn profile(workspace: &Path, home: Option<&Path>, path_env: Option<&OsStr>, denied_ports: &[u16], guest: bool) -> String {
     let mut read: Vec<PathBuf> = SYSTEM_READ.iter().map(PathBuf::from).collect();
     if let Some(home) = home {
         read.extend(HOME_TOOLCHAINS.iter().map(|d| home.join(d)));
@@ -124,7 +127,13 @@ pub fn profile(workspace: &Path, home: Option<&Path>, path_env: Option<&OsStr>, 
     sb += "(allow file-read* file-write* (regex #\"^/private/var/folders/[^/]+/[^/]+/T/xcrun_db\"))\n";
     // Outbound TCP and UDP anywhere, for downloads. Unix sockets only in the workspace
     // (below) and DNS, so the owner's ssh agent and other local sockets stay out of reach.
-    sb += "(allow network-outbound (remote ip))\n";
+    if guest {
+        // Downloads go over HTTP and HTTPS; anything else off this Mac is the owner's
+        // network, not a guest's.
+        sb += "(allow network-outbound (remote ip \"*:80\") (remote ip \"*:443\") (remote ip \"localhost:*\"))\n";
+    } else {
+        sb += "(allow network-outbound (remote ip))\n";
+    }
     sb += "(allow network-outbound (literal \"/private/var/run/mDNSResponder\"))\n";
     // Well-known local services (databases, caches, Docker, model servers, ssh) that the
     // owner may run without a password. A job's own servers on other ports still work.
@@ -165,7 +174,7 @@ mod tests {
         std::fs::create_dir_all(home.path().join(".rustup")).unwrap();
         std::fs::create_dir_all(home.path().join(".cargo/bin")).unwrap();
         let path_env = std::env::join_paths([home.path().join(".cargo/bin"), "/usr/bin".into()]).unwrap();
-        let sb = profile(ws.path(), Some(home.path()), Some(&path_env), &[]);
+        let sb = profile(ws.path(), Some(home.path()), Some(&path_env), &[], false);
         let home_real = real(home.path());
         assert!(sb.contains(&format!("(subpath {})", quote(&home_real.join(".rustup")))));
         assert!(sb.contains(&format!("(subpath {})", quote(&home_real.join(".cargo/bin")))));
@@ -177,7 +186,7 @@ mod tests {
     #[test]
     fn profile_shuts_out_clipboard_keychain_and_local_services() {
         let ws = tempfile::tempdir().unwrap();
-        let sb = profile(ws.path(), None, None, &[8080]);
+        let sb = profile(ws.path(), None, None, &[8080], false);
         assert!(sb.contains("(global-name \"com.apple.pasteboard.1\")"));
         assert!(sb.contains("(global-name \"com.apple.SecurityServer\")"));
         assert!(sb.contains("(global-name \"com.apple.coreservices.launchservicesd\")"));
@@ -185,6 +194,34 @@ mod tests {
         assert!(sb.contains("(remote ip \"localhost:8080\")"), "the cloud's port when this Mac hosts it");
         assert!(!sb.contains("(allow network-outbound)\n"), "no blanket outbound, which includes every Unix socket");
         assert!(!sb.contains(" user-preference-read)"), "no blanket preference reading");
+    }
+
+    #[test]
+    fn guest_profile_reaches_only_web_ports_off_this_mac() {
+        let ws = tempfile::tempdir().unwrap();
+        let sb = profile(ws.path(), None, None, &[], true);
+        assert!(sb.contains("(remote ip \"*:443\")"));
+        assert!(!sb.contains("(allow network-outbound (remote ip))"), "no outbound to every port");
+        assert!(sb.contains("(remote ip \"localhost:5432\")"), "the local denylist still applies");
+    }
+
+    /// Seatbelt itself refuses a guest's connection to a non-web port off this Mac, while
+    /// the owner's job is let through (and times out: 192.0.2.1 is a documentation
+    /// address nobody answers). Needs no network.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn guest_job_cannot_reach_other_ports_off_this_mac() {
+        let ws = tempfile::tempdir().unwrap();
+        let refused = |guest: bool| {
+            let out = std::process::Command::new(SANDBOX_EXEC)
+                .args(["-p", &profile(ws.path(), None, None, &[], guest)])
+                .args(["/usr/bin/nc", "-v", "-z", "-G", "1", "192.0.2.1", "9"])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stderr).contains("Operation not permitted")
+        };
+        assert!(!refused(false), "the owner's job may connect anywhere");
+        assert!(refused(true), "a guest's job may not");
     }
 
     #[test]
