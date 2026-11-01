@@ -31,10 +31,24 @@
   Pop $R7
 !macroend
 
+; Something other than the app can still hold the program file open even after the app
+; has exited, such as File Explorer reading its icon. Tauri's check asks Windows to close
+; whatever holds the file and gives up with "Failed to kill" when it cannot, so the install
+; or uninstall stops with nothing running. Windows allows renaming a file that is open or
+; even running, and a renamed file has no holders for that check to find. The old file is
+; deleted now if nothing holds it, otherwise at the next restart.
+!macro BC_SET_EXE_ASIDE
+  Delete "$INSTDIR\${MAINBINARYNAME}.exe.old"
+  Rename "$INSTDIR\${MAINBINARYNAME}.exe" "$INSTDIR\${MAINBINARYNAME}.exe.old"
+  Delete /REBOOTOK "$INSTDIR\${MAINBINARYNAME}.exe.old"
+!macroend
+
 !macro NSIS_HOOK_PREINSTALL
   !insertmacro BC_CLOSE_APP
+  !insertmacro BC_SET_EXE_ASIDE
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
   !insertmacro BC_CLOSE_APP
+  !insertmacro BC_SET_EXE_ASIDE
 !macroend
