@@ -122,11 +122,22 @@ pub async fn send_msg<T: Serialize>(send: &mut SendStream, msg: &T) -> Result<()
 }
 
 pub async fn recv_msg<T: DeserializeOwned>(recv: &mut RecvStream) -> Result<T> {
+    recv_msg_max(recv, wire::MAX_FRAME).await
+}
+
+/// Like [`recv_msg`], but refuses frames over `max` bytes before allocating for them.
+/// Used before a device is known, so a stranger cannot make the Mac allocate
+/// [`wire::MAX_FRAME`] per connection.
+pub async fn recv_msg_max<T: DeserializeOwned>(recv: &mut RecvStream, max: usize) -> Result<T> {
     let mut prefix = [0u8; 4];
     recv.read_exact(&mut prefix)
         .await
         .context("reading frame length")?;
-    let mut body = vec![0u8; wire::frame_len(prefix)?];
+    let len = wire::frame_len(prefix)?;
+    if len > max {
+        anyhow::bail!("frame of {len} bytes is over the {max} byte limit");
+    }
+    let mut body = vec![0u8; len];
     recv.read_exact(&mut body)
         .await
         .context("reading frame body")?;
