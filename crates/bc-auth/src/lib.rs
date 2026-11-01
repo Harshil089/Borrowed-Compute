@@ -5,6 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use bc_proto::cloud::{
+    approve_message,
     register_message, sha256_hex, ApiErrorBody, ApprovePairing, CreatePairing, DeviceFlowPoll,
     DeviceFlowStart, DeviceFlowStatus, DeviceInfo, DeviceKind, Heartbeat, Me, PairedClients,
     PairingInfo, RegisterDevice, Provider, Providers, RelayInfo};
@@ -273,12 +274,18 @@ impl CloudClient {
         self.get(&format!("/v1/pairings?device={device}")).await
     }
 
-    pub async fn approve(&self, pairing_id: i64, code: &str) -> Result<PairingInfo> {
-        self.post(
-            &format!("/v1/pairings/{pairing_id}/approve"),
-            &ApprovePairing { code: code.to_string() },
-        )
-        .await
+    /// Approves a pairing request on the Mac. `mac_key` is this Mac's device key: the cloud
+    /// accepts only an approval signed by the Mac the request is for.
+    pub async fn approve(&self, mac_key: &SecretKey, pairing_id: i64, code: &str) -> Result<PairingInfo> {
+        let token = self.token.as_deref().context("sign in first")?;
+        let signed_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        let message = approve_message(pairing_id, signed_at, &sha256_hex(token.as_bytes()));
+        let body = ApprovePairing {
+            code: code.to_string(),
+            signed_at,
+            signature: hex::encode(mac_key.sign(&message).to_bytes()),
+        };
+        self.post(&format!("/v1/pairings/{pairing_id}/approve"), &body).await
     }
 
     pub async fn unpair(&self, pairing_id: i64) -> Result<()> {

@@ -102,7 +102,8 @@ async fn main() -> Result<()> {
             }
         }
         Command::Approve { code, from } => {
-            let me = load_or_create_key(&key_path)?.public().to_string();
+            let key = load_or_create_key(&key_path)?;
+            let me = key.public().to_string();
             let cloud = signed_in(&cloud)?;
             // The Mac never sees codes, so pick the request by device; the cloud checks
             // the typed code.
@@ -118,7 +119,7 @@ async fn main() -> Result<()> {
                 [] => bail!("no pending request{}; check `bc-agent pairings`", from.map(|f| format!(" from {f}")).unwrap_or_default()),
                 _ => bail!("several requests are waiting; add --from <device name>"),
             };
-            cloud.approve(request.id, code.trim()).await?;
+            cloud.approve(&key, request.id, code.trim()).await?;
             println!("Paired {:?}. It can send jobs within a few seconds.", request.client_name);
         }
         Command::Unpair { device } => {

@@ -80,19 +80,24 @@ pub async fn register(
 }
 
 fn verify_key_proof(req: &RegisterDevice, account: &Account) -> ApiResult<()> {
-    if (now() as u64).abs_diff(req.signed_at) > MAX_SKEW_SECS {
-        return Err(ApiError::bad_request("registration timestamp is too far from server time"));
+    let message = register_message(&req.endpoint_id, req.signed_at, &hex::encode(&account.token_hash));
+    verify_signed(&req.endpoint_id, req.signed_at, &req.signature, &message)
+}
+
+/// Checks that `signature` over `message` was made by the device whose public key is
+/// `endpoint_id`, recently.
+pub(crate) fn verify_signed(endpoint_id: &str, signed_at: u64, signature: &str, message: &[u8]) -> ApiResult<()> {
+    if (now() as u64).abs_diff(signed_at) > MAX_SKEW_SECS {
+        return Err(ApiError::bad_request("signature timestamp is too far from server time"));
     }
-    let key: PublicKey = req
-        .endpoint_id
+    let key: PublicKey = endpoint_id
         .parse()
         .map_err(|_| ApiError::bad_request("endpoint_id is not a device public key"))?;
-    let sig_bytes: [u8; 64] = hex::decode(&req.signature)
+    let sig_bytes: [u8; 64] = hex::decode(signature)
         .ok()
         .and_then(|b| b.try_into().ok())
         .ok_or_else(|| ApiError::bad_request("signature must be 64 hex-encoded bytes"))?;
-    let message = register_message(&req.endpoint_id, req.signed_at, &hex::encode(&account.token_hash));
-    key.verify(&message, &Signature::from_bytes(&sig_bytes))
+    key.verify(message, &Signature::from_bytes(&sig_bytes))
         .map_err(|_| ApiError::unauthorized("signature does not match the device key"))
 }
 

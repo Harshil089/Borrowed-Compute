@@ -187,6 +187,19 @@ pub struct PairingInfo {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApprovePairing {
     pub code: String,
+    /// Unix seconds. The cloud accepts a few minutes of clock skew.
+    #[serde(default)]
+    pub signed_at: u64,
+    /// Hex-encoded ed25519 signature by the Mac's device key over [`approve_message`]. Only
+    /// the Mac holds that key, so a signed-in PC cannot approve its own request.
+    #[serde(default)]
+    pub signature: String,
+}
+
+/// What the Mac signs to approve pairing request `pairing_id`, bound to the session making
+/// the call like [`register_message`].
+pub fn approve_message(pairing_id: i64, signed_at: u64, session_token_sha256_hex: &str) -> Vec<u8> {
+    format!("borrowed-compute/approve/v1\n{pairing_id}\n{signed_at}\n{session_token_sha256_hex}").into_bytes()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -207,6 +220,12 @@ mod tests {
     fn device_flow_status_is_tagged() {
         let json = serde_json::to_string(&DeviceFlowStatus::SlowDown { interval_secs: 10 }).unwrap();
         assert_eq!(json, r#"{"status":"slow_down","interval_secs":10}"#);
+    }
+
+    #[test]
+    fn approve_message_differs_from_register() {
+        assert_ne!(approve_message(1, 2, "aa"), register_message("1", 2, "aa"));
+        assert_ne!(approve_message(1, 2, "aa"), approve_message(2, 2, "aa"));
     }
 
     #[test]

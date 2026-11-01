@@ -285,8 +285,9 @@ async fn list_pairings(state: State<'_, AppState>) -> CmdResult<Vec<PairingInfo>
 
 #[tauri::command]
 async fn approve(state: State<'_, AppState>, id: i64, code: String) -> CmdResult<PairingInfo> {
+    let key = load_or_create_key(&state.paths.key()).map_err(|e| format!("{e:#}"))?;
     let cloud = state.cloud();
-    cloud.approve(id, &code).await.map_err(|e| format!("{e:#}"))
+    cloud.approve(&key, id, &code).await.map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]

@@ -305,10 +305,16 @@ async fn sign_in_register_pair_and_revoke_on(env: Env) {
     assert_eq!(on_mac[0].code, None);
     assert_eq!(on_mac[0].client_name, "laptop");
 
-    assert!(alice.approve(request.id, "WRNG-CODE").await.is_err());
+    assert!(alice.approve(&mac_key, request.id, "WRNG-CODE").await.is_err());
     assert!(alice.paired_clients(&mac_id).await.unwrap().is_empty());
 
-    let approved = alice.approve(request.id, &code).await.unwrap();
+    // The requesting PC holds a session on the same account and the code, but not the
+    // Mac's key: the cloud refuses its approval and leaves the request untouched.
+    let err = alice.approve(&pc_key, request.id, &code).await.unwrap_err();
+    assert!(format!("{err:#}").contains("only the Mac"), "{err:#}");
+    assert!(alice.paired_clients(&mac_id).await.unwrap().is_empty());
+
+    let approved = alice.approve(&mac_key, request.id, &code).await.unwrap();
     assert_eq!(approved.status, PairingStatus::Approved);
     assert_eq!(approved.code, None);
     assert_eq!(alice.paired_clients(&mac_id).await.unwrap(), vec![pc_id.clone()]);
@@ -371,7 +377,7 @@ async fn rejects_bad_proofs_and_other_accounts_on(env: Env) {
     assert!(mallory.paired_clients(&mac_id).await.unwrap().is_empty());
     let request = alice.request_pairing(&pc_id, "studio").await.unwrap();
     let code = request.code.clone().unwrap();
-    assert!(mallory.approve(request.id, &code).await.is_err());
+    assert!(mallory.approve(&mac_key, request.id, &code).await.is_err());
     assert!(mallory.pairings(&mac_id).await.unwrap().is_empty());
     assert!(mallory.heartbeat(&mac_id, None).await.is_err());
     assert!(mallory.unpair(request.id).await.is_err());
@@ -434,20 +440,20 @@ async fn pairing_lockout_on(env: Env) {
 
     // Two misses leave the request; the right code typed loosely still works.
     for tries_left in ["2 tries left", "1 tries left"] {
-        let err = alice.approve(request.id, "WRNG-CODE").await.unwrap_err();
+        let err = alice.approve(&mac, request.id, "WRNG-CODE").await.unwrap_err();
         assert!(format!("{err:#}").contains(tries_left), "{err:#}");
     }
     let loose = code.to_lowercase().replace('-', " ");
-    alice.approve(request.id, &loose).await.unwrap();
+    alice.approve(&mac, request.id, &loose).await.unwrap();
 
     // A new request: three misses cancel it, and the right code no longer works.
     alice.unpair(request.id).await.unwrap();
     let request = alice.request_pairing(&pc.public().to_string(), "studio").await.unwrap();
     let code = request.code.clone().unwrap();
     for _ in 0..2 {
-        alice.approve(request.id, "WRNG-CODE").await.unwrap_err();
+        alice.approve(&mac, request.id, "WRNG-CODE").await.unwrap_err();
     }
-    let err = alice.approve(request.id, "WRNG-CODE").await.unwrap_err();
+    let err = alice.approve(&mac, request.id, "WRNG-CODE").await.unwrap_err();
     assert!(format!("{err:#}").contains("cancelled"), "{err:#}");
-    assert!(alice.approve(request.id, &code).await.is_err(), "the request is gone");
+    assert!(alice.approve(&mac, request.id, &code).await.is_err(), "the request is gone");
 }
