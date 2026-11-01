@@ -574,7 +574,40 @@ async fn install_update(app: AppHandle, state: State<'_, AppState>) -> CmdResult
     let bytes = download_update(&app, &update).await?;
     state.quitting.store(true, Ordering::Relaxed);
     update.install(bytes).map_err(err)?;
+    #[cfg(target_os = "macos")]
+    {
+        relaunch_after_exit().map_err(err)?;
+        app.exit(0);
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
     app.restart();
+}
+
+/// Opens the app again once this process has exited. Tauri's own restart opens the new
+/// version while this one is still shutting down; the two then overlap on the cloud's port
+/// and WebKit's storage, and after an update the new window stayed blank. If this process
+/// has not exited after 20 seconds it is killed, so a hung exit never leaves the Mac
+/// without its agent.
+#[cfg(target_os = "macos")]
+fn relaunch_after_exit() -> std::io::Result<()> {
+    use std::os::unix::process::CommandExt;
+    let exe = std::env::current_exe()?;
+    let bundle = exe.ancestors().nth(3).ok_or_else(|| std::io::Error::other("not inside an app bundle"))?;
+    std::process::Command::new("/bin/sh")
+        .args([
+            "-c",
+            "i=0; while kill -0 \"$1\" 2>/dev/null; do i=$((i+1)); [ $i -gt 100 ] && kill -9 \"$1\"; sleep 0.2; done; exec /usr/bin/open -n \"$2\"",
+            "relaunch",
+        ])
+        .arg(std::process::id().to_string())
+        .arg(bundle)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0)
+        .spawn()?;
+    Ok(())
 }
 
 /// Download attempts before an update gives up. Release downloads come from GitHub's file
