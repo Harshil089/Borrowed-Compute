@@ -255,6 +255,8 @@ pub async fn serve_connection(config: &AgentConfig, conn: Connection) -> Result<
         bail!("upload is {} bytes, declared {}", archive.len(), req.archive_bytes);
     }
 
+    let mut runner = config.runner.clone();
+    runner.guest = !config.paired.contains(&peer);
     let job_id = req.job_id.clone();
     config.emit(AgentEvent::JobStarted {
         job_id: job_id.clone(),
@@ -263,7 +265,7 @@ pub async fn serve_connection(config: &AgentConfig, conn: Connection) -> Result<
     });
     if req.service {
         // The service, not this connection, owns the job from here, and reports its end.
-        let attached = config.services.start(config.runner.clone(), req, archive, peer, config.events.clone());
+        let attached = config.services.start(runner, req, archive, peer, config.events.clone());
         drop(slot);
         return stream_service(config, &conn, send, recv, &job_id, attached).await;
     }
@@ -271,7 +273,6 @@ pub async fn serve_connection(config: &AgentConfig, conn: Connection) -> Result<
     let mut end = JobEndGuard { config, job_id, end: JobEnd::Disconnected };
 
     let (tx, mut rx) = mpsc::channel(256);
-    let runner = config.runner.clone();
     // Any early return (Cancel, lost connection) aborts the job; kill_on_drop stops it.
     let job = AbortOnDrop(tokio::spawn(async move {
         run_job(&runner, &req, archive, tx).await
