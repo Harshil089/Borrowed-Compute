@@ -7,7 +7,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use bc_proto::cloud::{
-    ApprovePairing, CreatePairing, DeviceKind, PairedClients, PairingInfo, PairingStatus,
+    approve_message, ApprovePairing, CreatePairing, DeviceKind, PairedClients, PairingInfo, PairingStatus,
 };
 use serde::Deserialize;
 
@@ -154,8 +154,8 @@ pub async fn approve(
     Path(id): Path<i64>,
     Json(req): Json<ApprovePairing>,
 ) -> ApiResult<Json<PairingInfo>> {
-    let row: Option<(String, String, i64)> = sqlx::query_as(
-        "select p.status, p.code, p.expires_at from pairings p
+    let row: Option<(String, String, i64, String)> = sqlx::query_as(
+        "select p.status, p.code, p.expires_at, p.mac_id from pairings p
          join devices m on m.endpoint_id = p.mac_id
          where p.id = $1 and m.account_id = $2",
     )
@@ -163,7 +163,13 @@ pub async fn approve(
     .bind(account.id)
     .fetch_optional(&state.db)
     .await?;
-    let (status, code, expires_at) = row.ok_or_else(|| ApiError::not_found("no such pairing request"))?;
+    let (status, code, expires_at, mac_id) = row.ok_or_else(|| ApiError::not_found("no such pairing request"))?;
+    // Only the Mac may approve: every device on the account holds a session, and the
+    // requesting PC is shown the code, so the session alone would let it approve itself.
+    // Checked before the code, so a device without the Mac's key cannot use up the tries.
+    let message = approve_message(id, req.signed_at, &hex::encode(&account.token_hash));
+    crate::devices::verify_signed(&mac_id, req.signed_at, &req.signature, &message)
+        .map_err(|_| ApiError::forbidden("only the Mac itself can approve a pairing request"))?;
     if status == "approved" {
         return Ok(Json(fetch(&state, id).await?));
     }
