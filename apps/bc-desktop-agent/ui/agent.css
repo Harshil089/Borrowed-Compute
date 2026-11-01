@@ -24,7 +24,7 @@ body:has(#home.hidden) .sidebar { display: none; }
 .requests { display: flex; flex-direction: column; gap: 10px; }
 .pass {
   display: grid; grid-template-columns: minmax(0, 1fr) 240px; background: var(--surface);
-  border-radius: var(--radius); box-shadow: var(--shadow), inset 3px 0 0 var(--accent); overflow: hidden;
+  border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden;
 }
 .pass.arrived { animation: page-in 0.3s var(--ease); }
 .pass-main { display: flex; flex-direction: column; gap: 4px; padding: 16px 18px; min-width: 0; }
