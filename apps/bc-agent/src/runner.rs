@@ -745,6 +745,32 @@ mod tests {
         assert_eq!(exited(&msgs).0, Some(0));
     }
 
+    // shortcut: temporary diagnostic for batch files in the AppContainer; remove once known.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_batch_diagnostic() {
+        let files = [("hello.cmd", "@echo from batch\r\n"), ("hello.txt", "hi\r\n")];
+        for argv in [
+            vec!["cmd", "/c", "hello.cmd"],
+            vec!["cmd", "/c", "call hello.cmd"],
+            vec!["cmd", "/c", "type hello.cmd"],
+            vec!["cmd", "/c", "cd & dir"],
+            vec!["cmd", "/c", "type %CD%\\hello.txt"],
+            vec!["cmd", "/c", "echo %COMSPEC% & ver"],
+        ] {
+            let msgs = run_within(request(&argv, None), archive(&files)).await;
+            eprintln!("DIAG {argv:?}\n  out: {}\n  err: {}\n  end: {:?}", output(&msgs, OutputStream::Stdout), output(&msgs, OutputStream::Stderr), msgs.last());
+        }
+        let msgs = run_within(request(&["cmd", "/c", "hello.cmd"], None), archive(&files)).await;
+        let mut config_msgs = Vec::new();
+        std::env::set_var("BC_NO_SANDBOX", "1");
+        config_msgs.extend(run_within(request(&["./hello.cmd"], None), archive(&files)).await);
+        std::env::remove_var("BC_NO_SANDBOX");
+        eprintln!("DIAG unsandboxed ./hello.cmd out: {} err: {}", output(&config_msgs, OutputStream::Stdout), output(&config_msgs, OutputStream::Stderr));
+        let _ = msgs;
+        panic!("diagnostic run; see DIAG lines");
+    }
+
     /// A job reads and writes its workspace but nothing else of the owner's.
     #[cfg(windows)]
     #[tokio::test]
