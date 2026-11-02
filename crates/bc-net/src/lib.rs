@@ -45,8 +45,32 @@ pub struct NetConfig {
 
 /// Binds an endpoint with this device's key, ready to dial and accept job connections,
 /// connections to the Mac's cloud and invite requests.
+///
+/// When this process already runs an agent with the same key ([`share_endpoint`]), that
+/// endpoint comes back instead: two endpoints with one key push each other off the relay.
+/// It ignores `config`, so `relay_only` does not apply to it.
 pub async fn bind(secret: SecretKey, config: NetConfig) -> Result<Endpoint> {
+    if let Some(shared) = SHARED.lock().unwrap().as_ref().filter(|e| e.id() == secret.public()) {
+        return Ok(shared.clone());
+    }
     bind_with(secret, config, vec![JOB_ALPN.to_vec(), CLOUD_ALPN.to_vec(), GUEST_ALPN.to_vec()]).await
+}
+
+/// The endpoint the agent in this process listens on, which a device that both lends and
+/// uses shares between the two.
+static SHARED: std::sync::Mutex<Option<Endpoint>> = std::sync::Mutex::new(None);
+
+/// Makes later [`bind`] calls with this endpoint's key return it.
+pub fn share_endpoint(endpoint: &Endpoint) {
+    *SHARED.lock().unwrap() = Some(endpoint.clone());
+}
+
+/// Closes an endpoint from [`bind`], except the shared one, which its agent owns.
+pub async fn release(endpoint: Endpoint) {
+    let shared = SHARED.lock().unwrap().as_ref().is_some_and(|s| s.id() == endpoint.id());
+    if !shared {
+        endpoint.close().await;
+    }
 }
 
 /// Binds an endpoint that accepts only the given protocols.

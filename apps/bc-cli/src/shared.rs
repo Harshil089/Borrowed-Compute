@@ -88,7 +88,7 @@ pub async fn join(
     let id: EndpointId = invite.mac.parse().context("the invite names no valid Mac")?;
     let endpoint = bind(key, net).await?;
     let mac_name = request_access(&endpoint, id.into(), &invite.token, device_name, on_code).await;
-    endpoint.close().await;
+    bc_net::release(endpoint).await;
     remember(home, &id.to_string(), &mac_name?)
 }
 

@@ -7,7 +7,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use bc_proto::cloud::{
-    approve_message, ApprovePairing, CreatePairing, DeviceKind, PairedClients, PairingInfo, PairingStatus,
+    approve_message, ApprovePairing, CreatePairing, PairedClients, PairingInfo, PairingStatus,
 };
 use serde::Deserialize;
 
@@ -78,19 +78,21 @@ pub async fn create(
     let (client_id,) =
         client.ok_or_else(|| ApiError::not_found("this device is not registered; run login first"))?;
 
-    let mac: Option<(String, String)> = sqlx::query_as(
-        "select endpoint_id, kind from devices
+    // Any device that lends can be paired with, Mac or PC. Only a lending device sends
+    // heartbeats, so one that never checked in has never lent.
+    let mac: Option<(String, Option<i64>)> = sqlx::query_as(
+        "select endpoint_id, last_seen from devices
          where account_id = $1 and (endpoint_id = $2 or name = $2)",
     )
     .bind(account.id)
     .bind(req.mac.clone())
     .fetch_optional(&state.db)
     .await?;
-    let (mac_id, kind) = mac.ok_or_else(|| {
+    let (mac_id, last_seen) = mac.ok_or_else(|| {
         ApiError::not_found(format!("no device named {:?} on this account", req.mac))
     })?;
-    if DeviceKind::parse(&kind) != Some(DeviceKind::Mac) {
-        return Err(ApiError::bad_request(format!("{:?} is not a Mac", req.mac)));
+    if last_seen.is_none() {
+        return Err(ApiError::bad_request(format!("{:?} is not lending; turn on Lend this device there first", req.mac)));
     }
     if mac_id == client_id {
         return Err(ApiError::bad_request("a device cannot pair with itself"));

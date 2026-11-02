@@ -1,46 +1,14 @@
-// Borrowed Compute Agent window. All state lives in the Rust side; this file renders it.
+// This device as a lender: requests to approve, runs from other devices, paired devices,
+// sharing and settings. All state lives in the Rust side (`lend.rs`); this file renders it.
+// It runs beside app.js in its own scope; `window.lendUI` lets app.js switch views.
 
+(() => {
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-
-// The web view has no native confirm() dialog, so ask inside the window instead.
-function ask(message, okLabel = "OK", danger = false) {
-  return new Promise((resolve) => {
-    const overlay = document.createElement("div");
-    overlay.className = "ask-overlay";
-    overlay.setAttribute("role", "alertdialog");
-    overlay.setAttribute("aria-modal", "true");
-    overlay.innerHTML = `
-      <div class="ask-box">
-        <p></p>
-        <div class="ask-actions">
-          <button data-ask="no">Cancel</button>
-          <button data-ask="yes" class="primary ${danger ? "danger" : ""}"></button>
-        </div>
-      </div>`;
-    overlay.querySelector("p").textContent = message;
-    overlay.querySelector('[data-ask="yes"]').textContent = okLabel;
-    const done = (answer) => {
-      overlay.remove();
-      document.removeEventListener("keydown", onKey, true);
-      resolve(answer);
-    };
-    const onKey = (e) => {
-      if (e.key === "Escape") { e.stopPropagation(); done(false); }
-    };
-    overlay.addEventListener("click", (e) => {
-      const button = e.target.closest("[data-ask]");
-      if (button) { e.stopPropagation(); done(button.dataset.ask === "yes"); }
-    });
-    document.addEventListener("keydown", onKey, true);
-    document.body.appendChild(overlay);
-    overlay.querySelector('[data-ask="no"]').focus();
-  });
-}
 
 let status = null;
 let account = null;
@@ -49,8 +17,6 @@ let jobs = [];
 let services = [];
 // Sharing with people on other accounts: the switch, open invites, guests and requests.
 let guestsView = { sharing: false, invites: [], guests: [], requests: [] };
-let verificationUri = null;
-let signingIn = false;
 // Requests already on screen, so only new ones animate in.
 const seenRequests = new Set();
 
@@ -75,7 +41,7 @@ function setArrivalLegs(at, failed) {
 
 function renderArrivals() {
   const job = jobs.find((j) => !j.rejected);
-  const me = account?.device_name || "This Mac";
+  const me = account?.device_name || "This computer";
   $("arr-to").textContent = deviceCode(me);
   $("arr-to-name").textContent = me;
   $("arr-date").textContent = new Date().toLocaleDateString(undefined, { month: "short", day: "numeric" });
@@ -86,10 +52,10 @@ function renderArrivals() {
 
   if (!job) {
     $("arr-tab").textContent = "Waiting";
-    $("arr-from").textContent = "PC";
-    $("arr-from-name").textContent = "Your PC";
+    $("arr-from").textContent = "DEV";
+    $("arr-from-name").textContent = "Another device";
     $("arr-cmd").className = "arr-cmd";
-    $("arr-cmd").textContent = "No runs yet. When your PC sends one, it shows here live.";
+    $("arr-cmd").textContent = "No runs yet. When a paired device sends one, it shows here live.";
     $("arr-clock").textContent = "";
     $("arr-stub").classList.add("hidden");
     liveSince = null;
@@ -156,7 +122,7 @@ function breakableUrl(url) {
 }
 
 function showError(message) {
-  const box = $("error");
+  const box = $("lend-error");
   box.textContent = message || "";
   box.classList.toggle("hidden", !message);
 }
@@ -209,7 +175,7 @@ function clientName(id) {
 }
 
 function renderStatus() {
-  const pill = $("status");
+  const pill = $("lend-pill");
   let cls = "", label = "Starting";
   if (!status) {
     label = "Starting";
@@ -219,12 +185,12 @@ function renderStatus() {
     cls = "bad"; label = "Cloud stopped";
   } else if (!status.serving) {
     label = "Starting";
-  } else if (!status.signed_in) {
-    cls = "warn"; label = "Signed out";
+  } else if (!status.lending) {
+    label = "Not lending";
   } else if (status.cloud.ok === false) {
     cls = "warn"; label = "Cloud unreachable";
   } else if (status.cloud.ok === true) {
-    cls = "ok"; label = "Open for runs";
+    cls = "ok"; label = "Lending";
   } else {
     label = "Connecting";
   }
@@ -236,13 +202,9 @@ function renderStatus() {
 function render() {
   renderStatus();
   const signedIn = !!status?.signed_in;
-  $("signin").classList.toggle("hidden", signedIn);
-  $("home").classList.toggle("hidden", !signedIn);
-  $("footer").classList.toggle("hidden", !signedIn);
-  $("account").textContent = signedIn && account ? `Signed in as ${account.login}` : "";
-  $("station-name").textContent = account?.device_name || "This Mac";
-  $("station-code").textContent = deviceCode(account?.device_name || "Mac");
-  $("device-id").textContent = status?.device_id ? `Device ${status.device_id.slice(0, 16)}…` : "";
+  $("lend-nav").classList.toggle("hidden", !signedIn);
+  if (!signedIn && !$("lend-view").classList.contains("hidden")) showRun();
+  if (document.activeElement !== $("lending")) $("lending").checked = !!status?.lending;
   if (status?.start_error) showError(`The agent could not start: ${status.start_error}`);
   else if (status?.host.hosting && status.host.error) showError(`The built-in cloud is not running: ${status.host.error}`);
   if (!signedIn) return;
@@ -251,11 +213,11 @@ function render() {
 
   // Guest requests share the pairing passes; their ids start with "g" to keep them apart.
   const pending = pairings.filter((p) => p.status === "pending")
-    .map((p) => ({ ...p, about: `Asks to run jobs on this Mac. Type the code ${p.client_name} shows to approve it.` }))
+    .map((p) => ({ ...p, about: `Asks to run jobs on this computer. Type the code ${p.client_name} shows to approve it.` }))
     .concat(guestsView.requests.map((r) => ({
       id: `g${r.id}`,
       client_name: r.device_name,
-      about: `${r.name}, invited as a guest, asks to run jobs on this Mac from ${r.device_name}. Type the code it shows to approve it.`,
+      about: `${r.name}, invited as a guest, asks to run jobs on this computer from ${r.device_name}. Type the code it shows to approve it.`,
     })));
   $("requests-block").classList.toggle("hidden", !pending.length);
   const pendingHtml = pending.map((p) => `
@@ -291,20 +253,20 @@ function render() {
           </span>
           <button class="danger" data-unpair="${p.id}" data-name="${esc(p.client_name)}">Remove</button>
         </div>`).join("")
-    : `<div class="board-empty">No devices paired yet. On your PC, choose this Mac and press Pair; the request appears here to approve.</div>`);
+    : `<div class="board-empty">No devices paired yet. On another computer, choose this one and press Pair; the request appears on Overview to approve.</div>`);
 
   renderGuests();
   renderArrivals();
 
-  $("services-block").classList.toggle("hidden", !services.length);
-  setHtml("services", services.map((s) => `
+  $("lend-services-block").classList.toggle("hidden", !services.length);
+  setHtml("lend-services", services.map((s) => `
     <div class="dep svc live">
       <span class="dep-time">${esc(uptime(s.started_at))}</span>
       <span class="dep-main">
         <span class="dep-cmd">${esc(s.argv.join(" "))}</span>
         <span class="dep-sub"><span class="kv"><b>From</b> ${esc(clientName(s.owner))}</span><span class="kv"><b>Up since</b> ${clock(s.started_at * 1000)}</span>${s.ports.length ? `<span class="kv"><b>Port</b> <span class="num">${s.ports.join(", ")}</span></span>` : ""}</span>
       </span>
-      <button class="danger" data-stop="${esc(s.job_id)}" data-cmd="${esc(s.argv.join(" "))}">Stop</button>
+      <button class="danger" data-lend-stop="${esc(s.job_id)}" data-cmd="${esc(s.argv.join(" "))}">Stop</button>
     </div>`).join(""));
 
   setHtml("jobs", jobs.length
@@ -322,33 +284,28 @@ function render() {
             <span class="pill ${cls}">${label}</span>
           </div>`;
       }).join("")
-    : `<div class="board-empty">Runs from your paired PCs show here, with what each one used on this Mac.</div>`);
+    : `<div class="board-empty">Runs from your paired devices show here, with what each one used on this computer.</div>`);
 }
 
 const copyIcon = `<svg class="icon"><use href="#i-copy"/></svg>Copy`;
 
 function renderConnect() {
   const box = $("connect");
-  // Until the PC has a way in, the route is the first thing this window asks for.
-  $("home").classList.toggle("needs-route", status.host.hosting && pairings.length === 0);
   if (!status.host.hosting) {
-    const html = `
-      <p>This Mac uses the cloud at</p>
-      <div class="address"><span>${esc(status.host.url)}</span></div>
-      <p class="muted">Enter the same address in Borrowed Compute on your PC.</p>`;
+    const html = `<p class="muted">Your account lives on another computer, so other devices sign in through that one. Its code is under Paired devices there. Here, approve the devices that may send jobs.</p>`;
     if (box.dataset.html !== html) { box.dataset.html = html; box.innerHTML = html; }
     return;
   }
   const code = status.device_id || "";
   const body = code ? `
-      <p>Your PC reaches this Mac with its code:</p>
+      <p>Your account lives on this computer. Your other devices sign in through it with its code:</p>
       <div class="address"><span class="mono code">${esc(code)}</span><button data-copy="${esc(code)}">${copyIcon}</button></div>
-      <p class="muted">In Borrowed Compute on your PC, paste this code where it asks for your Mac. The connection is encrypted end to end, and nothing else needs to be installed. You still approve each device before it can send jobs.</p>`
+      <p class="muted">In Borrowed Compute on another computer, paste this code where it asks where your account lives, or pick this one from its network list. The connection is encrypted end to end. You still approve each device before it can send jobs.</p>`
     : `<div class="row"><span class="spinner"></span><span class="muted">Starting…</span></div>`;
   if (box.dataset.html !== body) { box.dataset.html = body; box.innerHTML = body; }
 }
 
-// CPU time and peak memory the job used on this Mac, when the job reported them.
+// CPU time and peak memory the job used here, when the job reported them.
 function usageText(j) {
   const u = j.end && j.end.usage;
   if (!u) return "";
@@ -373,16 +330,12 @@ function jobState(j) {
 
 async function refresh() {
   try {
-    status = await invoke("get_status");
+    const st = await invoke("get_status");
+    status = { ...st.lend, signed_in: st.signed_in, device_id: st.device_id };
+    if (!status.signed_in) account = null;
     if (status.signed_in) {
-      if (!account) {
-        try {
-          account = await invoke("get_account");
-        } catch (e) {
-          // The session belonged to another cloud; the app signed out, so show sign-in.
-          if (String(e) === "signed-out") { status = await invoke("get_status"); render(); return; }
-        }
-      }
+      // app.js handles a session another cloud refused; here the name is all that matters.
+      if (!account) account = await invoke("get_account").catch(() => null);
       pairings = await invoke("list_pairings");
       jobs = await invoke("recent_jobs");
       services = await invoke("list_services");
@@ -392,48 +345,13 @@ async function refresh() {
   } catch (e) {
     showError(String(e));
   }
-  if (status && !status.signed_in) loadProviders();
   render();
 }
-
-async function signIn(provider) {
-  if (signingIn) return;
-  signingIn = true;
-  showError("");
-  $("signin-btn").disabled = true;
-  $("signin-google").disabled = true;
-  try {
-    account = await invoke("login", { name: $("mac-name").value, provider });
-    $("signin-code").classList.add("hidden");
-  } catch (e) {
-    showError(`Sign-in failed: ${e}`);
-    $("signin-code").classList.add("hidden");
-  } finally {
-    signingIn = false;
-    $("signin-btn").disabled = false;
-    $("signin-google").disabled = false;
-    await refresh();
-  }
-}
-
-$("signin-btn").addEventListener("click", () => signIn("github"));
-$("signin-google").addEventListener("click", () => signIn("google"));
-
-// Google sign-in shows only when this Mac's cloud has a Google client. Asked on each
-// refresh while signed out, since the built-in cloud may still be starting.
-function loadProviders() {
-  invoke("providers").then((p) => $("signin-google").classList.toggle("hidden", !p.google)).catch(() => {});
-}
-
-$("reopen").addEventListener("click", () => {
-  if (verificationUri) invoke("open_url", { url: verificationUri }).catch((e) => showError(String(e)));
-});
 
 async function loadSettings() {
   try {
     const st = await invoke("get_settings");
     $("run-bg").checked = st.run_in_background;
-    $("version").textContent = `Version ${st.version}`;
   } catch (e) {
     showError(String(e));
   }
@@ -448,83 +366,8 @@ $("run-bg").addEventListener("change", async (event) => {
   }
 });
 
-function updateStatus(html, cls = "") {
-  const box = $("update-status");
-  box.className = cls ? `banner ${cls}` : "muted";
-  box.innerHTML = html;
-}
-
-$("check-update").addEventListener("click", async () => {
-  const button = $("check-update");
-  button.disabled = true;
-  updateStatus("Checking…");
-  try {
-    const u = await invoke("check_update");
-    if (!u.available) {
-      updateStatus(`You have the latest version (${esc(u.current)}).`, "ok");
-    } else {
-      updateStatus(`Version ${esc(u.available)} is ready. <button id="install-update" class="primary">Install and restart</button>`, "warn");
-    }
-  } catch (e) {
-    updateStatus(`Could not check for updates: ${esc(String(e))}`, "bad");
-  } finally {
-    button.disabled = false;
-  }
-});
-
-// "Downloading 1.9 of 6.9 MB", plus the attempt once a download has started again.
-function updateProgressText(p) {
-  const mb = (b) => (b / 1e6).toFixed(1);
-  let text = p.total ? `Downloading ${mb(p.downloaded)} of ${mb(p.total)} MB` : `Downloading ${mb(p.downloaded)} MB`;
-  if (p.attempt > 1) text += ` (connection dropped, try ${p.attempt} of ${p.attempts})`;
-  return `${text}… The app restarts when it is done.`;
-}
-
-function meterScale(p) {
-  return p.total ? `scaleX(${Math.min(1, p.downloaded / p.total).toFixed(3)})` : "";
-}
-
-listen("update-progress", (event) => {
-  const p = event.payload;
-  updateStatus(`${esc(updateProgressText(p))}<div class="meter${p.total ? "" : " unknown"}"><span style="transform: ${meterScale(p)}"></span></div>`);
-});
-
-$("update-status").addEventListener("click", async (event) => {
-  if (!event.target.closest("#install-update")) return;
-  if (!(await ask("Install the update and restart? The agent stops accepting jobs for a few seconds.", "Install and restart"))) return;
-  installUpdate();
-});
-
-async function installUpdate() {
-  updateStatus("Downloading and installing… The app restarts when it is done.");
-  try {
-    await invoke("install_update");
-  } catch (e) {
-    updateStatus(`Could not install the update: ${esc(String(e))}`, "bad");
-  }
-}
-
-// Whatever disk image put this app here, it moves to the latest release on start, so an
-// old download never leaves the Mac on an old version. No job can be running yet.
-async function updateOnStart() {
-  try {
-    const u = await invoke("check_update");
-    // Local builds are 0.1.0; replacing one with a release would undo the build under test.
-    if (u.available && u.current !== "0.1.0") installUpdate();
-  } catch (_) {
-    // Offline or GitHub unreachable: Check for updates still works later.
-  }
-}
-
 $("open-logs").addEventListener("click", () => {
   invoke("open_logs").catch((e) => showError(String(e)));
-});
-
-$("signout").addEventListener("click", async () => {
-  if (!(await ask("Sign out? Paired devices will not be able to send jobs until you sign in again.", "Sign out", true))) return;
-  await invoke("logout").catch((e) => showError(String(e)));
-  account = null; pairings = []; jobs = [];
-  await refresh();
 });
 
 document.addEventListener("click", async (event) => {
@@ -558,11 +401,11 @@ document.addEventListener("click", async (event) => {
     await refresh();
     return;
   }
-  const stop = event.target.closest("[data-stop]");
+  const stop = event.target.closest("[data-lend-stop]");
   if (stop) {
     if (!(await ask(`Stop ${stop.dataset.cmd}? Its process ends and its workspace is deleted.`, "Stop", true))) return;
     stop.disabled = true;
-    try { await invoke("stop_service", { jobId: stop.dataset.stop }); } catch (e) { showError(String(e)); }
+    try { await invoke("stop_service", { jobId: stop.dataset.lendStop }); } catch (e) { showError(String(e)); }
     await refresh();
     return;
   }
@@ -607,8 +450,6 @@ async function approvePairing(id) {
 
 // The product site. Its domain is not final yet: change it here and every invite follows.
 const SITE_URL = "https://borrowed-compute.vercel.app";
-const RELEASES = "https://github.com/Harshil089/Borrowed-Compute-releases/releases/latest/download";
-const WINDOWS_APP = `${RELEASES}/BorrowedCompute-setup.exe`;
 
 function renderGuests() {
   const g = guestsView;
@@ -639,7 +480,7 @@ function renderGuests() {
 $("sharing").addEventListener("change", async (event) => {
   const on = event.target.checked;
   if (!on && guestsView.guests.length &&
-      !(await ask("Stop sharing this Mac? Guests can no longer send jobs, and their servers stop. They stay on the list for when you turn it on again.", "Stop sharing", true))) {
+      !(await ask("Stop sharing this device? Guests can no longer send jobs, and their servers stop. They stay on the list for when you turn it on again.", "Stop sharing", true))) {
     event.target.checked = true;
     return;
   }
@@ -660,11 +501,11 @@ $("invite-form").addEventListener("submit", async (event) => {
   $("invite-btn").disabled = true;
   try {
     const invite = await invoke("create_invite", { name });
-    const host = account?.device_name || "my Mac";
+    const host = account?.device_name || "my computer";
     // A message ready to paste into any chat or email; the invite itself is never shown again.
     const message = `You're invited to run code on ${host} with Borrowed Compute (${SITE_URL}).\n\n` +
-      `1. Install the app: ${WINDOWS_APP}\n   (all downloads: ${SITE_URL}/download)\n` +
-      `2. Open it, choose "Use a shared Mac" and paste this invite:\n${invite}\n\n` +
+      `1. Install the app: ${SITE_URL}/download\n` +
+      `2. Open it, choose "Use a shared device" and paste this invite:\n${invite}\n\n` +
       `It works once, within 7 days. Read me the code it shows so I can let you in.\n` +
       `How it works: ${SITE_URL}/how-it-works#guests`;
     $("invite-new").innerHTML = `
@@ -685,40 +526,57 @@ document.addEventListener("keydown", (event) => {
   if (input && event.key === "Enter") approvePairing(input.dataset.codeFor);
 });
 
-listen("login-code", (event) => {
-  verificationUri = event.payload.verification_uri;
-  $("user-code").textContent = event.payload.user_code;
-  $("signin-code").classList.remove("hidden");
-});
 listen("agent-event", refresh);
 listen("status-changed", refresh);
 
 // Pairing requests come from the cloud, so poll while the window is open.
 setInterval(() => { if (document.visibilityState === "visible") refresh(); }, 5000);
 loadSettings();
-updateOnStart();
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") refresh(); });
 refresh();
 
-// ---- Sections: one page at a time, remembered between launches ----
+// ---- Lending switch ----
+$("lending").addEventListener("change", async (event) => {
+  const on = event.target.checked;
+  if (!on && !(await ask("Stop lending this computer? Paired devices can no longer start runs here; runs in progress finish.", "Stop lending", true))) {
+    event.target.checked = true;
+    return;
+  }
+  try {
+    await invoke("set_lending", { on });
+  } catch (e) {
+    event.target.checked = !on;
+    showError(String(e));
+  }
+  await refresh();
+});
+
+// ---- Views: the run page, or one of this device's pages, remembered between launches ----
+function showRun() {
+  try { localStorage.removeItem("page"); } catch { /* storage off */ }
+  $("lend-view").classList.add("hidden");
+  $("run-view").classList.remove("hidden");
+  document.querySelectorAll("[data-nav]").forEach((b) => b.setAttribute("aria-current", "false"));
+}
+
 function showPage(name) {
+  $("run-view").classList.add("hidden");
+  $("lend-view").classList.remove("hidden");
   document.querySelectorAll("[data-page]").forEach((p) => p.classList.toggle("hidden", p.dataset.page !== name));
   document.querySelectorAll("[data-nav]").forEach((b) => b.setAttribute("aria-current", b.dataset.nav === name ? "page" : "false"));
   $("page-title").textContent = document.querySelector(`[data-nav="${name}"]`).dataset.title;
   try { localStorage.setItem("page", name); } catch { /* storage off */ }
 }
 document.querySelectorAll("[data-nav]").forEach((b) => b.addEventListener("click", () => showPage(b.dataset.nav)));
+window.lendUI = { showRun, showPage, refresh };
 let savedPage = null;
 try { savedPage = localStorage.getItem("page"); } catch { /* storage off */ }
-showPage(savedPage || "overview");
+if (savedPage) showPage(savedPage);
 
-// Requests waiting show as a count on Overview, whichever page is open; a Mac with no
-// paired PC yet opens on Devices, where its code is.
+// Requests waiting show as a count on Overview, whichever page is open.
 new MutationObserver(() => {
   const n = $("requests").querySelectorAll("[data-request]").length;
   $("nav-count").textContent = String(n);
   $("nav-count").classList.toggle("hidden", n === 0);
 }).observe($("requests"), { childList: true });
-new MutationObserver(() => {
-  if (!savedPage && $("home").classList.contains("needs-route")) { savedPage = "devices"; showPage("devices"); }
-}).observe($("home"), { attributes: true, attributeFilter: ["class"] });
+})();

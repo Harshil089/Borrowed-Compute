@@ -341,6 +341,7 @@ async fn rejects_bad_proofs_and_other_accounts_on(env: Env) {
     let mac_key = SecretKey::generate();
     let mac_id = mac_key.public().to_string();
     alice.register(&mac_key, "studio", DeviceKind::Mac).await.unwrap();
+    alice.heartbeat(&mac_id, None).await.unwrap();
 
     // Someone else's key cannot be claimed, even with a valid signature from that key.
     let err = mallory.register(&mac_key, "stolen", DeviceKind::Mac).await.unwrap_err();
@@ -382,9 +383,11 @@ async fn rejects_bad_proofs_and_other_accounts_on(env: Env) {
     assert!(mallory.heartbeat(&mac_id, None).await.is_err());
     assert!(mallory.unpair(request.id).await.is_err());
 
-    // Only Macs can be paired to.
+    // Only lending devices (those that check in) can be paired to, Mac or PC.
     let err = alice.request_pairing(&mac_id, "laptop").await.unwrap_err();
-    assert!(err.to_string().contains("not a Mac"), "{err}");
+    assert!(err.to_string().contains("not lending"), "{err}");
+    alice.heartbeat(&pc_id, None).await.unwrap();
+    alice.request_pairing(&mac_id, "laptop").await.unwrap();
 
     // Missing and revoked sessions are refused.
     assert!(CloudClient::new(&env.cloud, None).devices().await.is_err());
@@ -431,6 +434,7 @@ async fn pairing_lockout_on(env: Env) {
     let (pc, mac) = (SecretKey::generate(), SecretKey::generate());
     alice.register(&pc, "pc", DeviceKind::Windows).await.unwrap();
     alice.register(&mac, "studio", DeviceKind::Mac).await.unwrap();
+    alice.heartbeat(&mac.public().to_string(), None).await.unwrap();
 
     let request = alice.request_pairing(&pc.public().to_string(), "studio").await.unwrap();
     let code = request.code.clone().expect("the requester gets the code");

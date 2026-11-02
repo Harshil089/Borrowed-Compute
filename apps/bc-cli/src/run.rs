@@ -208,7 +208,7 @@ async fn run_routed(
         let endpoint = bind(key.clone(), net).await?;
         let mut started = false;
         let outcome = run_attempt(&endpoint, mac, spec, archive, stdout, stderr, cancel.as_mut(), &mut started).await;
-        endpoint.close().await;
+        bc_net::release(endpoint).await;
         return outcome;
     }
 
@@ -226,7 +226,7 @@ async fn run_routed(
             &endpoint, mac.clone(), spec, archive.clone(), stdout, stderr, cancel.as_mut(), &mut started,
         )
         .await;
-        endpoint.close().await;
+        bc_net::release(endpoint).await;
         match attempt {
             Ok(outcome) => {
                 if !relay_only && !outcome.timings.via_relay {
@@ -413,7 +413,7 @@ impl Session {
         let _ = { self.send }.finish();
         self.conn.close(0u32.into(), b"done");
         if let Some(endpoint) = self.endpoint {
-            endpoint.close().await;
+            bc_net::release(endpoint).await;
         }
     }
 }

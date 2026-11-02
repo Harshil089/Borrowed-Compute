@@ -38,6 +38,8 @@ impl AgentPaths {
 pub struct Agent {
     pub endpoint: Endpoint,
     config: AgentConfig,
+    /// Off, the device still serves its cloud but refuses jobs and invites.
+    lending: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Agent {
@@ -52,10 +54,12 @@ impl Agent {
         let key = load_or_create_key(&paths.key())?;
         let endpoint = bind(key, NetConfig { relay_only, relays, ..Default::default() }).await?;
         endpoint.online().await;
+        // The app's own runs on other devices go out through this endpoint too.
+        bc_net::share_endpoint(&endpoint);
         let mut config = AgentConfig::new(RunnerConfig::default(), paths.paired());
         config.events = events;
         config.guests = paths.guests();
-        Ok(Agent { endpoint, config })
+        Ok(Agent { endpoint, config, lending: Default::default() })
     }
 
     /// Shares the built-in cloud on `127.0.0.1:port` with other devices over iroh.
@@ -76,6 +80,15 @@ impl Agent {
         if self.config.cloud_port.is_some() {
             bc_net::lan::set_name(&self.endpoint, name);
         }
+    }
+
+    /// Whether other devices may run jobs here. Starts off.
+    pub fn set_lending(&self, on: bool) {
+        self.lending.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn lending(&self) -> bool {
+        self.lending.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// This Mac's code: the endpoint ID other devices enter to reach its cloud.
@@ -138,6 +151,7 @@ impl Agent {
     pub async fn accept_loop(&self) {
         while let Some(incoming) = self.endpoint.accept().await {
             let config = self.config.clone();
+            let lending = self.lending();
             tokio::spawn(async move {
                 let result = async {
                     let conn = incoming.await?;
@@ -150,6 +164,10 @@ impl Agent {
                         };
                         conn.set_max_concurrent_bi_streams(crate::server::MAX_CLOUD_STREAMS.into());
                         bc_net::serve_cloud(conn, port).await;
+                        return Ok(());
+                    }
+                    if !lending {
+                        conn.close(2u32.into(), b"this device is not lending");
                         return Ok(());
                     }
                     if conn.alpn() == bc_net::GUEST_ALPN {

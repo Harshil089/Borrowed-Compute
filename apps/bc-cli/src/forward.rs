@@ -86,7 +86,7 @@ pub async fn forward_services(
     for (_, a) in active.drain() {
         a.session.close().await;
     }
-    endpoint.close().await;
+    bc_net::release(endpoint).await;
     Ok(())
 }
 
