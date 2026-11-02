@@ -5,7 +5,9 @@
 //! the Seatbelt profile come in Phase two.
 
 use std::path::{Component, Path, PathBuf};
-use std::process::{ExitStatus, Stdio};
+use std::process::ExitStatus;
+#[cfg(unix)]
+use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -13,6 +15,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use bc_proto::wire::{AgentMsg, JobRequest, JobUsage, OutputStream};
 use tokio::io::{AsyncRead, AsyncReadExt};
+#[cfg(unix)]
 use tokio::process::{ChildStderr, ChildStdout};
 use tokio::sync::mpsc;
 
@@ -159,12 +162,16 @@ fn isolated_env(cache: &Path) -> Vec<(&'static str, std::ffi::OsString)> {
         ("NUGET_PACKAGES", dir("nuget")),
         ("DOTNET_CLI_HOME", dir("dotnet")),
         // git fails outright when it cannot read ~/.gitconfig, which the sandbox hides.
-        ("GIT_CONFIG_GLOBAL", "/dev/null".into()),
+        ("GIT_CONFIG_GLOBAL", if cfg!(windows) { "NUL" } else { "/dev/null" }.into()),
     ];
+    // Windows tools take their temporary and settings folders from these instead.
+    if cfg!(windows) {
+        env.extend([("TEMP", dir("tmp")), ("TMP", dir("tmp")), ("APPDATA", dir("appdata")), ("LOCALAPPDATA", dir("localappdata"))]);
+    }
     // rustup normally finds its toolchains through CARGO_HOME's sibling; moving CARGO_HOME
     // must not hide them, so name RUSTUP_HOME explicitly.
     if std::env::var_os("RUSTUP_HOME").is_none() {
-        if let Some(home) = std::env::var_os("HOME") {
+        if let Some(home) = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }) {
             let rustup = Path::new(&home).join(".rustup");
             if rustup.is_dir() {
                 env.push(("RUSTUP_HOME", rustup.into_os_string()));
@@ -232,79 +239,89 @@ async fn execute(
     }
     let (program, args) = req.argv.split_first().context("empty argv")?;
 
+    if req.service && cfg!(windows) {
+        // Forwarding needs loopback into the job's AppContainer, which Windows blocks.
+        bail!("servers that keep running are not supported on a Windows PC yet");
+    }
+
     let path = job_path().await;
     // Resolve the program on the job's PATH; Command looks it up on the agent's own.
     let lookup = path.clone().or_else(|| std::env::var_os("PATH"));
-    let program_path = lookup
-        .as_ref()
-        .and_then(|p| std::env::split_paths(p).map(|d| d.join(program)).find(|c| c.is_file()))
-        .filter(|_| !program.contains('/'))
-        .unwrap_or_else(|| PathBuf::from(program));
+    let program_path = find_program(program, lookup.as_deref(), &workdir);
     // The workspace holds both the project and the job's caches.
     let workspace = root.parent().unwrap_or(root);
-    let wrapper = crate::sandbox::wrapper(workspace, path.as_deref(), &config.denied_ports, config.guest);
-    // Under the sandbox, sandbox-exec itself always starts, so check the program here to
-    // keep a clear "not found" instead of a bare exit code.
-    if wrapper.is_some() {
-        let found = if program.contains('/') {
-            workdir.join(program).is_file()
-        } else {
-            program_path.is_absolute() && program_path.is_file()
-        };
-        if !found {
+    let mut envs: Vec<(std::ffi::OsString, std::ffi::OsString)> = Vec::new();
+    if let Some(path) = &path {
+        envs.push(("PATH".into(), path.clone()));
+    }
+    envs.extend(req.env.iter().map(|(k, v)| (k.into(), v.into())));
+    // After the job's own env, so a job cannot point a cache back outside its workspace.
+    envs.extend(isolated_env(cache).into_iter().map(|(k, v)| (k.into(), v)));
+
+    #[cfg(unix)]
+    let (t0, pid, group, mut wait, stdout, stderr) = {
+        let wrapper = crate::sandbox::wrapper(workspace, path.as_deref(), &config.denied_ports, config.guest);
+        // Under the sandbox, sandbox-exec itself always starts, so check the program here to
+        // keep a clear "not found" instead of a bare exit code.
+        if wrapper.is_some() && !(program_path.is_absolute() && program_path.is_file()) {
             bail!("starting {program:?}: not found on this Mac");
         }
-    }
-    let mut cmd = match wrapper {
-        Some(wrapper) => {
-            let mut cmd = std::process::Command::new(&wrapper[0]);
-            cmd.args(&wrapper[1..]).arg(&program_path);
-            cmd
-        }
-        None => std::process::Command::new(&program_path),
-    };
-    if let Some(path) = &path {
-        cmd.env("PATH", path);
-    }
-    cmd.args(args)
-        .current_dir(&workdir)
-        .envs(&req.env)
-        // After the job's own env, so a job cannot point a cache back outside its workspace.
-        .envs(isolated_env(cache))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    // Own process group, so the job and everything it starts can be killed together.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
+        let mut cmd = match wrapper {
+            Some(wrapper) => {
+                let mut cmd = std::process::Command::new(&wrapper[0]);
+                cmd.args(&wrapper[1..]).arg(&program_path);
+                cmd
+            }
+            None => std::process::Command::new(&program_path),
+        };
+        cmd.args(args)
+            .current_dir(&workdir)
+            .envs(envs)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        // Own process group, so the job and everything it starts can be killed together.
+        std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
 
-    let t0 = Instant::now();
-    let mut child = cmd
-        .spawn()
-        .with_context(|| format!("starting {program:?}"))?;
-    let pid = child.id();
-    let group = GroupGuard(Some(pid));
+        let t0 = Instant::now();
+        let mut child = cmd
+            .spawn()
+            .with_context(|| format!("starting {program:?}"))?;
+        let pid = child.id();
+        let stdout = ChildStdout::from_std(child.stdout.take().context("no stdout")?)?;
+        let stderr = ChildStderr::from_std(child.stderr.take().context("no stderr")?)?;
+        // The wait runs on its own thread and reaps the process even if this job is
+        // abandoned: the group guard kills the job, and the wait then returns.
+        let wait = tokio::task::spawn_blocking(move || wait_with_usage(child));
+        (t0, pid, GroupGuard(Some(pid)), wait, stdout, stderr)
+    };
+    #[cfg(windows)]
+    let (t0, pid, group, mut wait, stdout, stderr) = {
+        // The AppContainer starts the program itself, so a missing one fails at start.
+        if !(program_path.is_absolute() && program_path.is_file()) {
+            bail!("starting {program:?}: not found on this PC");
+        }
+        let confinement = crate::sandbox_windows::Confinement::for_job(config.guest);
+        let t0 = Instant::now();
+        let spawned = crate::sandbox_windows::spawn(&program_path, args, &workdir, &envs, workspace, confinement)
+            .with_context(|| format!("starting {program:?}"))?;
+        let process = spawned.process;
+        let wait = tokio::task::spawn_blocking(move || {
+            crate::sandbox_windows::wait(&process).map(|code| (std::os::windows::process::ExitStatusExt::from_raw(code), None))
+        });
+        let stdout = tokio::fs::File::from_std(spawned.stdout);
+        let stderr = tokio::fs::File::from_std(spawned.stderr);
+        (t0, spawned.pid, spawned.group, wait, stdout, stderr)
+    };
+
     if let Some(sink) = pid_sink {
         let _ = sink.send(pid);
     }
     let _ = tx.send(AgentMsg::Started).await;
 
     let seq = Arc::new(AtomicU64::new(0));
-    let stdout = tokio::spawn(pump(
-        ChildStdout::from_std(child.stdout.take().context("no stdout")?)?,
-        OutputStream::Stdout,
-        seq.clone(),
-        tx.clone(),
-    ));
-    let stderr = tokio::spawn(pump(
-        ChildStderr::from_std(child.stderr.take().context("no stderr")?)?,
-        OutputStream::Stderr,
-        seq,
-        tx.clone(),
-    ));
+    let stdout = tokio::spawn(pump(stdout, OutputStream::Stdout, seq.clone(), tx.clone()));
+    let stderr = tokio::spawn(pump(stderr, OutputStream::Stderr, seq, tx.clone()));
 
     // Services run until stopped, so they have no limit.
     let limit = match req.timeout_secs {
@@ -312,21 +329,23 @@ async fn execute(
         Some(secs) => Some(Duration::from_secs(secs)),
         None => Some(config.default_timeout),
     };
-    // The wait runs on its own thread and reaps the process even if this job is abandoned:
-    // the group guard kills the job, and the wait then returns.
-    let mut wait = tokio::task::spawn_blocking(move || wait_with_usage(child));
     let waited = match limit {
         Some(limit) => tokio::time::timeout(limit, &mut wait).await.ok(),
         None => Some((&mut wait).await),
     };
-    let ((status, usage), timed_out) = match waited {
+    let ((status, usage), timed_out): ((ExitStatus, Option<JobUsage>), bool) = match waited {
         Some(waited) => (waited??, false),
         None => {
-            kill_group(Some(pid));
+            group.kill();
             (wait.await??, true)
         }
     };
     let wall = t0.elapsed();
+    // The Job Object counts every process the job ran, so read it before it goes.
+    #[cfg(windows)]
+    let usage = usage.or_else(|| {
+        group.usage().map(|(user_ms, system_ms, max_rss_bytes)| JobUsage { wall_ms: 0, user_ms, system_ms, max_rss_bytes })
+    });
     // Background processes left by the job would keep its output pipes open.
     drop(group);
     let _ = stdout.await;
@@ -372,11 +391,6 @@ fn wait_with_usage(child: std::process::Child) -> std::io::Result<(ExitStatus, O
     Ok((ExitStatus::from_raw(status), Some(usage)))
 }
 
-#[cfg(not(unix))]
-fn wait_with_usage(mut child: std::process::Child) -> std::io::Result<(ExitStatus, Option<JobUsage>)> {
-    Ok((child.wait()?, None))
-}
-
 async fn pump(
     mut reader: impl AsyncRead + Unpin,
     stream: OutputStream,
@@ -403,33 +417,71 @@ async fn pump(
 
 /// Kills the job's process group when dropped: at the normal end of a job, and also when
 /// the job is abandoned mid-run (cancelled, or the client went away), so processes it
-/// started never outlive it.
+/// started never outlive it. On Windows `sandbox_windows::Group` does the same.
+#[cfg(unix)]
 struct GroupGuard(Option<u32>);
 
+#[cfg(unix)]
+impl GroupGuard {
+    fn kill(&self) {
+        kill_group(self.0);
+    }
+}
+
+#[cfg(unix)]
 impl Drop for GroupGuard {
     fn drop(&mut self) {
         kill_group(self.0.take());
     }
 }
 
+#[cfg(unix)]
 fn kill_group(pid: Option<u32>) {
-    #[cfg(unix)]
     if let Some(pid) = pid {
         // SAFETY: killpg only sends a signal; a stale group id fails harmlessly with ESRCH.
         unsafe {
             libc::killpg(pid as libc::pid_t, libc::SIGKILL);
         }
     }
-    // Phase one targets Mac agents; this keeps a Windows agent from leaking the job.
-    #[cfg(not(unix))]
-    if let Some(pid) = pid {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/F", "/T", "/PID", &pid.to_string()])
-            .output();
-    }
 }
 
-#[cfg(all(test, unix))]
+/// The program to start: a path relative to the job's folder when it names one, else the
+/// first match on `path`. Windows also tries each `PATHEXT` extension, so `npm` finds
+/// `npm.cmd`.
+fn find_program(program: &str, path: Option<&std::ffi::OsStr>, workdir: &Path) -> PathBuf {
+    let extensions: Vec<String> = if cfg!(windows) {
+        let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+        let pathext = pathext.split(';').filter(|e| !e.is_empty()).map(str::to_owned);
+        // A bare name only when it already has an extension: Node puts an extensionless
+        // shell script `npm` beside `npm.cmd`, which Windows cannot start.
+        let bare = Path::new(program).extension().is_some().then(String::new);
+        bare.into_iter().chain(pathext).collect()
+    } else {
+        vec![String::new()]
+    };
+    let with_extension = |base: PathBuf| {
+        extensions.iter().map(move |e| {
+            let mut name = base.clone().into_os_string();
+            name.push(e);
+            PathBuf::from(name)
+        })
+    };
+    let names_a_path = program.contains('/') || (cfg!(windows) && program.contains('\\'));
+    if names_a_path {
+        // Without `.` parts and with native separators: cmd.exe reads `/name` in
+        // `project\./name.cmd` as a switch and tries to run the folder.
+        let relative: PathBuf = Path::new(program).components().filter(|c| !matches!(c, Component::CurDir)).collect();
+        let path = workdir.join(relative);
+        return with_extension(path.clone()).find(|c| c.is_file()).unwrap_or(path);
+    }
+    path.into_iter()
+        .flat_map(std::env::split_paths)
+        .flat_map(|dir| with_extension(dir.join(program)))
+        .find(|c| c.is_file())
+        .unwrap_or_else(|| PathBuf::from(program))
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
@@ -488,6 +540,7 @@ mod tests {
         String::from_utf8(out).unwrap()
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn runs_job_in_uploaded_project() {
         let (msgs, ws, root) = run(
@@ -512,6 +565,7 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn times_out_and_kills_background_processes() {
         let (msgs, _ws, root) = run(
@@ -526,6 +580,7 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn abandoned_job_kills_its_process_group() {
         let root = tempfile::tempdir().unwrap();
@@ -556,6 +611,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn counts_cpu_of_processes_the_job_waits_for() {
         // The busy loop runs in a child of `sh`, which waits for it.
@@ -574,6 +630,7 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn caches_live_in_the_workspace_and_go_with_it() {
         // The job writes into every cache it is given and prints where they are.
@@ -594,6 +651,7 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn jobs_get_the_login_shell_path() {
         let path = job_path().await.expect("a login shell PATH");
@@ -649,4 +707,136 @@ mod tests {
         assert!(unpack(&bytes, root.path()).is_err());
         assert!(!root.path().parent().unwrap().join("evil.t").exists());
     }
+
+    /// The Windows runner: an AppContainer and a Job Object around each job.
+    #[cfg(windows)]
+    async fn run_within(req: JobRequest, archive: Vec<u8>) -> Vec<AgentMsg> {
+        tokio::time::timeout(Duration::from_secs(60), run(req, archive))
+            .await
+            .expect("the job's output closed once it ended")
+            .0
+    }
+
+    #[cfg(windows)]
+    fn exited(msgs: &[AgentMsg]) -> (Option<i32>, bool, Option<JobUsage>) {
+        match msgs.last() {
+            Some(AgentMsg::Exited { code, timed_out, usage }) => (*code, *timed_out, *usage),
+            other => panic!("expected Exited, got {other:?}"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_runs_job_in_uploaded_project() {
+        let msgs = run_within(
+            request(&["cmd", "/c", "type hello.txt & echo %BC_TEST% & echo oops 1>&2 & exit 3"], None),
+            archive(&[("hello.txt", "hi\n")]),
+        )
+        .await;
+        let out = output(&msgs, OutputStream::Stdout);
+        assert!(out.contains("hi") && out.contains("yes"), "{out}");
+        assert!(output(&msgs, OutputStream::Stderr).contains("oops"));
+        let (code, timed_out, usage) = exited(&msgs);
+        assert_eq!((code, timed_out), (Some(3), false));
+        assert!(usage.is_some(), "the Job Object reports usage");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_runs_batch_files_from_the_project() {
+        let msgs = run_within(request(&["./hello.cmd"], None), archive(&[("hello.cmd", "@echo from batch\r\n")])).await;
+        assert!(output(&msgs, OutputStream::Stdout).contains("from batch"), "{msgs:?}");
+        assert_eq!(exited(&msgs).0, Some(0));
+    }
+
+    /// npm is a batch file in Program Files on Windows; the runner starts the script it
+    /// wraps with Node directly.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_runs_npm_from_program_files() {
+        if !find_program("npm", std::env::var_os("PATH").as_deref(), Path::new(".")).is_absolute() {
+            return eprintln!("npm is not installed; skipping");
+        }
+        // A sandboxed job reads only what grants "ALL APPLICATION PACKAGES" access, as a
+        // normal Program Files install does. Where npm's files do not, that is this
+        // machine's setup, not batch handling.
+        let npm = find_program("npm", std::env::var_os("PATH").as_deref(), Path::new("."));
+        let cli = npm.with_file_name("node_modules").join("npm").join("bin").join("npm-cli.js");
+        let read = format!("require('fs').readFileSync({:?})", cli.display().to_string());
+        let node = run_within(request(&["node", "-e", &read], None), Vec::new()).await;
+        if exited(&node).0 != Some(0) {
+            return eprintln!("npm's files are not open to AppContainers on this machine; skipping: {}", output(&node, OutputStream::Stderr));
+        }
+        let msgs = run_within(request(&["npm", "--version"], None), Vec::new()).await;
+        assert_eq!(exited(&msgs).0, Some(0), "{}", output(&msgs, OutputStream::Stderr));
+    }
+
+    /// Node loads the project's own scripts inside the AppContainer.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_runs_node_scripts_from_the_project() {
+        if !find_program("node", std::env::var_os("PATH").as_deref(), Path::new(".")).is_absolute() {
+            return eprintln!("node is not installed; skipping");
+        }
+        let files = [("main.js", "console.log(require('./lib').word)"), ("lib.js", "exports.word = 'from a module'")];
+        let msgs = run_within(request(&["node", "main.js"], None), archive(&files)).await;
+        assert!(output(&msgs, OutputStream::Stdout).contains("from a module"), "{}", output(&msgs, OutputStream::Stderr));
+    }
+
+    /// A job reads and writes its workspace but nothing else of the owner's.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_sandbox_confines_jobs_to_their_workspace() {
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&secret, "do not read").unwrap();
+        let script = format!(
+            "type hello.txt & echo inside> made.txt & type made.txt & \
+             (type \"{0}\" && echo READ-OUTSIDE) & \
+             (echo x> \"{1}\\made.txt\" && echo WROTE-OUTSIDE) & \
+             (dir \"%USERPROFILE%\" >NUL 2>&1 && echo LISTED-HOME) & exit 0",
+            secret.display(),
+            outside.path().display()
+        );
+        let msgs = run_within(request(&["cmd", "/c", &script], None), archive(&[("hello.txt", "hi\n")])).await;
+        let out = output(&msgs, OutputStream::Stdout);
+        assert!(out.contains("hi") && out.contains("inside"), "{out}");
+        for leak in ["do not read", "READ-OUTSIDE", "WROTE-OUTSIDE", "LISTED-HOME"] {
+            assert!(!out.contains(leak), "{leak} in {out}");
+        }
+        assert!(!outside.path().join("made.txt").exists());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_times_out_and_counts_cpu() {
+        let msgs = run_within(request(&["cmd", "/c", "for /l %i in (0,0,1) do @rem"], Some(2)), Vec::new()).await;
+        let (code, timed_out, usage) = exited(&msgs);
+        assert_eq!((code, timed_out), (None, true));
+        assert!(usage.expect("usage").user_ms > 0);
+    }
+
+    /// A process the job left running in the background ends with the job, so the job's
+    /// output closes and the run returns.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_background_processes_end_with_the_job() {
+        let msgs = run_within(
+            request(&["cmd", "/c", "start", "/b", "cmd", "/c", "for /l %i in (0,0,1) do @rem"], None),
+            Vec::new(),
+        )
+        .await;
+        assert!(!exited(&msgs).1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_finds_programs_through_pathext() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tool"), "#!/bin/sh").unwrap();
+        std::fs::write(dir.path().join("tool.cmd"), "@echo hi").unwrap();
+        let found = find_program("tool", Some(dir.path().as_os_str()), dir.path());
+        assert!(found.to_string_lossy().eq_ignore_ascii_case(&dir.path().join("tool.cmd").to_string_lossy()), "{found:?}");
+    }
+
 }
