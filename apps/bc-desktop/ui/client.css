@@ -98,7 +98,7 @@
   font: 400 12px/1.7 var(--mono); color: var(--ink); white-space: pre-wrap; word-break: break-word;
   background: var(--subtle);
 }
-.console:empty::before { content: "No run yet. Choose a Mac, a project folder and a command, then press Run."; font: 400 13px/1.5 var(--sans); color: var(--ink-3); }
+.console:empty::before { content: "No run yet. Choose a device, a project folder and a command, then press Run."; font: 400 13px/1.5 var(--sans); color: var(--ink-3); }
 .console .stderr { color: var(--bad); }
 .console .notice { color: var(--accent-ink); }
 

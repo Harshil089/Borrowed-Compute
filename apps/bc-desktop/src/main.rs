@@ -1,9 +1,17 @@
-//! Borrowed Compute: desktop app for sending jobs to a paired Mac.
+//! Borrowed Compute: the desktop app, on Mac and Windows. It both uses other devices
+//! (sends a project and a command to a paired device and streams the output back, the
+//! same flows as the `bc` command) and lends this one (`lend.rs`).
 //!
-//! The same flows as the `bc` command, and the same device identity: it uses the CLI's
-//! home directory, so signing in once covers both.
+//! It is a normal app with a Dock icon or taskbar button. With "Run in background" on,
+//! quitting only hides it: it keeps lending and shows a menu-bar or tray icon to reopen it
+//! or quit for real.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod lend;
+mod logs;
+#[cfg(target_os = "macos")]
+mod quit_guard;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -27,8 +35,13 @@ use bc_net::load_or_create_key;
 use bc_proto::cloud::{DeviceInfo, DeviceKind, PairingInfo, Provider, Providers};
 use bc_proto::wire::{JobUsage, ServiceInfo};
 use bc_proto::JobSpec;
+use lend::LendState;
+use logs::log;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, State};
+use std::sync::atomic::Ordering;
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_updater::UpdaterExt;
@@ -78,6 +91,10 @@ struct Status {
     cloud_url_set: bool,
     /// Macs shared with this PC through invites; usable without signing in.
     shared: Vec<bc_cli::shared::SharedMac>,
+    /// This device as a lender.
+    lend: lend::LendStatus,
+    /// This device's operating system, `mac` or `windows`.
+    kind: DeviceKind,
 }
 
 #[derive(Serialize)]
@@ -208,13 +225,16 @@ fn watch_nearby(app: AppHandle, list: Arc<StdMutex<Vec<bc_net::lan::NearbyMac>>>
 }
 
 #[tauri::command]
-fn get_status(state: State<'_, AppState>) -> Status {
+fn get_status(state: State<'_, AppState>, lend: State<'_, LendState>) -> Status {
     Status {
+        lend: lend.status(),
+        kind: DeviceKind::current(),
         signed_in: load_session(&state.home).is_some(),
         device_id: device_id(&state.home).ok(),
         default_mac: default_mac(&state.home),
         cloud_url: cloud_url_for(&state.home),
-        cloud_url_set: cloud_url_for(&state.home) != DEFAULT_CLOUD_URL,
+        // The default address is set too when the account lives on this device.
+        cloud_url_set: cloud_url_for(&state.home) != DEFAULT_CLOUD_URL || lend.host.lock().unwrap().hosting,
         shared: bc_cli::shared::list(&state.home),
     }
 }
@@ -243,18 +263,20 @@ fn leave_mac(state: State<'_, AppState>, mac: String) -> CmdResult<()> {
 }
 
 #[tauri::command]
-async fn get_account(state: State<'_, AppState>) -> CmdResult<Account> {
+async fn get_account(app: AppHandle, state: State<'_, AppState>, lend: State<'_, LendState>) -> CmdResult<Account> {
     let cloud = state.cloud();
     let me = match cloud.me().await {
         Ok(me) => me,
         // The session belongs to another cloud (or expired): sign out so the window
         // offers sign-in again instead of failing on every request.
         Err(e) if is_unauthorized(&e) => {
-            sign_out_locally(&state).await;
+            sign_out_locally(&state, &lend).await;
             return Err("signed-out".into());
         }
         Err(e) => return Err(err_chain(e)),
     };
+    // A session that appeared on disk (for example from `bc login`) starts lending too.
+    lend::start(&app);
     let id = device_id(&state.home)?;
     let device_name = cloud
         .devices()
@@ -262,6 +284,9 @@ async fn get_account(state: State<'_, AppState>) -> CmdResult<Account> {
         .ok()
         .and_then(|list| list.into_iter().find(|d| d.endpoint_id == id))
         .map(|d| d.name);
+    if let Some(name) = &device_name {
+        lend.set_lan_name(name);
+    }
     Ok(Account { login: me.login, device_name })
 }
 
@@ -269,6 +294,7 @@ async fn get_account(state: State<'_, AppState>) -> CmdResult<Account> {
 async fn login(
     app: AppHandle,
     state: State<'_, AppState>,
+    lend: State<'_, LendState>,
     name: String,
     provider: Option<String>,
 ) -> CmdResult<Account> {
@@ -294,6 +320,9 @@ async fn login(
     };
     let device = client.register(&key, &name, DeviceKind::current()).await.map_err(err_chain)?;
     drop(client);
+    lend::start(&app);
+    lend.signed_in_or_out().await;
+    lend.set_lan_name(&device.name);
     Ok(Account { login, device_name: Some(device.name) })
 }
 
@@ -306,17 +335,18 @@ async fn providers(state: State<'_, AppState>) -> CmdResult<Providers> {
 }
 
 #[tauri::command]
-async fn logout(state: State<'_, AppState>) -> CmdResult<()> {
+async fn logout(state: State<'_, AppState>, lend: State<'_, LendState>) -> CmdResult<()> {
     let cloud = state.cloud();
     if cloud.token().is_some() {
         let _ = cloud.logout().await;
     }
-    sign_out_locally(&state).await;
+    sign_out_locally(&state, &lend).await;
     Ok(())
 }
 
-async fn sign_out_locally(state: &AppState) {
+async fn sign_out_locally(state: &AppState, lend: &LendState) {
     clear_session(&state.home);
+    lend.signed_in_or_out().await;
 }
 
 /// Checks that a Borrowed Compute cloud answers at `url`, without saving it.
@@ -330,11 +360,17 @@ async fn test_cloud_url(url: String) -> CmdResult<String> {
 /// Saves the cloud address. A new address means a different cloud, so this device signs
 /// out and signs in again there.
 #[tauri::command]
-async fn set_cloud_url(state: State<'_, AppState>, url: String) -> CmdResult<String> {
+async fn set_cloud_url(app: AppHandle, state: State<'_, AppState>, lend: State<'_, LendState>, url: String) -> CmdResult<String> {
     let before = cloud_url_for(&state.home);
     let saved = save_cloud_url(&state.home, &url).map_err(err_chain)?;
     if saved != before {
-        sign_out_locally(&state).await;
+        sign_out_locally(&state, &lend).await;
+    }
+    // The account now lives elsewhere; the cloud running here, if any, goes at restart.
+    let was_hosting = std::mem::take(&mut lend.host.lock().unwrap().hosting);
+    let _ = std::fs::remove_file(state.home.join("hosts-account"));
+    if was_hosting && saved != DEFAULT_CLOUD_URL {
+        restart_app(&app);
     }
     Ok(saved)
 }
@@ -716,9 +752,12 @@ async fn check_update(app: AppHandle) -> CmdResult<UpdateInfo> {
 /// Downloads, verifies and installs the latest version, then restarts into it. On Windows
 /// the installer closes the app itself.
 #[tauri::command]
-async fn install_update(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+async fn install_update(app: AppHandle, state: State<'_, AppState>, lend: State<'_, LendState>) -> CmdResult<()> {
     if state.job.lock().unwrap().is_some() {
         return Err("A job is running. Update when it finishes.".into());
+    }
+    if lend.job_running() {
+        return Err("Another device's job is running here. Update when it finishes; restarting now would stop it.".into());
     }
     // On Windows install() starts the installer and exits the process at once. Closing the
     // window and web view first lets the app go quickly, before the installer looks for it.
@@ -727,9 +766,50 @@ async fn install_update(app: AppHandle, state: State<'_, AppState>) -> CmdResult
     let Some(update) = updater.check().await.map_err(err)? else {
         return Err("Already up to date.".into());
     };
+    log(format_args!("installing update {}", update.version));
     let bytes = download_update(&app, &update).await?;
+    lend.quitting.store(true, Ordering::Relaxed);
     update.install(bytes).map_err(err)?;
+    restart_app(&app);
+    Ok(())
+}
+
+/// Starts the app again. On a Mac it opens again only once this process has exited:
+/// Tauri's own restart opens the new copy while this one is still shutting down, the two
+/// then overlap on the cloud's port and WebKit's storage, and after an update the new
+/// window stayed blank.
+fn restart_app(app: &AppHandle) {
+    app.state::<LendState>().quitting.store(true, Ordering::Relaxed);
+    #[cfg(target_os = "macos")]
+    match relaunch_after_exit() {
+        Ok(()) => app.exit(0),
+        Err(e) => log(format_args!("could not restart: {e}")),
+    }
+    #[cfg(not(target_os = "macos"))]
     app.restart();
+}
+
+/// Opens the app again once this process has exited, killing it if it has not after 20
+/// seconds, so a hung exit never leaves the device without its agent.
+#[cfg(target_os = "macos")]
+fn relaunch_after_exit() -> std::io::Result<()> {
+    use std::os::unix::process::CommandExt;
+    let exe = std::env::current_exe()?;
+    let bundle = exe.ancestors().nth(3).ok_or_else(|| std::io::Error::other("not inside an app bundle"))?;
+    std::process::Command::new("/bin/sh")
+        .args([
+            "-c",
+            "i=0; while kill -0 \"$1\" 2>/dev/null; do i=$((i+1)); [ $i -gt 100 ] && kill -9 \"$1\"; sleep 0.2; done; exec /usr/bin/open -n \"$2\"",
+            "relaunch",
+        ])
+        .arg(std::process::id().to_string())
+        .arg(bundle)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0)
+        .spawn()?;
+    Ok(())
 }
 
 /// Download attempts before an update gives up. Release downloads come from GitHub's file
@@ -869,19 +949,138 @@ impl Write for EmitWriter {
     }
 }
 
+/// One home per device, so lending and using share one key, one session and one account:
+/// on a Mac the folder the Mac app used, elsewhere the PC app's, which `bc` shares. Each
+/// device keeps what it had before the two apps merged.
+fn device_home() -> PathBuf {
+    let home = if cfg!(target_os = "macos") {
+        bc_net::home_dir().map(|root| root.join("agent"))
+    } else {
+        client_home()
+    };
+    home.expect("config directory")
+}
+
+/// Where the account's cloud keeps its database when it lives on this device.
+fn cloud_dir(home: &Path) -> PathBuf {
+    home.parent().unwrap_or(home).join("cloud")
+}
+
+/// Hides the app from the Dock or taskbar and shows the menu-bar or tray icon, so it keeps
+/// lending with nothing on screen.
+fn go_to_background(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+    if let Some(tray) = app.tray_by_id("main") {
+        let _ = tray.set_visible(true);
+    }
+    log("quit while Run in background is on: still lending");
+}
+
+fn come_to_foreground(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+    if let Some(tray) = app.tray_by_id("main") {
+        let _ = tray.set_visible(false);
+    }
+    show_window(app);
+}
+
+fn show_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+/// Run in background is on and nothing asked for a real exit.
+fn stays_in_background(app: &AppHandle) -> bool {
+    let lend = app.state::<LendState>();
+    lend.run_in_background.load(Ordering::Relaxed) && !lend.quitting.load(Ordering::Relaxed)
+}
+
 fn main() {
     // Keys and the session token belong in the OS keychain, not in files.
     bc_net::use_keychain();
-    let home = client_home().expect("config directory");
+    let home = device_home();
+    let lend = LendState::new(&home);
+    if let Err(e) = lend.logs.capture_stderr() {
+        eprintln!("could not open agent.log: {e}");
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .manage(AppState { home, job: StdMutex::new(None), forwarding: StdMutex::new(None), forwards: Arc::default(), nearby: Arc::default() })
-        .setup(|app| {
+        .manage(AppState { home: home.clone(), job: StdMutex::new(None), forwarding: StdMutex::new(None), forwards: Arc::default(), nearby: Arc::default() })
+        .manage(lend)
+        .setup(move |app| {
+            // The app's version comes from tauri.conf.json, which CI sets for each release;
+            // the crate version stays 0.1.0.
+            log(format_args!("Borrowed Compute {} starting", app.package_info().version));
             let list = app.state::<AppState>().nearby.clone();
             watch_nearby(app.handle().clone(), list);
+
+            let open = MenuItem::with_id(app, "open", "Open Borrowed Compute", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit (stops lending)", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&open, &quit])?;
+            let tray = TrayIconBuilder::with_id("main")
+                .icon(tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))?)
+                .icon_as_template(true)
+                .tooltip("Borrowed Compute")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "open" => come_to_foreground(app),
+                    "quit" => {
+                        app.state::<LendState>().quitting.store(true, Ordering::Relaxed);
+                        app.exit(0);
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
+                        come_to_foreground(tray.app_handle());
+                    }
+                })
+                .build(app)?;
+            // The tray icon is only for when the app runs in the background.
+            tray.set_visible(false)?;
+
+            #[cfg(target_os = "macos")]
+            {
+                let handle = app.handle().clone();
+                quit_guard::install(move || {
+                    let stay = stays_in_background(&handle);
+                    if stay {
+                        go_to_background(&handle);
+                    }
+                    !stay
+                });
+            }
+
+            let lend = app.state::<LendState>();
+            if lend.host.lock().unwrap().hosting {
+                lend::start_cloud(app.handle(), cloud_dir(&home));
+            }
+            if lend.host.lock().unwrap().hosting || load_session(&home).is_some() {
+                lend::start(app.handle());
+            }
+            show_window(app.handle());
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            // As in other Mac apps, closing the window leaves the app running in the Dock.
+            #[cfg(target_os = "macos")]
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (window, event);
         })
         .invoke_handler(tauri::generate_handler![
             get_status,
@@ -909,10 +1108,37 @@ fn main() {
             set_cloud_url,
             join_mac,
             leave_mac,
-            nearby_macs
+            nearby_macs,
+            lend::keep_account_here,
+            lend::set_lending,
+            lend::list_pairings,
+            lend::approve,
+            lend::unpair,
+            lend::list_services,
+            lend::stop_service,
+            lend::guests,
+            lend::set_sharing,
+            lend::create_invite,
+            lend::delete_invite,
+            lend::approve_guest,
+            lend::remove_guest,
+            lend::recent_jobs,
+            lend::open_logs,
+            lend::get_settings,
+            lend::set_run_in_background
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Borrowed Compute");
+        .build(tauri::generate_context!())
+        .expect("error while building Borrowed Compute")
+        .run(|app, event| match event {
+            RunEvent::ExitRequested { api, .. } if stays_in_background(app) => {
+                api.prevent_exit();
+                go_to_background(app);
+            }
+            // Clicking the Dock icon brings back the window.
+            #[cfg(target_os = "macos")]
+            RunEvent::Reopen { .. } => come_to_foreground(app),
+            _ => {}
+        });
 }
 
 #[cfg(test)]

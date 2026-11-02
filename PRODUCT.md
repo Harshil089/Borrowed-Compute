@@ -22,9 +22,9 @@ Not pixels (remote desktop, cloud streaming) and not infrastructure (SSH build f
 
 ## Operating Context
 
-- Two apps:
-  - **Borrowed Compute** (Windows client; also runs on macOS): pick a paired Mac, pick a project folder, type a command or use the folder's `bc.toml`, watch live output, see timings (connect, upload, first output, total, direct vs relay) and what the Mac used (CPU time, cores, peak memory, run time). Each run's log is saved locally.
-  - **Borrowed Compute Agent** (Mac): sign in, show the Mac code the PC uses to reach the built-in cloud, approve pairing requests by matching a 6-digit code, see paired devices, recent jobs with compute usage, logs, Run in background, and updates.
+- One app, **Borrowed Compute**, on Mac and Windows, borrowing in any direction (PC to Mac, Mac to PC, PC to PC, Mac to Mac):
+  - **Use**: pick a paired device, pick a project folder, type a command or use the folder's `bc.toml`, watch live output, see timings (connect, upload, first output, total, direct vs relay) and what the other computer used (CPU time, cores, peak memory, run time). Each run's log is saved locally.
+  - **This device**: Lend this device (on by default on a Mac, off on a PC), approve pairing requests by typing the requester's code, paired devices, the code other devices sign in with when the account lives here, sharing with guests, recent jobs with compute usage, logs, Run in background.
 - A `bc` command-line tool does the same as the client app; both share one device identity.
 - Sign-in is GitHub device flow: the app shows a code, the user enters it on github.com.
 - Jobs are batch only: no remote shells, debuggers or language servers.
@@ -37,7 +37,8 @@ Not pixels (remote desktop, cloud streaming) and not infrastructure (SSH build f
 - Only devices on the same account can pair, and the Mac owner approves each one.
 - Connection is direct when possible, otherwise through an encrypted relay; the UI reports which.
 - Updates: both apps check a public releases feed and install signed updates in place.
-- The Mac app is a normal Dock app; with Run in background on, quitting only hides it and a menu-bar icon remains.
+- The app is a normal Dock or taskbar app; with Run in background on, quitting only hides it and a menu-bar or tray icon remains.
+- Jobs on a lending PC run in a Windows AppContainer, as jobs on a lending Mac run in Seatbelt: the workspace only, never the owner's files.
 - Phase two (not built): sandbox user plus Seatbelt profile, toolchain provisioning, chunked sync, declared outputs coming back.
 - Undecided: pricing, team/admin features, start at login, Developer ID signing.
 

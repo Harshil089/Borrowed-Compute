@@ -1,6 +1,6 @@
 [package]
 name = "bc-desktop"
-description = "Borrowed Compute: the desktop app for sending jobs to a paired Mac."
+description = "Borrowed Compute: the desktop app that uses other devices and lends this one."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,6 +11,8 @@ tauri-build.workspace = true
 
 [dependencies]
 bc-cli.workspace = true
+bc-agent.workspace = true
+bc-cloud.workspace = true
 bc-auth.workspace = true
 bc-net.workspace = true
 bc-proto.workspace = true
@@ -18,11 +20,17 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 humantime.workspace = true
-tauri.workspace = true
+tauri = { workspace = true, features = ["tray-icon", "image-png"] }
 tauri-plugin-dialog.workspace = true
 tauri-plugin-opener.workspace = true
 tauri-plugin-updater.workspace = true
-tokio = { workspace = true, features = ["sync", "macros", "time", "rt"] }
+tokio = { workspace = true, features = ["sync", "macros", "time", "rt", "process", "io-util", "net"] }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
 
 [dev-dependencies]
 tempfile.workspace = true

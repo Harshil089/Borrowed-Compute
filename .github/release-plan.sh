@@ -1,8 +1,8 @@
 #!/bin/sh
 # Decides which apps to release on this push and their next versions, as KEY=VALUE lines
-# for $GITHUB_OUTPUT. The Mac app (agent) and the Windows app (client) are versioned
-# separately: each has its own tags (agent-v0.2.3, client-v0.2.7) and is released only
-# when something it is built from changed since its last tag.
+# for $GITHUB_OUTPUT. The Mac build (agent) and the Windows build (client) of the one app
+# are versioned separately: each has its own tags (agent-v0.2.3, client-v0.2.7) and is
+# released when something it is built from changed since its last tag.
 #
 # usage: release-plan.sh [auto|both|agent|client]
 set -eu
@@ -21,7 +21,11 @@ next_version() {
     return
   fi
   v=${last#"$1-v"}
-  echo "${v%.*}.$(( ${v##*.} + 1 ))"
+  # The merged app starts at 0.3.0 on both.
+  case "$v" in
+    0.2.*) echo "0.3.0" ;;
+    *) echo "${v%.*}.$(( ${v##*.} + 1 ))" ;;
+  esac
 }
 
 # True if any of the paths changed since the app's last tag (or it was never released).
@@ -44,9 +48,9 @@ case "$force" in
   client) client=true ;;
   *)
     # shellcheck disable=SC2086
-    if changed agent apps/bc-desktop-agent apps/bc-agent apps/bc-cloud $SHARED; then agent=true; fi
+    if changed agent apps $SHARED; then agent=true; fi
     # shellcheck disable=SC2086
-    if changed client apps/bc-desktop apps/bc-cli $SHARED; then client=true; fi
+    if changed client apps $SHARED; then client=true; fi
     ;;
 esac
 

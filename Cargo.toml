@@ -9,7 +9,6 @@ members = [
     "crates/bc-auth",
     "crates/bc-secrets",
     "apps/bc-desktop",
-    "apps/bc-desktop-agent",
 ]
 
 [workspace.package]

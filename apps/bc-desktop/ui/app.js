@@ -72,8 +72,8 @@ const LEGS = ["pack", "upload", "run", "return"];
 function setRoute() {
   $("route-from").textContent = deviceCode(myName || "PC");
   $("route-from-name").textContent = myName || "This PC";
-  $("route-to").textContent = selectedMac ? deviceCode(selectedMac) : "MAC";
-  $("route-to-name").textContent = selectedMac || "Choose a Mac";
+  $("route-to").textContent = selectedMac ? deviceCode(selectedMac) : "DEV";
+  $("route-to-name").textContent = selectedMac || "Choose a device";
 }
 function setLeg(leg, failed = false) {
   const legs = $("legs");
@@ -107,6 +107,10 @@ let wantSignIn = false;
 
 async function loadStatus() {
   status = await invoke("get_status");
+  const pc = status.kind === "windows";
+  $("me-code").textContent = pc ? "PC" : "MAC";
+  $("me-kind").textContent = pc ? "This PC" : "This Mac";
+  window.lendUI?.refresh();
   const guest = !status.signed_in && status.shared.length > 0 && !wantSignIn;
   $("signin-view").classList.toggle("hidden", status.signed_in || guest);
   $("app-view").classList.toggle("hidden", !status.signed_in && !guest);
@@ -146,12 +150,12 @@ function cloudMessage(box, ok, text) {
 
 async function testCloud(input, box) {
   const url = input.value.trim();
-  if (!url) { cloudMessage(box, false, "Paste your Mac's code first."); return null; }
+  if (!url) { cloudMessage(box, false, "Paste its code first."); return null; }
   box.className = "banner hidden";
   try {
     const normalized = await invoke("test_cloud_url", { url });
     input.value = normalized;
-    cloudMessage(box, true, "Connected. Your Mac answers.");
+    cloudMessage(box, true, "Connected. It answers.");
     return normalized;
   } catch (e) {
     cloudMessage(box, false, `Could not reach it: ${e}`);
@@ -176,10 +180,11 @@ function pairingFor(mac) {
   return devices?.pairings.find((p) => p.mac_id === mac.endpoint_id);
 }
 
-// Macs on this account, then Macs shared with this PC through invites. Whether a shared
-// Mac is online is unknown until a run tries it, so it is treated as reachable.
+// Lending devices on this account, Mac or PC, then devices shared with this one through
+// invites. Only a lending device checks in, so one that never did is left out. Whether a
+// shared device is online is unknown until a run tries it, so it is treated as reachable.
 function allMacs() {
-  const own = (devices?.devices || []).filter((d) => d.kind === "mac" && d.endpoint_id !== devices.me);
+  const own = (devices?.devices || []).filter((d) => d.last_seen_secs_ago != null && d.endpoint_id !== devices.me);
   const ownIds = new Set(own.map((m) => m.endpoint_id));
   const shared = (status?.shared || [])
     .filter((s) => !ownIds.has(s.id))
@@ -190,7 +195,7 @@ function allMacs() {
 function renderMacs() {
   const macs = allMacs();
   if (!macs.length) {
-    $("macs").innerHTML = `<p class="empty-note">No Macs on this account yet. Install Borrowed Compute Agent on your Mac and sign in there with the same GitHub account, or join one someone shared with you.</p>`;
+    $("macs").innerHTML = `<p class="empty-note">No other computer lends itself on this account yet. Install Borrowed Compute on it, sign in with the same account and turn on Lend this device, or join one someone shared with you.</p>`;
     setRoute();
     return;
   }
@@ -212,7 +217,7 @@ function renderMacs() {
         <span class="mac-code">${esc(deviceCode(m.name))}</span>
         <span class="mac-meta">
           <span class="mac-name">${esc(m.name)}</span>
-          <span class="mac-seen">${m.shared ? "Shared with you" : m.online ? (isNearby(m.endpoint_id) ? "Ready · on this network" : "Ready for runs") : esc(ago(m.last_seen_secs_ago))}</span>
+          <span class="mac-seen">${m.shared ? "Shared with you" : `${m.kind === "windows" ? "PC" : "Mac"} · ${m.online ? (isNearby(m.endpoint_id) ? "on this network" : "ready for runs") : esc(ago(m.last_seen_secs_ago))}`}</span>
         </span>
         <span class="mac-foot">${state}${action}</span>
       </div>`;
@@ -263,7 +268,7 @@ $("signin-nearby-list").addEventListener("click", (event) => {
 
 // Signed in to another Mac: switching changes the account list, so sign in again.
 async function switchToMac(id, name) {
-  if (!(await ask(`Use ${name}? You will sign in again with the account you use on that Mac, then pair this PC with it.`, "Switch"))) return;
+  if (!(await ask(`Use the account on ${name}? You will sign in again there, then pair this computer with its devices.`, "Switch"))) return;
   try {
     const url = await invoke("test_cloud_url", { url: id });
     await invoke("set_cloud_url", { url });
@@ -307,7 +312,7 @@ function updateRunButton() {
   const mac = allMacs().find((d) => d.name === selectedMac);
   const paired = mac && pairingFor(mac)?.status === "approved";
   $("run").disabled = running || !selectedMac || !$("folder").value.trim();
-  $("run").textContent = selectedMac ? `Run on ${selectedMac}` : "Run on Mac";
+  $("run").textContent = selectedMac ? `Run on ${selectedMac}` : "Run";
   if (selectedMac && mac && !paired) {
     $("run").title = `Pair with ${selectedMac} first`;
   } else {
@@ -316,6 +321,7 @@ function updateRunButton() {
 }
 
 async function selectMac(name) {
+  window.lendUI?.showRun();
   selectedMac = name;
   await invoke("choose_mac", { mac: name }).catch(() => {});
   renderMacs();
@@ -360,7 +366,7 @@ function renderServices() {
     <li class="service">
       <span class="service-cmd">${esc(s.argv.join(" "))}</span>
       ${forwards.filter((f) => f.job_id === s.job_id).map((f) => `
-        <button class="link service-port" data-open-port="${f.local}" title="Port ${f.remote} on the Mac">
+        <button class="link service-port" data-open-port="${f.local}" title="Port ${f.remote} on ${esc(selectedMac)}">
           <svg class="icon"><use href="#i-plane"/></svg>localhost:${f.local}</button>`).join("")}
       ${s.ports.length && !forwards.some((f) => f.job_id === s.job_id) ? `<span class="service-up faint">Forwarding port ${s.ports.join(", ")}…</span>` : ""}
       <div class="service-foot">
@@ -413,6 +419,20 @@ function finishMacChoice(ok) {
   macChoice = null;
 }
 $("mac-cancel").addEventListener("click", () => finishMacChoice(false));
+$("keep-here").addEventListener("click", async () => {
+  if (!(await ask("Keep your account on this computer? Your other computers then sign in through this one, so it needs to be on when they sign in or pair.", "Keep it here"))) return;
+  $("keep-here").disabled = true;
+  try {
+    await invoke("keep_account_here");
+    loadProviders();
+    finishMacChoice(true);
+  } catch (e) {
+    $("signin-cloud-msg").className = "banner bad";
+    $("signin-cloud-msg").textContent = `Could not start the account here: ${e}`;
+  } finally {
+    $("keep-here").disabled = false;
+  }
+});
 
 async function chooseMac() {
   if (status.cloud_url_set) return true;
@@ -480,7 +500,7 @@ $("cloud-cancel").addEventListener("click", () => $("cloud-dialog").classList.ad
 $("cloud-save").addEventListener("click", async () => {
   const url = await testCloud($("cloud-input"), $("cloud-msg"));
   if (!url) return;
-  if (url !== status.cloud_url && !(await ask("Save and sign out? You will sign in again on this Mac.", "Save and sign out"))) return;
+  if (url !== status.cloud_url && !(await ask("Save and sign out? You will sign in again through that computer.", "Save and sign out"))) return;
   await invoke("set_cloud_url", { url }).catch((e) => cloudMessage($("cloud-msg"), false, String(e)));
   $("cloud-dialog").classList.add("hidden");
   devices = null;
@@ -667,7 +687,7 @@ $("join-go").addEventListener("click", async () => {
   joining = true;
   $("join-go").disabled = true;
   $("join-msg").className = "banner";
-  $("join-msg").textContent = "Reaching the Mac…";
+  $("join-msg").textContent = "Reaching it…";
   try {
     const mac = await invoke("join_mac", { invite });
     if (!joining) return;
@@ -856,7 +876,7 @@ function renderResult(r) {
   $("result").innerHTML = `
     <div class="result-top">
       <div class="result-time">
-        <span class="label">${u ? "Ran on the Mac" : "Total"}</span>
+        <span class="label">${u ? `Ran on ${esc(selectedMac || "the other computer")}` : "Total"}</span>
         <strong>${fig(u ? u.wall_ms : t.total_ms)}</strong>
       </div>
       <span class="stamp ${cls}">${esc(word)}</span>
@@ -899,7 +919,7 @@ async function runJob() {
   $("run").classList.add("hidden");
   const service = $("as-service").checked;
   $("cancel").textContent = service ? "Detach" : "Cancel run";
-  $("cancel").title = service ? "Stop watching. The service keeps running on the Mac." : "";
+  $("cancel").title = service ? "Stop watching. The service keeps running on the other computer." : "";
   $("cancel").classList.remove("hidden");
   $("cancel").disabled = false;
   setPhase("Starting…", true);
@@ -921,8 +941,8 @@ async function runJob() {
     if (r.outcome === "success" || r.outcome === "detached") setLeg("done");
     else $("legs").classList.add("failed");
     setPhase(
-      r.outcome === "rejected" ? "Not paired with this Mac. Click Pair next to it."
-        : r.outcome === "detached" ? "Detached. The service keeps running on the Mac until you stop it."
+      r.outcome === "rejected" ? `Not paired with ${selectedMac}. Click Pair next to it.`
+        : r.outcome === "detached" ? "Detached. The service keeps running there until you stop it."
         : "Done.",
       false,
     );
@@ -953,7 +973,7 @@ async function watchService(jobId) {
   $("result").classList.add("hidden");
   $("run").classList.add("hidden");
   $("cancel").textContent = "Detach";
-  $("cancel").title = "Stop watching. The service keeps running on the Mac.";
+  $("cancel").title = "Stop watching. The service keeps running on the other computer.";
   $("cancel").classList.remove("hidden");
   $("cancel").disabled = false;
   setLeg("run");
@@ -982,7 +1002,7 @@ $("clear").addEventListener("click", () => {
   $("result").classList.add("hidden");
   setLeg("idle");
   setRunTab("Ready");
-  setPhase("Output appears here as the Mac produces it.", false);
+  setPhase("Output appears here as the other computer produces it.", false);
 });
 
 // ---- Start ----

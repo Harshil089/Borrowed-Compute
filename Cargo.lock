@@ -593,29 +593,9 @@ name = "bc-desktop"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bc-auth",
- "bc-cli",
- "bc-net",
- "bc-proto",
- "humantime",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-opener",
- "tauri-plugin-updater",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "bc-desktop-agent"
-version = "0.1.0"
-dependencies = [
- "anyhow",
  "bc-agent",
  "bc-auth",
+ "bc-cli",
  "bc-cloud",
  "bc-net",
  "bc-proto",
@@ -626,6 +606,7 @@ dependencies = [
  "serde_json",
  "tauri",
  "tauri-build",
+ "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "tauri-plugin-updater",
  "tempfile",

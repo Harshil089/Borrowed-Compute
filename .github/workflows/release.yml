@@ -1,7 +1,9 @@
 name: release
 
-# On every merge to main, releases whichever app changed. The Mac app (agent) and the
-# Windows app (client) are versioned separately: `.github/release-plan.sh` compares the
+# On every merge to main, releases the app for Mac and for Windows. Both are built from
+# `apps/bc-desktop`; the Mac build (agent, as the Mac app was called before the two apps
+# merged) and the Windows build (client) keep separate versions and feeds, so the copies
+# people installed before still update themselves: `.github/release-plan.sh` compares the
 # push with each app's last tag in this repo (agent-v0.2.3, client-v0.2.7) and picks the
 # next version. Each app is built, its update signed, and published to the public
 # releases repo as its own release (agent-v…, client-v…), and this repo is tagged.
@@ -82,7 +84,7 @@ jobs:
           node-version: 22
 
       - name: Set version
-        run: node .github/set-version.mjs apps/bc-desktop-agent/tauri.conf.json "$VERSION"
+        run: node .github/set-version.mjs apps/bc-desktop/tauri.conf.json "$VERSION"
 
       # CI=true skips the bundler's Finder AppleScript styling of the dmg, which needs a
       # logged-in desktop.
@@ -91,11 +93,11 @@ jobs:
       # usually because a disk image from an earlier attempt is still attached. Retry up to
       # three times, detaching stale images and removing the half-written dmg in between.
       # Compiled code is cached, so a retry repeats only the bundling.
-      - name: Build Borrowed Compute Agent
-        working-directory: apps/bc-desktop-agent
+      - name: Build Borrowed Compute for Mac
+        working-directory: apps/bc-desktop
         env:
           CI: "true"
-          # Built into the Mac app's cloud for Google sign-in; empty hides the button.
+          # Built into the account's cloud for Google sign-in; empty hides the button.
           BC_GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
@@ -117,8 +119,8 @@ jobs:
       - name: Collect
         run: |
           mkdir dist
-          cp "target/release/bundle/macos/Borrowed Compute Agent.app.tar.gz" dist/BorrowedComputeAgent.app.tar.gz
-          cp "target/release/bundle/macos/Borrowed Compute Agent.app.tar.gz.sig" dist/BorrowedComputeAgent.app.tar.gz.sig
+          cp "target/release/bundle/macos/Borrowed Compute.app.tar.gz" dist/BorrowedComputeAgent.app.tar.gz
+          cp "target/release/bundle/macos/Borrowed Compute.app.tar.gz.sig" dist/BorrowedComputeAgent.app.tar.gz.sig
           cp target/release/bundle/dmg/*.dmg dist/BorrowedComputeAgent.dmg
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -228,7 +230,7 @@ jobs:
           short=${GITHUB_SHA::7}
           if [ "$AGENT" = true ]; then
             gh release create "agent-v$AGENT_VERSION" --repo "$RELEASES_REPO" \
-              --title "Borrowed Compute Agent $AGENT_VERSION (Mac)" \
+              --title "Borrowed Compute $AGENT_VERSION (Mac)" \
               --notes "Mac app, built from $short. Install BorrowedComputeAgent.dmg; installed apps update themselves. BorrowedCompute-setup.exe is the current Windows app." \
               dist/BorrowedComputeAgent.dmg dist/BorrowedComputeAgent.app.tar.gz dist/BorrowedCompute-setup.exe dist/agent.json dist/client.json
           fi
