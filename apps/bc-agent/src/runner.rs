@@ -745,30 +745,15 @@ mod tests {
         assert_eq!(exited(&msgs).0, Some(0));
     }
 
-    // shortcut: temporary diagnostic for batch files in the AppContainer; remove once known.
+    /// npm is a batch file in Program Files on Windows, run through cmd.exe.
     #[cfg(windows)]
     #[tokio::test]
-    async fn windows_batch_diagnostic() {
-        let files = [("hello.cmd", "@echo from batch\r\n"), ("hello.txt", "hi\r\n")];
-        for argv in [
-            vec!["cmd", "/c", "hello.cmd"],
-            vec!["cmd", "/c", "call hello.cmd"],
-            vec!["cmd", "/c", "type hello.cmd"],
-            vec!["cmd", "/c", "cd & dir"],
-            vec!["cmd", "/c", "type %CD%\\hello.txt"],
-            vec!["cmd", "/c", "echo %COMSPEC% & ver"],
-        ] {
-            let msgs = run_within(request(&argv, None), archive(&files)).await;
-            eprintln!("DIAG {argv:?}\n  out: {}\n  err: {}\n  end: {:?}", output(&msgs, OutputStream::Stdout), output(&msgs, OutputStream::Stderr), msgs.last());
+    async fn windows_runs_npm_from_program_files() {
+        if !find_program("npm", std::env::var_os("PATH").as_deref(), Path::new(".")).is_absolute() {
+            return eprintln!("npm is not installed; skipping");
         }
-        let msgs = run_within(request(&["cmd", "/c", "hello.cmd"], None), archive(&files)).await;
-        let mut config_msgs = Vec::new();
-        std::env::set_var("BC_NO_SANDBOX", "1");
-        config_msgs.extend(run_within(request(&["./hello.cmd"], None), archive(&files)).await);
-        std::env::remove_var("BC_NO_SANDBOX");
-        eprintln!("DIAG unsandboxed ./hello.cmd out: {} err: {}", output(&config_msgs, OutputStream::Stdout), output(&config_msgs, OutputStream::Stderr));
-        let _ = msgs;
-        panic!("diagnostic run; see DIAG lines");
+        let msgs = run_within(request(&["npm", "--version"], None), Vec::new()).await;
+        assert_eq!(exited(&msgs).0, Some(0), "{msgs:?}");
     }
 
     /// A job reads and writes its workspace but nothing else of the owner's.

@@ -231,7 +231,7 @@ pub fn spawn(
     startup.StartupInfo.hStdError = inherit[2];
     startup.lpAttributeList = attributes.ptr();
 
-    let (application, mut command_line) = command_line(program, args);
+    let (application, mut command_line) = command_line(program, args, cwd);
     let environment = environment_block(env);
     let cwd = wide(cwd.as_os_str());
     // SAFETY: zeroed PROCESS_INFORMATION is valid output space.
@@ -496,7 +496,11 @@ impl Drop for AttributeList {
 /// The application and command line for CreateProcessW. Batch files (`npm.cmd`) only run
 /// through cmd.exe. Its metacharacters in arguments are not escaped: the job runs code of
 /// its sender's choosing anyway, confined the same either way.
-fn command_line(program: &Path, args: &[String]) -> (Vec<u16>, Vec<u16>) {
+///
+/// A batch file inside the job's folder is named relative to it: given a full path,
+/// cmd.exe looks through every folder above it, and the AppContainer may not list the
+/// ones above the workspace, so it says "Access is denied".
+fn command_line(program: &Path, args: &[String], cwd: &Path) -> (Vec<u16>, Vec<u16>) {
     let is_batch = program
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"));
@@ -504,7 +508,11 @@ fn command_line(program: &Path, args: &[String]) -> (Vec<u16>, Vec<u16>) {
     if is_batch {
         let cmd = std::env::var_os("ComSpec").unwrap_or_else(|| "C:\\Windows\\System32\\cmd.exe".into());
         line.extend("cmd.exe /d /s /c \"".encode_utf16());
-        quote(program.as_os_str(), &mut line);
+        let named = match program.strip_prefix(cwd) {
+            Ok(relative) => Path::new(".").join(relative),
+            Err(_) => program.to_path_buf(),
+        };
+        quote(named.as_os_str(), &mut line);
         for arg in args {
             line.push(' ' as u16);
             quote(OsStr::new(arg), &mut line);
@@ -601,10 +609,12 @@ mod tests {
 
     #[test]
     fn batch_files_run_through_cmd() {
-        let (app, line) = command_line(Path::new("C:\\nodejs\\npm.cmd"), &["run".into(), "build it".into()]);
+        let (app, line) = command_line(Path::new("C:\\nodejs\\npm.cmd"), &["run".into(), "build it".into()], Path::new("C:\\work"));
         let app = String::from_utf16_lossy(&app);
         assert!(app.to_lowercase().ends_with("cmd.exe\0"), "{app}");
         assert_eq!(String::from_utf16_lossy(&line), "cmd.exe /d /s /c \"C:\\nodejs\\npm.cmd run \"build it\"\"\0");
+        let (_, line) = command_line(Path::new("C:\\work\\scripts\\go.cmd"), &[], Path::new("C:\\work"));
+        assert_eq!(String::from_utf16_lossy(&line), "cmd.exe /d /s /c \".\\scripts\\go.cmd\"\0");
     }
 
     #[test]
