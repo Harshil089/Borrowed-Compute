@@ -13,6 +13,7 @@ use serde::{de::DeserializeOwned, Serialize};
 pub use iroh::{EndpointAddr, EndpointId, RelayMap};
 
 pub mod cloud;
+pub mod lan;
 pub use cloud::{cloud_proxy, serve_cloud, CLOUD_ALPN};
 
 /// A relay map with one relay, such as one deployed next to a hosted cloud. Devices that

@@ -63,7 +63,19 @@ impl Agent {
         self.config.cloud_port = Some(port);
         // Jobs, a guest's above all, have no business with the cloud's database API.
         self.config.runner.denied_ports.push(port);
+        // A PC on the same network can then find this Mac's code without anyone typing it.
+        // Only a Mac that hosts the cloud advertises, since the code leads to that cloud.
+        if let Err(e) = bc_net::lan::advertise(&self.endpoint, &bc_auth::default_device_name()) {
+            eprintln!("not advertising on the local network: {e:#}");
+        }
         self
+    }
+
+    /// The name nearby PCs see, once the owner has named this Mac at sign-in.
+    pub fn set_lan_name(&self, name: &str) {
+        if self.config.cloud_port.is_some() {
+            bc_net::lan::set_name(&self.endpoint, name);
+        }
     }
 
     /// This Mac's code: the endpoint ID other devices enter to reach its cloud.

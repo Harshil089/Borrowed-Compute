@@ -49,6 +49,8 @@ struct AppState {
     /// Port forwarding to one Mac's services, and what it has opened so far.
     forwarding: StdMutex<Option<(String, oneshot::Sender<()>)>>,
     forwards: Arc<StdMutex<Vec<Forwarded>>>,
+    /// Macs heard on the local network, so the window can offer them without a typed code.
+    nearby: Arc<StdMutex<Vec<bc_net::lan::NearbyMac>>>,
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -182,6 +184,27 @@ fn prune_job_logs(dir: &Path) {
 struct OutputChunk {
     stream: &'static str,
     text: String,
+}
+
+/// Macs on this network right now; `nearby` events carry later changes.
+#[tauri::command]
+fn nearby_macs(state: State<'_, AppState>) -> Vec<bc_net::lan::NearbyMac> {
+    state.nearby.lock().unwrap().clone()
+}
+
+/// Listens for Macs on the local network for as long as the app runs.
+fn watch_nearby(app: AppHandle, list: Arc<StdMutex<Vec<bc_net::lan::NearbyMac>>>) {
+    tauri::async_runtime::spawn(async move {
+        let mut rx = match bc_net::lan::watch_nearby() {
+            Ok(rx) => rx,
+            Err(e) => return eprintln!("not looking for Macs on the local network: {e:#}"),
+        };
+        while rx.changed().await.is_ok() {
+            let now = rx.borrow().clone();
+            *list.lock().unwrap() = now.clone();
+            let _ = app.emit("nearby", now);
+        }
+    });
 }
 
 #[tauri::command]
@@ -854,7 +877,12 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .manage(AppState { home, job: StdMutex::new(None), forwarding: StdMutex::new(None), forwards: Arc::default() })
+        .manage(AppState { home, job: StdMutex::new(None), forwarding: StdMutex::new(None), forwards: Arc::default(), nearby: Arc::default() })
+        .setup(|app| {
+            let list = app.state::<AppState>().nearby.clone();
+            watch_nearby(app.handle().clone(), list);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_status,
             get_account,
@@ -880,7 +908,8 @@ fn main() {
             test_cloud_url,
             set_cloud_url,
             join_mac,
-            leave_mac
+            leave_mac,
+            nearby_macs
         ])
         .run(tauri::generate_context!())
         .expect("error while running Borrowed Compute");

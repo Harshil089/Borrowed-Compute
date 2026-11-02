@@ -193,6 +193,9 @@ async fn get_account(state: State<'_, AppState>) -> CmdResult<Account> {
         .ok()
         .and_then(|list| list.into_iter().find(|d| d.endpoint_id == id))
         .map(|d| d.name);
+    if let (Some(agent), Some(name)) = (state.agent.get(), &device_name) {
+        agent.set_lan_name(name);
+    }
     Ok(Account { login: me.login, device_name })
 }
 
@@ -227,6 +230,9 @@ async fn login(
     drop(client);
     *state.cloud_state.lock().unwrap() = CloudState::default();
     restart_sync(&state).await;
+    if let Some(agent) = state.agent.get() {
+        agent.set_lan_name(&device.name);
+    }
     Ok(Account { login, device_name: Some(device.name) })
 }
 

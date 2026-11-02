@@ -212,14 +212,69 @@ function renderMacs() {
         <span class="mac-code">${esc(deviceCode(m.name))}</span>
         <span class="mac-meta">
           <span class="mac-name">${esc(m.name)}</span>
-          <span class="mac-seen">${m.shared ? "Shared with you" : m.online ? "Ready for runs" : esc(ago(m.last_seen_secs_ago))}</span>
+          <span class="mac-seen">${m.shared ? "Shared with you" : m.online ? (isNearby(m.endpoint_id) ? "Ready · on this network" : "Ready for runs") : esc(ago(m.last_seen_secs_ago))}</span>
         </span>
         <span class="mac-foot">${state}${action}</span>
       </div>`;
   }).join("");
   setRoute();
   updateRunButton();
+  renderNearby();
 }
+
+// ---- Macs on this network ----
+// The Mac app advertises its code on the local network, so a nearby Mac can be picked
+// instead of its long code being pasted. Picking one still leads to sign-in and pairing.
+let nearby = [];
+const isNearby = (id) => nearby.some((n) => n.id === id);
+
+function nearbyButton(n, attr, action) {
+  return `
+    <button class="nearby-mac" ${attr}="${esc(n.id)}" data-name="${esc(n.name)}">
+      <span class="mac-code">${esc(deviceCode(n.name))}</span>
+      <span class="mac-meta"><span class="mac-name">${esc(n.name)}</span><span class="mac-seen">On this network</span></span>
+      <span class="nearby-go">${action}</span>
+    </button>`;
+}
+
+function renderNearby() {
+  $("signin-nearby").classList.toggle("hidden", !nearby.length);
+  $("signin-nearby-list").innerHTML = nearby.map((n) => nearbyButton(n, "data-use-mac", "Use")).join("");
+  // Signed in, offer only Macs that are not already in the list above.
+  const known = new Set(allMacs().map((m) => m.endpoint_id));
+  const others = nearby.filter((n) => !known.has(n.id));
+  $("nearby-box").classList.toggle("hidden", !others.length);
+  $("nearby").innerHTML = others.map((n) => nearbyButton(n, "data-switch-mac", "Switch")).join("");
+}
+
+listen("nearby", (event) => {
+  nearby = event.payload;
+  if (devices) renderMacs(); else renderNearby();
+});
+invoke("nearby_macs").then((list) => { nearby = list; renderNearby(); }).catch(() => {});
+
+// Signed out: fill in the Mac's code and test it, as if it had been pasted.
+$("signin-nearby-list").addEventListener("click", (event) => {
+  const pick = event.target.closest("[data-use-mac]");
+  if (!pick) return;
+  $("signin-cloud").value = pick.dataset.useMac;
+  $("signin-test").click();
+});
+
+// Signed in to another Mac: switching changes the account list, so sign in again.
+$("nearby").addEventListener("click", async (event) => {
+  const pick = event.target.closest("[data-switch-mac]");
+  if (!pick) return;
+  if (!(await ask(`Use ${pick.dataset.name}? You will sign in again with the account you use on that Mac, then pair this PC with it.`, "Switch"))) return;
+  try {
+    const url = await invoke("test_cloud_url", { url: pick.dataset.switchMac });
+    await invoke("set_cloud_url", { url });
+    devices = null;
+    await loadStatus();
+  } catch (e) {
+    showError(`Could not reach ${pick.dataset.name}: ${e}`);
+  }
+});
 
 function updateRunButton() {
   const mac = allMacs().find((d) => d.name === selectedMac);
