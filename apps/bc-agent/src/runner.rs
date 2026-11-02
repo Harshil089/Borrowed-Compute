@@ -765,7 +765,13 @@ mod tests {
             return eprintln!("node cannot start in an AppContainer on this machine; skipping: {}", output(&node, OutputStream::Stderr));
         }
         let msgs = run_within(request(&["npm", "--version"], None), Vec::new()).await;
-        assert_eq!(exited(&msgs).0, Some(0), "{}", output(&msgs, OutputStream::Stderr));
+        if exited(&msgs).0 != Some(0) {
+            // shortcut: temporary diagnostic of what Node may see inside the AppContainer; remove once known.
+            let probe = r#"const fs=require('fs');for(const p of ['C:\','C:\Program Files','C:\Program Files\nodejs','C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js',process.cwd(),require('path').dirname(process.cwd())]){for(const [n,f] of [['lstat',()=>fs.lstatSync(p).isDirectory()],['read',()=>fs.statSync(p).isDirectory()?fs.readdirSync(p).length:fs.readFileSync(p).length],['realpath',()=>fs.realpathSync(p)],['native',()=>fs.realpathSync.native(p)]]){let r;try{r=f()}catch(e){r='ERR '+e.code}console.log(n,p,r)}}"#;
+            let probed = run_within(request(&["node", "-e", probe], None), archive(&[("hello.js", "console.log('hi from project')")])).await;
+            let project = run_within(request(&["node", "hello.js"], None), archive(&[("hello.js", "console.log('hi from project')")])).await;
+            panic!("npm failed: {}\nPROBE:\n{}{}\nPROJECT: {} {}", output(&msgs, OutputStream::Stderr), output(&probed, OutputStream::Stdout), output(&probed, OutputStream::Stderr), output(&project, OutputStream::Stdout), output(&project, OutputStream::Stderr));
+        }
     }
 
     /// A job reads and writes its workspace but nothing else of the owner's.
