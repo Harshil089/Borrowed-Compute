@@ -451,7 +451,11 @@ fn kill_group(pid: Option<u32>) {
 fn find_program(program: &str, path: Option<&std::ffi::OsStr>, workdir: &Path) -> PathBuf {
     let extensions: Vec<String> = if cfg!(windows) {
         let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
-        std::iter::once(String::new()).chain(pathext.split(';').filter(|e| !e.is_empty()).map(str::to_owned)).collect()
+        let pathext = pathext.split(';').filter(|e| !e.is_empty()).map(str::to_owned);
+        // A bare name only when it already has an extension: Node puts an extensionless
+        // shell script `npm` beside `npm.cmd`, which Windows cannot start.
+        let bare = Path::new(program).extension().is_some().then(String::new);
+        bare.into_iter().chain(pathext).collect()
     } else {
         vec![String::new()]
     };
@@ -806,6 +810,7 @@ mod tests {
     #[test]
     fn windows_finds_programs_through_pathext() {
         let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tool"), "#!/bin/sh").unwrap();
         std::fs::write(dir.path().join("tool.cmd"), "@echo hi").unwrap();
         let found = find_program("tool", Some(dir.path().as_os_str()), dir.path());
         assert!(found.to_string_lossy().eq_ignore_ascii_case(&dir.path().join("tool.cmd").to_string_lossy()), "{found:?}");
