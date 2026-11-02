@@ -35,6 +35,10 @@
           <h1 class="signin-title">Run your code on your Mac</h1>
           <p class="muted">Builds, tests and scripts from this PC run on your Mac's Apple silicon, with output streaming back here. Sign in with the account you use on the Mac.</p>
         </div>
+        <div id="signin-nearby" class="field hidden">
+          <span class="label">Macs on this network</span>
+          <div id="signin-nearby-list" class="nearby-list"></div>
+        </div>
         <label class="field">
           <span class="label">Your Mac's code</span>
           <div class="inline">
@@ -85,6 +89,11 @@
           </span>
         </div>
         <div id="macs" class="macs"></div>
+      </div>
+
+      <div id="nearby-box" class="side-section hidden">
+        <div class="side-title"><span>On this network</span></div>
+        <div id="nearby" class="macs"></div>
       </div>
 
       <div id="services-box" class="side-section hidden">
