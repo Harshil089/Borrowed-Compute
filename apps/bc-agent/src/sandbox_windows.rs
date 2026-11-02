@@ -498,14 +498,28 @@ impl Drop for AttributeList {
 /// through cmd.exe. Its metacharacters in arguments are not escaped: the job runs code of
 /// its sender's choosing anyway, confined the same either way.
 ///
-/// cmd.exe given a batch file's full path says "Access is denied" inside the AppContainer
-/// (it looks through folders above it that the job may not list), so a batch file inside
-/// the job's folder is named relative to it, and one in a PATH folder (`npm.cmd`) by its
-/// name alone, for cmd.exe to find on PATH.
+/// Inside the AppContainer cmd.exe runs a batch file only by a path relative to the job's
+/// folder: given a full path it says "Access is denied", and it finds nothing on PATH. So a
+/// batch file in the job's folder is named relative to it; Node's `npm.cmd` and `npx.cmd`,
+/// which only start `node <their folder>\node_modules\npm\bin\<name>-cli.js`, run that
+/// directly ([`node_shim`]); any other batch file outside the job's folder is named by
+/// its name alone when on PATH, which works only outside the AppContainer.
 fn command_line(program: &Path, args: &[String], cwd: &Path, path: Option<&OsStr>) -> (Vec<u16>, Vec<u16>) {
     let is_batch = program
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"));
+    if let (true, Err(_), Some((node, script))) = (is_batch, program.strip_prefix(cwd), node_shim(program)) {
+        let mut line = Vec::new();
+        quote(node.as_os_str(), &mut line);
+        line.push(' ' as u16);
+        quote(script.as_os_str(), &mut line);
+        for arg in args {
+            line.push(' ' as u16);
+            quote(OsStr::new(arg), &mut line);
+        }
+        line.push(0);
+        return (wide(node.as_os_str()), line);
+    }
     let mut line = Vec::new();
     if is_batch {
         let cmd = std::env::var_os("ComSpec").unwrap_or_else(|| "C:\\Windows\\System32\\cmd.exe".into());
@@ -532,6 +546,18 @@ fn command_line(program: &Path, args: &[String], cwd: &Path, path: Option<&OsStr
     }
     line.push(0);
     (wide(program.as_os_str()), line)
+}
+
+/// For Node's `npm.cmd` or `npx.cmd`: the `node.exe` beside it and the script it starts.
+fn node_shim(program: &Path) -> Option<(PathBuf, PathBuf)> {
+    let dir = program.parent()?;
+    let name = program.file_stem()?.to_str()?.to_ascii_lowercase();
+    if name != "npm" && name != "npx" {
+        return None;
+    }
+    let node = dir.join("node.exe");
+    let script = dir.join("node_modules").join("npm").join("bin").join(format!("{name}-cli.js"));
+    (node.is_file() && script.is_file()).then_some((node, script))
 }
 
 /// Quotes one argument the way the C runtime splits command lines.

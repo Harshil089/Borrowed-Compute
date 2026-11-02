@@ -749,7 +749,8 @@ mod tests {
         assert_eq!(exited(&msgs).0, Some(0));
     }
 
-    /// npm is a batch file in Program Files on Windows, run through cmd.exe.
+    /// npm is a batch file in Program Files on Windows; the runner starts the script it
+    /// wraps with Node directly.
     #[cfg(windows)]
     #[tokio::test]
     async fn windows_runs_npm_from_program_files() {
