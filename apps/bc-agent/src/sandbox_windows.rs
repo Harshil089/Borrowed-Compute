@@ -233,7 +233,11 @@ pub fn spawn(
 
     let path = env.iter().rev().find(|(k, _)| k.eq_ignore_ascii_case("PATH")).map(|(_, v)| v.clone()).or_else(|| std::env::var_os("PATH"));
     let (application, mut command_line) = command_line(program, args, cwd, path.as_deref());
-    let environment = environment_block(env);
+    let mut env = env.to_vec();
+    if confinement != Confinement::Off {
+        env.push(("NODE_OPTIONS".into(), node_options(&env)));
+    }
+    let environment = environment_block(&env);
     let cwd = wide(cwd.as_os_str());
     // SAFETY: zeroed PROCESS_INFORMATION is valid output space.
     let mut info: PROCESS_INFORMATION = unsafe { zeroed() };
@@ -548,6 +552,27 @@ fn command_line(program: &Path, args: &[String], cwd: &Path, path: Option<&OsStr
     (wide(program.as_os_str()), line)
 }
 
+/// The job's `NODE_OPTIONS` plus the switches Node needs inside the AppContainer. Node's
+/// module loader resolves every file it loads through each folder above it, starting with
+/// `C:\`, whose attributes an AppContainer may not read ("EPERM: operation not permitted,
+/// lstat 'C:\'"), so no script would load. Keeping paths as given skips that walk; the
+/// cost is that a symlinked package (pnpm's layout) loads by its link path.
+fn node_options(env: &[(OsString, OsString)]) -> OsString {
+    let own = env
+        .iter()
+        .rev()
+        .find(|(k, _)| k.eq_ignore_ascii_case("NODE_OPTIONS"))
+        .map(|(_, v)| v.clone())
+        .or_else(|| std::env::var_os("NODE_OPTIONS"))
+        .unwrap_or_default();
+    let mut options = OsString::from("--preserve-symlinks --preserve-symlinks-main");
+    if !own.is_empty() {
+        options.push(" ");
+        options.push(own);
+    }
+    options
+}
+
 /// For Node's `npm.cmd` or `npx.cmd`: the `node.exe` beside it and the script it starts.
 fn node_shim(program: &Path) -> Option<(PathBuf, PathBuf)> {
     let dir = program.parent()?;
@@ -648,6 +673,11 @@ mod tests {
         let path = OsString::from("C:\\Windows;C:\\nodejs");
         let (_, line) = command_line(Path::new("C:\\nodejs\\npm.cmd"), &["test".into()], Path::new("C:\\work"), Some(&path));
         assert_eq!(String::from_utf16_lossy(&line), "cmd.exe /d /s /c \"npm.cmd test\"\0");
+    }
+
+    #[test]
+    fn node_keeps_the_job_s_own_options() {
+        assert_eq!(node_options(&[("node_options".into(), "--max-old-space-size=4096".into())]), "--preserve-symlinks --preserve-symlinks-main --max-old-space-size=4096");
     }
 
     #[test]

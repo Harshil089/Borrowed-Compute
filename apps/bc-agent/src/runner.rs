@@ -768,6 +768,18 @@ mod tests {
         assert_eq!(exited(&msgs).0, Some(0), "{}", output(&msgs, OutputStream::Stderr));
     }
 
+    /// Node loads the project's own scripts inside the AppContainer.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_runs_node_scripts_from_the_project() {
+        if !find_program("node", std::env::var_os("PATH").as_deref(), Path::new(".")).is_absolute() {
+            return eprintln!("node is not installed; skipping");
+        }
+        let files = [("main.js", "console.log(require('./lib').word)"), ("lib.js", "exports.word = 'from a module'")];
+        let msgs = run_within(request(&["node", "main.js"], None), archive(&files)).await;
+        assert!(output(&msgs, OutputStream::Stdout).contains("from a module"), "{}", output(&msgs, OutputStream::Stderr));
+    }
+
     /// A job reads and writes its workspace but nothing else of the owner's.
     #[cfg(windows)]
     #[tokio::test]
