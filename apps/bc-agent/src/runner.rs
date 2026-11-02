@@ -464,7 +464,11 @@ fn find_program(program: &str, path: Option<&std::ffi::OsStr>, workdir: &Path) -
     };
     let names_a_path = program.contains('/') || (cfg!(windows) && program.contains('\\'));
     if names_a_path {
-        return with_extension(workdir.join(program)).find(|c| c.is_file()).unwrap_or_else(|| workdir.join(program));
+        // Without `.` parts and with native separators: cmd.exe reads `/name` in
+        // `project\./name.cmd` as a switch and tries to run the folder.
+        let relative: PathBuf = Path::new(program).components().filter(|c| !matches!(c, Component::CurDir)).collect();
+        let path = workdir.join(relative);
+        return with_extension(path.clone()).find(|c| c.is_file()).unwrap_or(path);
     }
     path.into_iter()
         .flat_map(std::env::split_paths)
