@@ -122,7 +122,7 @@ async function loadStatus() {
     return;
   }
   if (!status.signed_in) {
-    $("signin-cloud").value = status.cloud_url_set ? status.cloud_url : "";
+    if (status.cloud_url_set) loadProviders();
     loadProviders();
     return;
   }
@@ -262,19 +262,46 @@ $("signin-nearby-list").addEventListener("click", (event) => {
 });
 
 // Signed in to another Mac: switching changes the account list, so sign in again.
-$("nearby").addEventListener("click", async (event) => {
-  const pick = event.target.closest("[data-switch-mac]");
-  if (!pick) return;
-  if (!(await ask(`Use ${pick.dataset.name}? You will sign in again with the account you use on that Mac, then pair this PC with it.`, "Switch"))) return;
+async function switchToMac(id, name) {
+  if (!(await ask(`Use ${name}? You will sign in again with the account you use on that Mac, then pair this PC with it.`, "Switch"))) return;
   try {
-    const url = await invoke("test_cloud_url", { url: pick.dataset.switchMac });
+    const url = await invoke("test_cloud_url", { url: id });
     await invoke("set_cloud_url", { url });
     devices = null;
     await loadStatus();
   } catch (e) {
-    showError(`Could not reach ${pick.dataset.name}: ${e}`);
+    showError(`Could not reach ${name}: ${e}`);
+  }
+}
+$("nearby").addEventListener("click", (event) => {
+  const pick = event.target.closest("[data-switch-mac]");
+  if (pick) switchToMac(pick.dataset.switchMac, pick.dataset.name);
+});
+
+// ---- Add a Mac: a nearby one, one by its code, or one someone shared ----
+function renderAddNearby() {
+  const known = new Set(allMacs().map((m) => m.endpoint_id));
+  $("add-nearby").classList.toggle("hidden", !nearby.length);
+  $("add-nearby-list").innerHTML = nearby.map((n) =>
+    known.has(n.id) ? nearbyButton(n, "data-pick-mac", "Select") : nearbyButton(n, "data-switch-mac", "Switch")).join("");
+}
+$("add-open").addEventListener("click", () => { renderAddNearby(); $("add-dialog").classList.remove("hidden"); });
+$("add-close").addEventListener("click", () => $("add-dialog").classList.add("hidden"));
+$("add-nearby-list").addEventListener("click", (event) => {
+  const own = event.target.closest("[data-pick-mac]");
+  const other = event.target.closest("[data-switch-mac]");
+  $("add-dialog").classList.add("hidden");
+  if (own) {
+    // Already on the account: select it, and start pairing if it is not paired yet.
+    const mac = allMacs().find((m) => m.endpoint_id === own.dataset.pickMac);
+    if (mac) document.querySelector(`[data-mac="${CSS.escape(mac.name)}"]`)?.click();
+    document.querySelector(`[data-pair="${CSS.escape(mac?.name || "")}"]`)?.click();
+  } else if (other) {
+    switchToMac(other.dataset.switchMac, other.dataset.name);
   }
 });
+$("add-code").addEventListener("click", () => { $("add-dialog").classList.add("hidden"); $("settings").click(); });
+$("join-open").addEventListener("click", () => $("add-dialog").classList.add("hidden"));
 
 function updateRunButton() {
   const mac = allMacs().find((d) => d.name === selectedMac);
@@ -369,9 +396,38 @@ $("services").addEventListener("click", async (event) => {
 
 $("signin-test").addEventListener("click", async () => {
   const url = await testCloud($("signin-cloud"), $("signin-cloud-msg"));
-  // Ask the new address which sign-ins it offers.
-  if (url) { await invoke("set_cloud_url", { url }).catch(() => {}); loadProviders(); }
+  if (!url) return;
+  // Ask the new address which sign-ins it offers, and carry on with the sign-in waiting on it.
+  await invoke("set_cloud_url", { url }).catch(() => {});
+  loadProviders();
+  finishMacChoice(true);
 });
+
+// The account lives on a Mac, so sign-in needs one. Use the Mac chosen before, else the
+// only one on this network, else ask.
+let macChoice = null;
+function finishMacChoice(ok) {
+  if (!macChoice) return;
+  $("mac-dialog").classList.add("hidden");
+  macChoice(ok);
+  macChoice = null;
+}
+$("mac-cancel").addEventListener("click", () => finishMacChoice(false));
+
+async function chooseMac() {
+  if (status.cloud_url_set) return true;
+  if (nearby.length === 1) {
+    try {
+      const url = await invoke("test_cloud_url", { url: nearby[0].id });
+      await invoke("set_cloud_url", { url });
+      return true;
+    } catch { /* not reachable after all: ask */ }
+  }
+  $("signin-cloud").value = "";
+  $("signin-cloud-msg").className = "banner hidden";
+  $("mac-dialog").classList.remove("hidden");
+  return new Promise((resolve) => { macChoice = resolve; });
+}
 
 // Shows Sign in with Google when the cloud at the typed address offers it.
 async function loadProviders() {
@@ -391,13 +447,7 @@ async function signIn(provider) {
   $("signin-google").disabled = true;
   $("signin-error").classList.add("hidden");
   try {
-    // Sign in at the address typed above, after checking the Mac answers there.
-    const typed = $("signin-cloud").value.trim();
-    if (typed || status.cloud_url_set) {
-      const url = await testCloud($("signin-cloud"), $("signin-cloud-msg"));
-      if (!url) return;
-      await invoke("set_cloud_url", { url });
-    }
+    if (!(await chooseMac())) return;
     await invoke("login", { name: $("pc-name").value, provider });
     await loadStatus();
   } catch (e) {

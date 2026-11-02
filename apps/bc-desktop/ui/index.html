@@ -35,19 +35,6 @@
           <h1 class="signin-title">Run your code on your Mac</h1>
           <p class="muted">Builds, tests and scripts from this PC run on your Mac's Apple silicon, with output streaming back here. Sign in with the account you use on the Mac.</p>
         </div>
-        <div id="signin-nearby" class="field hidden">
-          <span class="label">Macs on this network</span>
-          <div id="signin-nearby-list" class="nearby-list"></div>
-        </div>
-        <label class="field">
-          <span class="label">Your Mac's code</span>
-          <div class="inline">
-            <input id="signin-cloud" type="text" placeholder="Paste the code from Borrowed Compute Agent" spellcheck="false" autocomplete="off">
-            <button id="signin-test">Test</button>
-          </div>
-          <span class="hint">Shown in Borrowed Compute Agent on your Mac, under Devices.</span>
-        </label>
-        <div id="signin-cloud-msg" class="banner hidden"></div>
         <label class="field">
           <span class="label">Name for this PC</span>
           <input id="pc-name" type="text" placeholder="laptop" maxlength="64" autocomplete="off" spellcheck="false">
@@ -67,7 +54,7 @@
           <button id="reopen" class="link">Open the page again</button>
         </div>
         <ol class="signin-steps">
-          <li><b>Install the Agent on your Mac</b><span>It shows the Mac's code and approves this PC.</span></li>
+          <li><b>Install the Agent on your Mac</b><span>Your account lives on it, and it approves this PC.</span></li>
           <li><b>Sign in with the same account</b><span>GitHub or Google, on both machines.</span></li>
           <li><b>Pair and run</b><span>Each job runs in a fresh workspace that is deleted when it ends.</span></li>
         </ol>
@@ -84,7 +71,7 @@
         <div class="side-title">
           <span>Macs</span>
           <span class="side-actions">
-            <button id="join-open" class="icon-btn" title="Use a shared Mac" aria-label="Use a shared Mac"><svg class="icon"><use href="#i-plus"/></svg></button>
+            <button id="add-open" class="icon-btn" title="Add a Mac" aria-label="Add a Mac"><svg class="icon"><use href="#i-plus"/></svg></button>
             <button id="refresh" class="icon-btn" title="Refresh" aria-label="Refresh"><svg class="icon"><use href="#i-refresh"/></svg></button>
           </span>
         </div>
@@ -177,6 +164,47 @@
         </section>
       </div>
     </main>
+  </div>
+
+  <!-- Signing in: which Mac holds the account, when it is not obvious -->
+  <div id="mac-dialog" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="mac-title">
+    <div class="dialog">
+      <div class="dialog-body">
+        <h1 id="mac-title" class="dialog-title">Which Mac?</h1>
+        <p class="muted">Your account lives on your Mac, so sign-in goes through it. Pick it from your network, or paste the code Borrowed Compute Agent shows under Devices.</p>
+        <div id="signin-nearby" class="field hidden">
+          <span class="label">Macs on this network</span>
+          <div id="signin-nearby-list" class="nearby-list"></div>
+        </div>
+        <label class="field">
+          <span class="label">Mac code</span>
+          <div class="inline">
+            <input id="signin-cloud" type="text" placeholder="Paste the code from Borrowed Compute Agent" spellcheck="false" autocomplete="off">
+            <button id="signin-test">Use</button>
+          </div>
+        </label>
+        <div id="signin-cloud-msg" class="banner hidden"></div>
+      </div>
+      <div class="dialog-actions"><button id="mac-cancel">Cancel</button></div>
+    </div>
+  </div>
+
+  <!-- Adding a Mac once signed in -->
+  <div id="add-dialog" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="add-title">
+    <div class="dialog">
+      <div class="dialog-body">
+        <h1 id="add-title" class="dialog-title">Add a Mac</h1>
+        <div id="add-nearby" class="field hidden">
+          <span class="label">On this network</span>
+          <div id="add-nearby-list" class="nearby-list"></div>
+        </div>
+        <div class="add-options">
+          <button id="add-code" class="add-option"><b>Enter a Mac code</b><span>For a Mac that is not on this network.</span></button>
+          <button id="join-open" class="add-option"><b>Use a Mac someone shared</b><span>Paste the invite its owner sent you.</span></button>
+        </div>
+      </div>
+      <div class="dialog-actions"><button id="add-close">Close</button></div>
+    </div>
   </div>
 
   <!-- Pairing: the code the Mac owner types -->
