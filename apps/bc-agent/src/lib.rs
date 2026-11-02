@@ -7,6 +7,8 @@ pub mod guests;
 pub mod paired;
 pub mod runner;
 pub mod sandbox;
+#[cfg(windows)]
+pub mod sandbox_windows;
 pub mod server;
 pub mod service;
 pub mod services;
