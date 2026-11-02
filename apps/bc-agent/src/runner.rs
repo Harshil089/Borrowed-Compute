@@ -757,12 +757,15 @@ mod tests {
         if !find_program("npm", std::env::var_os("PATH").as_deref(), Path::new(".")).is_absolute() {
             return eprintln!("npm is not installed; skipping");
         }
-        // A sandboxed job runs only what grants "ALL APPLICATION PACKAGES" read access, as a
-        // normal Program Files install does. Without it Node itself cannot start, and that
-        // is this machine's setup, not batch handling.
-        let node = run_within(request(&["node", "--version"], None), Vec::new()).await;
+        // A sandboxed job reads only what grants "ALL APPLICATION PACKAGES" access, as a
+        // normal Program Files install does. Where npm's files do not, that is this
+        // machine's setup, not batch handling.
+        let npm = find_program("npm", std::env::var_os("PATH").as_deref(), Path::new("."));
+        let cli = npm.with_file_name("node_modules").join("npm").join("bin").join("npm-cli.js");
+        let read = format!("require('fs').readFileSync({:?})", cli.display().to_string());
+        let node = run_within(request(&["node", "-e", &read], None), Vec::new()).await;
         if exited(&node).0 != Some(0) {
-            return eprintln!("node cannot start in an AppContainer on this machine; skipping: {}", output(&node, OutputStream::Stderr));
+            return eprintln!("npm's files are not open to AppContainers on this machine; skipping: {}", output(&node, OutputStream::Stderr));
         }
         let msgs = run_within(request(&["npm", "--version"], None), Vec::new()).await;
         assert_eq!(exited(&msgs).0, Some(0), "{}", output(&msgs, OutputStream::Stderr));
