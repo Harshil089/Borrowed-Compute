@@ -231,7 +231,8 @@ pub fn spawn(
     startup.StartupInfo.hStdError = inherit[2];
     startup.lpAttributeList = attributes.ptr();
 
-    let (application, mut command_line) = command_line(program, args, cwd);
+    let path = env.iter().rev().find(|(k, _)| k.eq_ignore_ascii_case("PATH")).map(|(_, v)| v.clone()).or_else(|| std::env::var_os("PATH"));
+    let (application, mut command_line) = command_line(program, args, cwd, path.as_deref());
     let environment = environment_block(env);
     let cwd = wide(cwd.as_os_str());
     // SAFETY: zeroed PROCESS_INFORMATION is valid output space.
@@ -497,10 +498,11 @@ impl Drop for AttributeList {
 /// through cmd.exe. Its metacharacters in arguments are not escaped: the job runs code of
 /// its sender's choosing anyway, confined the same either way.
 ///
-/// A batch file inside the job's folder is named relative to it: given a full path,
-/// cmd.exe looks through every folder above it, and the AppContainer may not list the
-/// ones above the workspace, so it says "Access is denied".
-fn command_line(program: &Path, args: &[String], cwd: &Path) -> (Vec<u16>, Vec<u16>) {
+/// cmd.exe given a batch file's full path says "Access is denied" inside the AppContainer
+/// (it looks through folders above it that the job may not list), so a batch file inside
+/// the job's folder is named relative to it, and one in a PATH folder (`npm.cmd`) by its
+/// name alone, for cmd.exe to find on PATH.
+fn command_line(program: &Path, args: &[String], cwd: &Path, path: Option<&OsStr>) -> (Vec<u16>, Vec<u16>) {
     let is_batch = program
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"));
@@ -508,9 +510,11 @@ fn command_line(program: &Path, args: &[String], cwd: &Path) -> (Vec<u16>, Vec<u
     if is_batch {
         let cmd = std::env::var_os("ComSpec").unwrap_or_else(|| "C:\\Windows\\System32\\cmd.exe".into());
         line.extend("cmd.exe /d /s /c \"".encode_utf16());
-        let named = match program.strip_prefix(cwd) {
-            Ok(relative) => Path::new(".").join(relative),
-            Err(_) => program.to_path_buf(),
+        let on_path = |dir: &Path| path.is_some_and(|p| std::env::split_paths(p).any(|d| d == dir));
+        let named = match (program.strip_prefix(cwd), program.parent(), program.file_name()) {
+            (Ok(relative), _, _) => Path::new(".").join(relative),
+            (_, Some(dir), Some(name)) if on_path(dir) => PathBuf::from(name),
+            _ => program.to_path_buf(),
         };
         quote(named.as_os_str(), &mut line);
         for arg in args {
@@ -609,12 +613,15 @@ mod tests {
 
     #[test]
     fn batch_files_run_through_cmd() {
-        let (app, line) = command_line(Path::new("C:\\nodejs\\npm.cmd"), &["run".into(), "build it".into()], Path::new("C:\\work"));
+        let (app, line) = command_line(Path::new("C:\\nodejs\\npm.cmd"), &["run".into(), "build it".into()], Path::new("C:\\work"), None);
         let app = String::from_utf16_lossy(&app);
         assert!(app.to_lowercase().ends_with("cmd.exe\0"), "{app}");
         assert_eq!(String::from_utf16_lossy(&line), "cmd.exe /d /s /c \"C:\\nodejs\\npm.cmd run \"build it\"\"\0");
-        let (_, line) = command_line(Path::new("C:\\work\\scripts\\go.cmd"), &[], Path::new("C:\\work"));
+        let (_, line) = command_line(Path::new("C:\\work\\scripts\\go.cmd"), &[], Path::new("C:\\work"), None);
         assert_eq!(String::from_utf16_lossy(&line), "cmd.exe /d /s /c \".\\scripts\\go.cmd\"\0");
+        let path = OsString::from("C:\\Windows;C:\\nodejs");
+        let (_, line) = command_line(Path::new("C:\\nodejs\\npm.cmd"), &["test".into()], Path::new("C:\\work"), Some(&path));
+        assert_eq!(String::from_utf16_lossy(&line), "cmd.exe /d /s /c \"npm.cmd test\"\0");
     }
 
     #[test]
