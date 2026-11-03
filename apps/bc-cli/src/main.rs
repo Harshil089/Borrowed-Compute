@@ -276,7 +276,7 @@ async fn main() -> Result<()> {
             let root = std::env::current_dir()?;
             // With no command and no bc.toml, run what the project looks like it wants.
             if argv.is_empty() && spec.is_none() && !root.join("bc.toml").exists() {
-                if let Some(found) = bc_cli::detect::detect(&root) {
+                if let Some(found) = bc_cli::detect::detect(&root, bc_cli::detect::Os::of(mac.kind)) {
                     argv = found.suggestions[0].argv.clone();
                     service |= found.suggestions[0].service;
                     eprintln!("bc: {} project ({}); running: {}", found.kind, found.reason, argv.join(" "));
@@ -310,6 +310,7 @@ async fn main() -> Result<()> {
                 &mut stderr,
                 cancel,
                 Some(&root),
+                bc_cli::detect::Os::of(mac.kind),
                 &memory,
                 |text| eprintln!("bc: {text}"),
             );

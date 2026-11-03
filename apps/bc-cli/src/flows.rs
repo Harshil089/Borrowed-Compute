@@ -35,6 +35,8 @@ pub fn set_default_mac(home: &Path, mac: &str) -> Result<()> {
 
 pub struct ResolvedMac {
     pub addr: EndpointAddr,
+    /// What the device runs, when the cloud knows it; commands are written for it.
+    pub kind: Option<bc_proto::cloud::DeviceKind>,
     /// Set when the cloud has not heard from the Mac recently.
     pub offline_warning: Option<String>,
 }
@@ -45,7 +47,7 @@ pub struct ResolvedMac {
 pub async fn resolve_mac(cloud: &CloudClient, home: &Path, target: &str) -> Result<ResolvedMac> {
     if let Some(shared) = crate::shared::find(home, target) {
         let id: EndpointId = shared.id.parse()?;
-        return Ok(ResolvedMac { addr: id.into(), offline_warning: None });
+        return Ok(ResolvedMac { addr: id.into(), kind: None, offline_warning: None });
     }
     let raw_id = target.parse::<EndpointId>().ok();
     if cloud.token().is_some() {
@@ -61,7 +63,7 @@ pub async fn resolve_mac(cloud: &CloudClient, home: &Path, target: &str) -> Resu
                     .and_then(|a| serde_json::from_value::<EndpointAddr>(a).ok())
                     .filter(|a| a.id == id)
                     .unwrap_or_else(|| id.into());
-                return Ok(ResolvedMac { addr, offline_warning });
+                return Ok(ResolvedMac { addr, kind: Some(device.kind), offline_warning });
             }
             Err(e) if raw_id.is_none() => return Err(e),
             Err(_) => {}
@@ -69,7 +71,7 @@ pub async fn resolve_mac(cloud: &CloudClient, home: &Path, target: &str) -> Resu
     }
     let id = raw_id
         .with_context(|| format!("{target:?} is not a device id; sign in to use device names"))?;
-    Ok(ResolvedMac { addr: id.into(), offline_warning: None })
+    Ok(ResolvedMac { addr: id.into(), kind: None, offline_warning: None })
 }
 
 /// The job to run in `project`: `spec` if given, else `bc.toml` in the project if present.
