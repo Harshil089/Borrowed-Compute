@@ -785,11 +785,11 @@ mod tests {
         let npm = find_program("npm", std::env::var_os("PATH").as_deref(), Path::new("."));
         let cli = npm.with_file_name("node_modules").join("npm").join("bin").join("npm-cli.js");
         let read = format!("require('fs').readFileSync({:?})", cli.display().to_string());
-        let node = run_within(request(&["node", "-e", &read], None), Vec::new()).await;
+        let node = run_within(request(&["node", "-e", &read], None), archive(&[])).await;
         if exited(&node).0 != Some(0) {
             return eprintln!("npm's files are not open to AppContainers on this machine; skipping: {}", output(&node, OutputStream::Stderr));
         }
-        let msgs = run_within(request(&["npm", "--version"], None), Vec::new()).await;
+        let msgs = run_within(request(&["npm", "--version"], None), archive(&[])).await;
         assert_eq!(exited(&msgs).0, Some(0), "{}", output(&msgs, OutputStream::Stderr));
     }
 
@@ -832,7 +832,7 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn windows_times_out_and_counts_cpu() {
-        let msgs = run_within(request(&["cmd", "/c", "for /l %i in (0,0,1) do @rem"], Some(2)), Vec::new()).await;
+        let msgs = run_within(request(&["cmd", "/c", "for /l %i in (0,0,1) do @rem"], Some(2)), archive(&[])).await;
         let (code, timed_out, usage) = exited(&msgs);
         assert_eq!((code, timed_out), (None, true));
         assert!(usage.expect("usage").user_ms > 0);
@@ -845,7 +845,7 @@ mod tests {
     async fn windows_background_processes_end_with_the_job() {
         let msgs = run_within(
             request(&["cmd", "/c", "start", "/b", "cmd", "/c", "for /l %i in (0,0,1) do @rem"], None),
-            Vec::new(),
+            archive(&[]),
         )
         .await;
         assert!(!exited(&msgs).1);
@@ -856,7 +856,7 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn windows_pnpm_uses_its_hoisted_layout() {
-        let msgs = run_within(request(&["cmd", "/c", "echo %npm_config_node_linker%"], None), Vec::new()).await;
+        let msgs = run_within(request(&["cmd", "/c", "echo %npm_config_node_linker%"], None), archive(&[])).await;
         assert!(output(&msgs, OutputStream::Stdout).contains("hoisted"), "{msgs:?}");
     }
 
@@ -872,12 +872,12 @@ mod tests {
                 continue;
             };
             let read = format!("require('fs').readFileSync({:?})", script.display().to_string());
-            let node = run_within(request(&["node", "-e", &read], None), Vec::new()).await;
+            let node = run_within(request(&["node", "-e", &read], None), archive(&[])).await;
             if exited(&node).0 != Some(0) {
                 eprintln!("{tool}'s files are not open to AppContainers on this machine; skipping");
                 continue;
             }
-            let msgs = run_within(request(&[tool, "--version"], None), Vec::new()).await;
+            let msgs = run_within(request(&[tool, "--version"], None), archive(&[])).await;
             assert_eq!(exited(&msgs).0, Some(0), "{tool}: {}", output(&msgs, OutputStream::Stderr));
         }
     }
