@@ -148,13 +148,19 @@ function cloudMessage(box, ok, text) {
   box.textContent = text;
 }
 
+// The code part of a saved address; the account device's own code when it lives here.
+function codeOf(url) {
+  if (url.startsWith("iroh://")) return url.slice("iroh://".length);
+  return status.lend?.host?.hosting ? status.device_id || "" : "";
+}
+
 async function testCloud(input, box) {
   const url = input.value.trim();
   if (!url) { cloudMessage(box, false, "Paste its code first."); return null; }
   box.className = "banner hidden";
   try {
     const normalized = await invoke("test_cloud_url", { url });
-    input.value = normalized;
+    input.value = codeOf(normalized);
     cloudMessage(box, true, "Connected. It answers.");
     return normalized;
   } catch (e) {
@@ -496,7 +502,7 @@ listen("login-code", (event) => {
 });
 
 $("settings").addEventListener("click", () => {
-  $("cloud-input").value = status.cloud_url;
+  $("cloud-input").value = codeOf(status.cloud_url);
   $("cloud-msg").className = "banner hidden";
   $("cloud-dialog").classList.remove("hidden");
 });
@@ -505,7 +511,9 @@ $("cloud-cancel").addEventListener("click", () => $("cloud-dialog").classList.ad
 $("cloud-save").addEventListener("click", async () => {
   const url = await testCloud($("cloud-input"), $("cloud-msg"));
   if (!url) return;
-  if (url !== status.cloud_url && !(await ask("Save and sign out? You will sign in again through that computer.", "Save and sign out"))) return;
+  // Unchanged, including this computer's own code while the account lives here.
+  if (codeOf(url) === codeOf(status.cloud_url)) { $("cloud-dialog").classList.add("hidden"); return; }
+  if (!(await ask("Save and sign out? You will sign in again through that computer.", "Save and sign out"))) return;
   await invoke("set_cloud_url", { url }).catch((e) => cloudMessage($("cloud-msg"), false, String(e)));
   $("cloud-dialog").classList.add("hidden");
   devices = null;
