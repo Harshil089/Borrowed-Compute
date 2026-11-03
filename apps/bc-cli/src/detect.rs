@@ -2,11 +2,63 @@
 //!
 //! The first suggestion is the default. Commands that need dependencies install them
 //! inside the job's workspace (`npm ci`, a Python `.venv`), so they are deleted with it
-//! and nothing from the project stays on the Mac. A `bc.toml` always wins over detection.
+//! and nothing from the project stays on the device. A `bc.toml` always wins over
+//! detection. Commands are written for the device that runs them ([`Os`]): `cmd /c` and
+//! `.venv\Scripts` on a Windows PC, `sh -c` and `.venv/bin` elsewhere.
 
 use std::path::Path;
 
+use bc_proto::cloud::DeviceKind;
 use serde::Serialize;
+
+/// How commands are written for the device a job runs on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Os {
+    /// A Mac (or Linux): `sh`, `python3`, `.venv/bin`. Also the guess for a device of
+    /// unknown kind, such as a shared Mac.
+    #[default]
+    Unix,
+    Windows,
+}
+
+impl Os {
+    pub fn of(kind: Option<DeviceKind>) -> Self {
+        if kind == Some(DeviceKind::Windows) { Os::Windows } else { Os::Unix }
+    }
+
+    /// A command that needs a shell (`&&` between steps), still as an argv.
+    pub fn shell(self, script: &str) -> Vec<String> {
+        match self {
+            Os::Unix => vec!["sh".into(), "-c".into(), script.into()],
+            Os::Windows => vec!["cmd".into(), "/d".into(), "/c".into(), script.into()],
+        }
+    }
+
+    /// The script of a command [`Os::shell`] wrapped, from either system.
+    pub fn shell_script(argv: &[String]) -> Option<&str> {
+        match argv {
+            [sh, c, script] if (sh == "sh" || sh == "bash") && c == "-c" => Some(script),
+            [cmd, d, c, script] if cmd == "cmd" && d == "/d" && c == "/c" => Some(script),
+            [cmd, c, script] if cmd == "cmd" && c.eq_ignore_ascii_case("/c") => Some(script),
+            _ => None,
+        }
+    }
+
+    pub fn python(self) -> &'static str {
+        match self {
+            Os::Unix => "python3",
+            Os::Windows => "python",
+        }
+    }
+
+    /// Where a virtualenv keeps its programs, relative to the project.
+    pub fn venv_bin(self) -> &'static str {
+        match self {
+            Os::Unix => ".venv/bin/",
+            Os::Windows => ".venv\\Scripts\\",
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Suggestion {
@@ -36,21 +88,23 @@ pub struct Detected {
 
 const MAX_SUGGESTIONS: usize = 6;
 
-pub fn detect(root: &Path) -> Option<Detected> {
+/// The project at `root` and commands for it, written for a device running `os`.
+pub fn detect(root: &Path, os: Os) -> Option<Detected> {
     let files = RootFiles::read(root);
+    let apple = os == Os::Unix;
     let mut found = rust(&files)
-        .or_else(|| swift(&files))
-        .or_else(|| xcode(&files))
-        .or_else(|| node(root, &files))
+        .or_else(|| swift(&files).filter(|_| apple))
+        .or_else(|| xcode(&files).filter(|_| apple))
+        .or_else(|| node(root, &files, os))
         .or_else(|| typescript(&files))
         .or_else(|| go(&files))
-        .or_else(|| python(root, &files))
-        .or_else(|| cmake(&files))
-        .or_else(|| jvm(&files))
+        .or_else(|| python(root, &files, os))
+        .or_else(|| cmake(&files, os))
+        .or_else(|| jvm(&files, os))
         .or_else(|| dotnet(&files))
         .or_else(|| make(root, &files))
-        .or_else(|| html(&files))
-        .or_else(|| scripts(&files))?;
+        .or_else(|| html(&files, os))
+        .or_else(|| scripts(&files, os))?;
     // A Makefile next to another project usually holds its real entry points.
     if found.kind != "Make" && files.has("Makefile") {
         if let Some(m) = make(root, &files) {
@@ -87,9 +141,10 @@ fn s(label: &str, argv: &[&str]) -> Suggestion {
     Suggestion { label: label.to_string(), argv: argv.iter().map(|a| a.to_string()).collect(), service: false }
 }
 
-/// A command that needs a shell (`&&` between steps). Still an argv: `sh -c <script>`.
-fn shell(label: &str, script: &str) -> Suggestion {
-    s(label, &["sh", "-c", script])
+/// A command that needs a shell (`&&` between steps). Still an argv: `sh -c <script>`, or
+/// `cmd /d /c <script>` on Windows.
+fn shell(label: &str, script: &str, os: Os) -> Suggestion {
+    Suggestion { label: label.to_string(), argv: os.shell(script), service: false }
 }
 
 fn found(kind: &str, reason: &str, suggestions: Vec<Suggestion>) -> Option<Detected> {
@@ -150,17 +205,18 @@ pub fn node_package_manager(root: &Path) -> Option<(&'static str, &'static str)>
 
 /// The virtualenv setup for a Python project with declared dependencies, run inside
 /// the job's workspace. `None` when it declares none.
-pub fn python_setup(root: &Path) -> Option<&'static str> {
-    if root.join("requirements.txt").is_file() {
-        Some("python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt")
+pub fn python_setup(root: &Path, os: Os) -> Option<String> {
+    let deps = if root.join("requirements.txt").is_file() {
+        "-r requirements.txt"
     } else if root.join("pyproject.toml").is_file() || root.join("setup.py").is_file() {
-        Some("python3 -m venv .venv && .venv/bin/pip install -q .")
+        "."
     } else {
-        None
-    }
+        return None;
+    };
+    Some(format!("{} -m venv .venv && {}pip install -q {deps}", os.python(), os.venv_bin()))
 }
 
-fn node(root: &Path, f: &RootFiles) -> Option<Detected> {
+fn node(root: &Path, f: &RootFiles, os: Os) -> Option<Detected> {
     let (pm, install) = node_package_manager(root)?;
     let package: serde_json::Value = std::fs::read(root.join("package.json"))
         .ok()
@@ -173,18 +229,18 @@ fn node(root: &Path, f: &RootFiles) -> Option<Detected> {
         [("build", "Build"), ("test", "Test"), ("dev", "Dev server"), ("start", "Start"), ("serve", "Serve"), ("preview", "Preview"), ("lint", "Lint")]
     {
         if scripts.is_some_and(|s| s.contains_key(name)) {
-            let suggestion = shell(label, &format!("{install} && {pm} run {name}"));
+            let suggestion = shell(label, &format!("{install} && {pm} run {name}"), os);
             suggestions.push(if servers.contains(&name) { suggestion.service() } else { suggestion });
         }
     }
     // A TypeScript project with no build script still has a compiler to run.
     let ts = f.has("tsconfig.json");
     if ts && !scripts.is_some_and(|s| s.contains_key("build")) {
-        suggestions.insert(0, shell("Build", &format!("{install} && npx --yes -p typescript tsc -p .")));
+        suggestions.insert(0, shell("Build", &format!("{install} && npx --yes -p typescript tsc -p ."), os));
     }
     if suggestions.is_empty() {
         let main = package.get("main").and_then(|v| v.as_str()).unwrap_or("index.js");
-        suggestions.push(shell("Run", &format!("{install} && node {main}")));
+        suggestions.push(shell("Run", &format!("{install} && node {main}"), os));
     }
     let lang = if ts { "TypeScript" } else { "Node" };
     let kind = if pm == "npm" { lang.to_string() } else { format!("{lang} ({pm})") };
@@ -211,7 +267,7 @@ fn go(f: &RootFiles) -> Option<Detected> {
     found("Go", "go.mod", vec![s("Build", &["go", "build", "./..."]), s("Test", &["go", "test", "./..."])])
 }
 
-fn python(root: &Path, f: &RootFiles) -> Option<Detected> {
+fn python(root: &Path, f: &RootFiles, os: Os) -> Option<Detected> {
     let scripts: Vec<&String> = f.with_ext(".py").collect();
     let reason = ["pyproject.toml", "requirements.txt", "setup.py"]
         .into_iter()
@@ -219,17 +275,12 @@ fn python(root: &Path, f: &RootFiles) -> Option<Detected> {
         .map(str::to_string)
         .or_else(|| scripts.first().map(|n| n.to_string()))?;
 
-    // Dependencies go into a virtualenv inside the workspace, never into the Mac's Python.
-    let setup = if f.has("requirements.txt") {
-        Some("python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt")
-    } else if f.has("pyproject.toml") || f.has("setup.py") {
-        Some("python3 -m venv .venv && .venv/bin/pip install -q .")
-    } else {
-        None
-    };
-    let run = |label: &str, args: &str| match setup {
-        Some(setup) => shell(label, &format!("{setup} && .venv/bin/python {args}")),
-        None => s(label, &std::iter::once("python3").chain(args.split(' ')).collect::<Vec<_>>()),
+    // Dependencies go into a virtualenv inside the workspace, never into the device's Python.
+    let setup = python_setup(root, os);
+    let (python, bin) = (os.python(), os.venv_bin());
+    let run = |label: &str, args: &str| match &setup {
+        Some(setup) => shell(label, &format!("{setup} && {bin}python {args}"), os),
+        None => s(label, &std::iter::once(python).chain(args.split(' ')).collect::<Vec<_>>()),
     };
 
     let mut suggestions = Vec::new();
@@ -246,9 +297,9 @@ fn python(root: &Path, f: &RootFiles) -> Option<Detected> {
     let has_tests = f.has("tests") || f.has("test") || f.has("conftest.py") || f.has("pytest.ini")
         || std::fs::read_to_string(root.join("pyproject.toml")).is_ok_and(|t| t.contains("pytest"));
     if has_tests {
-        let test = match setup {
-            Some(setup) => shell("Test", &format!("{setup} pytest && .venv/bin/python -m pytest")),
-            None => shell("Test", "python3 -m venv .venv && .venv/bin/pip install -q pytest && .venv/bin/python -m pytest"),
+        let test = match &setup {
+            Some(setup) => shell("Test", &format!("{setup} pytest && {bin}python -m pytest"), os),
+            None => shell("Test", &format!("{python} -m venv .venv && {bin}pip install -q pytest && {bin}python -m pytest"), os),
         };
         // With no obvious entry point, tests are the better default.
         if !["main.py", "app.py", "__main__.py"].iter().any(|n| f.has(n)) {
@@ -263,17 +314,22 @@ fn python(root: &Path, f: &RootFiles) -> Option<Detected> {
     found("Python", &reason, suggestions)
 }
 
-fn cmake(f: &RootFiles) -> Option<Detected> {
+fn cmake(f: &RootFiles, os: Os) -> Option<Detected> {
     f.has("CMakeLists.txt").then_some(())?;
     found("C/C++ (CMake)", "CMakeLists.txt", vec![
-        shell("Build", "cmake -S . -B build && cmake --build build --parallel"),
-        shell("Test", "cmake -S . -B build && cmake --build build --parallel && ctest --test-dir build"),
+        shell("Build", "cmake -S . -B build && cmake --build build --parallel", os),
+        shell("Test", "cmake -S . -B build && cmake --build build --parallel && ctest --test-dir build", os),
     ])
 }
 
-fn jvm(f: &RootFiles) -> Option<Detected> {
-    if f.has("gradlew") {
-        return found("Gradle", "gradlew", vec![s("Build", &["./gradlew", "build"]), s("Test", &["./gradlew", "test"])]);
+fn jvm(f: &RootFiles, os: Os) -> Option<Detected> {
+    // The wrapper is a shell script, with a batch file beside it for Windows.
+    let wrapper = match os {
+        Os::Unix => ("gradlew", "./gradlew"),
+        Os::Windows => ("gradlew.bat", "./gradlew.bat"),
+    };
+    if f.has(wrapper.0) {
+        return found("Gradle", wrapper.0, vec![s("Build", &[wrapper.1, "build"]), s("Test", &[wrapper.1, "test"])]);
     }
     if f.has("build.gradle") || f.has("build.gradle.kts") {
         return found("Gradle", "build.gradle", vec![s("Build", &["gradle", "build"]), s("Test", &["gradle", "test"])]);
@@ -302,26 +358,36 @@ fn make(root: &Path, f: &RootFiles) -> Option<Detected> {
 
 /// A static site: nothing to compile or run as a batch job, so it gets a check and an
 /// optional bundle. html-validate and Vite come from npx, into the job's npm cache.
-fn html(f: &RootFiles) -> Option<Detected> {
+fn html(f: &RootFiles, os: Os) -> Option<Detected> {
     let page = if f.has("index.html") { "index.html".to_string() } else { f.with_ext(".html").next()?.clone() };
     found("HTML", &page, vec![
         // The standard preset checks conformance to the HTML spec, not house style.
         s("Check HTML", &["npx", "--yes", "html-validate", "--preset", "standard", "**/*.html"]),
         s("Build with Vite", &["npx", "--yes", "vite", "build"]),
-        // Port forwarding brings it to the PC's http://localhost:8000.
-        s("Serve", &["python3", "-m", "http.server", "8000", "-b", "127.0.0.1"]).service(),
+        // Port forwarding brings it to this computer's http://localhost:8000.
+        s("Serve", &[os.python(), "-m", "http.server", "8000", "-b", "127.0.0.1"]).service(),
     ])
 }
 
-fn scripts(f: &RootFiles) -> Option<Detected> {
+fn scripts(f: &RootFiles, os: Os) -> Option<Detected> {
     let mut suggestions = Vec::new();
-    for script in f.with_ext(".sh") {
-        suggestions.push(s(&format!("Run {script}"), &["sh", script]));
+    if os == Os::Unix {
+        for script in f.with_ext(".sh") {
+            suggestions.push(s(&format!("Run {script}"), &["sh", script]));
+        }
+    } else {
+        for script in f.with_ext(".cmd").chain(f.with_ext(".bat")) {
+            suggestions.push(s(&format!("Run {script}"), &[&format!("./{script}")]));
+        }
+        for script in f.with_ext(".ps1") {
+            suggestions.push(s(&format!("Run {script}"), &["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script]));
+        }
     }
     for script in f.with_ext(".js").chain(f.with_ext(".mjs")) {
         suggestions.push(s(&format!("Run {script}"), &["node", script]));
     }
-    let reason = suggestions.first()?.argv[1].clone();
+    let first = &suggestions.first()?.argv;
+    let reason = first.last().unwrap_or(&first[0]).trim_start_matches("./").to_string();
     found("Scripts", &reason, suggestions)
 }
 
@@ -347,8 +413,22 @@ mod tests {
     }
 
     #[test]
+    fn commands_fit_a_windows_pc() {
+        let win = |files: &[(&str, &str)]| detect(project(files).path(), Os::Windows).unwrap();
+        let pkg = r#"{"scripts":{"build":"vite build"}}"#;
+        assert_eq!(argv(&win(&[("package.json", pkg), ("package-lock.json", "")]), 0), "cmd /d /c npm ci && npm run build");
+        let d = win(&[("requirements.txt", "numpy"), ("main.py", "")]);
+        assert_eq!(argv(&d, 0), "cmd /d /c python -m venv .venv && .venv\\Scripts\\pip install -q -r requirements.txt && .venv\\Scripts\\python main.py");
+        assert_eq!(argv(&win(&[("gradlew", ""), ("gradlew.bat", "")]), 0), "./gradlew.bat build");
+        let d = win(&[("build.cmd", ""), ("run.sh", "")]);
+        assert_eq!((d.reason.as_str(), argv(&d, 0).as_str()), ("build.cmd", "./build.cmd"));
+        assert_eq!(win(&[("Package.swift", ""), ("main.py", "")]).kind, "Python");
+        assert_eq!(Os::shell_script(&Os::Windows.shell("a && b")), Some("a && b"));
+    }
+
+    #[test]
     fn rust_builds_in_release() {
-        let d = detect(project(&[("Cargo.toml", "")]).path()).unwrap();
+        let d = detect(project(&[("Cargo.toml", "")]).path(), Os::Unix).unwrap();
         assert_eq!((d.kind.as_str(), d.reason.as_str()), ("Rust", "Cargo.toml"));
         assert_eq!(argv(&d, 0), "cargo build --release");
         assert_eq!(d.suggestions[1].label, "Test");
@@ -357,18 +437,18 @@ mod tests {
     #[test]
     fn node_uses_lockfile_manager_and_scripts() {
         let pkg = r#"{"scripts":{"test":"vitest","build":"vite build"}}"#;
-        let d = detect(project(&[("package.json", pkg), ("pnpm-lock.yaml", "")]).path()).unwrap();
+        let d = detect(project(&[("package.json", pkg), ("pnpm-lock.yaml", "")]).path(), Os::Unix).unwrap();
         assert_eq!(d.kind, "Node (pnpm)");
         assert_eq!(argv(&d, 0), "sh -c pnpm install --frozen-lockfile && pnpm run build");
         assert_eq!(d.suggestions[1].label, "Test");
 
-        let d = detect(project(&[("package.json", "{}"), ("package-lock.json", "")]).path()).unwrap();
+        let d = detect(project(&[("package.json", "{}"), ("package-lock.json", "")]).path(), Os::Unix).unwrap();
         assert_eq!(argv(&d, 0), "sh -c npm ci && node index.js");
     }
 
     #[test]
     fn python_scripts_without_dependencies_run_directly() {
-        let d = detect(project(&[("heavy_benchmark.py", ""), ("palindrome_checker.py", "")]).path()).unwrap();
+        let d = detect(project(&[("heavy_benchmark.py", ""), ("palindrome_checker.py", "")]).path(), Os::Unix).unwrap();
         assert_eq!(d.kind, "Python");
         assert_eq!(argv(&d, 0), "python3 heavy_benchmark.py");
         assert_eq!(d.suggestions[1].label, "Run palindrome_checker.py");
@@ -376,7 +456,7 @@ mod tests {
 
     #[test]
     fn python_dependencies_go_into_a_workspace_venv() {
-        let d = detect(project(&[("requirements.txt", "numpy"), ("main.py", ""), ("tests/", "")]).path()).unwrap();
+        let d = detect(project(&[("requirements.txt", "numpy"), ("main.py", ""), ("tests/", "")]).path(), Os::Unix).unwrap();
         assert_eq!(d.reason, "requirements.txt");
         assert_eq!(d.suggestions[0].label, "Run main.py");
         assert!(argv(&d, 0).contains("python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt"));
@@ -385,20 +465,20 @@ mod tests {
 
     #[test]
     fn python_tests_lead_when_there_is_no_entry_point() {
-        let d = detect(project(&[("pyproject.toml", "[tool.pytest.ini_options]"), ("lib.py", "")]).path()).unwrap();
+        let d = detect(project(&[("pyproject.toml", "[tool.pytest.ini_options]"), ("lib.py", "")]).path(), Os::Unix).unwrap();
         assert_eq!(d.suggestions[0].label, "Test");
     }
 
     #[test]
     fn makefile_targets_join_other_projects() {
-        let d = detect(project(&[("go.mod", ""), ("Makefile", "build:\n\tgo build\ntest:\n\tgo test\n")]).path()).unwrap();
+        let d = detect(project(&[("go.mod", ""), ("Makefile", "build:\n\tgo build\ntest:\n\tgo test\n")]).path(), Os::Unix).unwrap();
         assert_eq!(d.kind, "Go");
         assert!(d.suggestions.iter().any(|s| s.label == "make test"));
     }
 
     #[test]
     fn other_toolchains() {
-        let kind = |files: &[(&str, &str)]| detect(project(files).path()).map(|d| (d.kind.clone(), argv_of(&d)));
+        let kind = |files: &[(&str, &str)]| detect(project(files).path(), Os::Unix).map(|d| (d.kind.clone(), argv_of(&d)));
         fn argv_of(d: &Detected) -> String { d.suggestions[0].argv.join(" ") }
         assert_eq!(kind(&[("Package.swift", "")]).unwrap().1, "swift build -c release --cache-path .bc/swiftpm-cache");
         assert_eq!(
@@ -415,12 +495,12 @@ mod tests {
 
     #[test]
     fn typescript_with_and_without_package_json() {
-        let d = detect(project(&[("package.json", r#"{"scripts":{"test":"vitest"}}"#), ("tsconfig.json", "")]).path()).unwrap();
+        let d = detect(project(&[("package.json", r#"{"scripts":{"test":"vitest"}}"#), ("tsconfig.json", "")]).path(), Os::Unix).unwrap();
         assert_eq!(d.kind, "TypeScript");
         assert_eq!(argv(&d, 0), "sh -c npm install && npx --yes -p typescript tsc -p .");
         assert_eq!(d.suggestions[1].label, "Test");
 
-        let d = detect(project(&[("main.ts", ""), ("types.d.ts", "")]).path()).unwrap();
+        let d = detect(project(&[("main.ts", ""), ("types.d.ts", "")]).path(), Os::Unix).unwrap();
         assert_eq!((d.kind.as_str(), d.reason.as_str()), ("TypeScript", "main.ts"));
         assert_eq!(argv(&d, 0), "npx --yes tsx main.ts");
         assert_eq!(d.suggestions.len(), 1, "declaration files are not scripts");
@@ -428,7 +508,7 @@ mod tests {
 
     #[test]
     fn html_site_gets_check_and_bundle() {
-        let d = detect(project(&[("index.html", ""), ("about.html", ""), ("app.js", "")]).path()).unwrap();
+        let d = detect(project(&[("index.html", ""), ("about.html", ""), ("app.js", "")]).path(), Os::Unix).unwrap();
         assert_eq!((d.kind.as_str(), d.reason.as_str()), ("HTML", "index.html"));
         assert_eq!(argv(&d, 0), "npx --yes html-validate --preset standard **/*.html");
         assert_eq!(d.suggestions[1].label, "Build with Vite");
@@ -438,14 +518,14 @@ mod tests {
     #[test]
     fn node_dev_servers_run_as_services() {
         let pkg = r#"{"scripts":{"build":"vite build","dev":"vite","start":"node server.js"}}"#;
-        let d = detect(project(&[("package.json", pkg)]).path()).unwrap();
+        let d = detect(project(&[("package.json", pkg)]).path(), Os::Unix).unwrap();
         let services: Vec<(&str, bool)> = d.suggestions.iter().map(|s| (s.label.as_str(), s.service)).collect();
         assert_eq!(services, [("Build", false), ("Dev server", true), ("Start", true)]);
     }
 
     #[test]
     fn unknown_or_empty_folder_detects_nothing() {
-        assert!(detect(project(&[("README.md", "")]).path()).is_none());
-        assert!(detect(Path::new("/definitely/not/here")).is_none());
+        assert!(detect(project(&[("README.md", "")]).path(), Os::Unix).is_none());
+        assert!(detect(Path::new("/definitely/not/here"), Os::Unix).is_none());
     }
 }

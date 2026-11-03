@@ -227,9 +227,10 @@ function renderMacs() {
   renderNearby();
 }
 
-// ---- Macs on this network ----
-// The Mac app advertises its code on the local network, so a nearby Mac can be picked
-// instead of its long code being pasted. Picking one still leads to sign-in and pairing.
+// ---- Devices on this network ----
+// The device that holds the account, Mac or PC, advertises its code on the local network,
+// so it can be picked instead of its long code being pasted. Picking one still leads to
+// sign-in and pairing.
 let nearby = [];
 const isNearby = (id) => nearby.some((n) => n.id === id);
 
@@ -237,7 +238,7 @@ function nearbyButton(n, attr, action) {
   return `
     <button class="nearby-mac" ${attr}="${esc(n.id)}" data-name="${esc(n.name)}">
       <span class="mac-code">${esc(deviceCode(n.name))}</span>
-      <span class="mac-meta"><span class="mac-name">${esc(n.name)}</span><span class="mac-seen">On this network</span></span>
+      <span class="mac-meta"><span class="mac-name">${esc(n.name)}</span><span class="mac-seen">${n.kind === "windows" ? "PC" : "Mac"} · on this network</span></span>
       <span class="nearby-go">${action}</span>
     </button>`;
 }
@@ -256,7 +257,7 @@ listen("nearby", (event) => {
   nearby = event.payload;
   if (devices) renderMacs(); else renderNearby();
 });
-invoke("nearby_macs").then((list) => { nearby = list; renderNearby(); }).catch(() => {});
+invoke("nearby_devices").then((list) => { nearby = list; renderNearby(); }).catch(() => {});
 
 // Signed out: fill in the Mac's code and test it, as if it had been pasted.
 $("signin-nearby-list").addEventListener("click", (event) => {
@@ -322,10 +323,14 @@ function updateRunButton() {
 
 async function selectMac(name) {
   window.lendUI?.showRun();
+  const kindOf = (n) => allMacs().find((d) => d.name === n)?.kind;
+  const switchedSystem = kindOf(name) !== kindOf(selectedMac);
   selectedMac = name;
   await invoke("choose_mac", { mac: name }).catch(() => {});
   renderMacs();
   loadServices();
+  // Suggestions for a Mac do not run on a PC, and the other way round.
+  if (switchedSystem && $("folder").value.trim()) setFolder($("folder").value.trim());
 }
 
 // ---- Services ----
@@ -766,7 +771,9 @@ async function setFolder(path) {
   $("hint").textContent = "";
   renderDetected(null);
   if (path) {
-    const info = await invoke("project_info", { folder: path });
+    // Suggested commands are written for the selected device's system.
+    const kind = allMacs().find((d) => d.name === selectedMac)?.kind || null;
+    const info = await invoke("project_info", { folder: path, kind });
     if (info.spec_error) {
       $("hint").textContent = `bc.toml has a problem: ${info.spec_error}`;
     } else if (info.has_spec) {

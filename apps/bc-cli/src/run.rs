@@ -135,12 +135,13 @@ pub async fn run_on_mac(
     stderr: &mut impl Write,
     cancel: impl std::future::Future<Output = ()>,
     project: Option<&std::path::Path>,
+    os: crate::detect::Os,
     memory: &RouteMemory,
     notice: impl Fn(&str),
 ) -> Result<RunOutcome> {
     tokio::pin!(cancel);
     let mut spec = spec.clone();
-    if let Some(fix) = project.and_then(|p| autofix::preflight(p, &spec.job.argv)) {
+    if let Some(fix) = project.and_then(|p| autofix::preflight(p, &spec.job.argv, os)) {
         notice(&format!("Auto-fix: {}. Running: {}", fix.reason, fix.argv.join(" ")));
         spec.job.argv = fix.argv;
     }
@@ -155,7 +156,7 @@ pub async fn run_on_mac(
     let failed = matches!(outcome.exit, Exit::Code(c) if c != 0);
     if let (true, Some(project)) = (failed, project) {
         let output = String::from_utf8_lossy(&tail.lock().unwrap()).into_owned();
-        if let Some(fix) = autofix::after_failure(project, &spec.job.argv, &output) {
+        if let Some(fix) = autofix::after_failure(project, &spec.job.argv, &output, os) {
             notice(&format!("Auto-fix: {}. Running again: {}", fix.reason, fix.argv.join(" ")));
             spec.job.argv = fix.argv;
             return run_routed(key, net, mac, &spec, archive, stdout, stderr, cancel.as_mut(), memory, &notice).await;

@@ -63,7 +63,7 @@ struct AppState {
     forwarding: StdMutex<Option<(String, oneshot::Sender<()>)>>,
     forwards: Arc<StdMutex<Vec<Forwarded>>>,
     /// Macs heard on the local network, so the window can offer them without a typed code.
-    nearby: Arc<StdMutex<Vec<bc_net::lan::NearbyMac>>>,
+    nearby: Arc<StdMutex<Vec<bc_net::lan::NearbyDevice>>>,
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -203,21 +203,24 @@ struct OutputChunk {
     text: String,
 }
 
-/// Macs on this network right now; `nearby` events carry later changes.
+/// Devices holding an account on this network right now, Mac or PC; `nearby` events
+/// carry later changes.
 #[tauri::command]
-fn nearby_macs(state: State<'_, AppState>) -> Vec<bc_net::lan::NearbyMac> {
+fn nearby_devices(state: State<'_, AppState>) -> Vec<bc_net::lan::NearbyDevice> {
     state.nearby.lock().unwrap().clone()
 }
 
-/// Listens for Macs on the local network for as long as the app runs.
-fn watch_nearby(app: AppHandle, list: Arc<StdMutex<Vec<bc_net::lan::NearbyMac>>>) {
+/// Listens for devices on the local network for as long as the app runs. A device that
+/// holds the account advertises itself too, and is left out of its own list.
+fn watch_nearby(app: AppHandle, home: PathBuf, list: Arc<StdMutex<Vec<bc_net::lan::NearbyDevice>>>) {
     tauri::async_runtime::spawn(async move {
         let mut rx = match bc_net::lan::watch_nearby() {
             Ok(rx) => rx,
-            Err(e) => return eprintln!("not looking for Macs on the local network: {e:#}"),
+            Err(e) => return eprintln!("not looking for devices on the local network: {e:#}"),
         };
         while rx.changed().await.is_ok() {
-            let now = rx.borrow().clone();
+            let me = device_id(&home).ok();
+            let now: Vec<_> = rx.borrow().iter().filter(|n| Some(&n.id) != me.as_ref()).cloned().collect();
             *list.lock().unwrap() = now.clone();
             let _ = app.emit("nearby", now);
         }
@@ -423,10 +426,10 @@ async fn pick_folder(app: AppHandle) -> CmdResult<Option<String>> {
 
 /// What the folder's `bc.toml` would run, so the window can prefill the command.
 #[tauri::command]
-fn project_info(folder: String) -> ProjectInfo {
+fn project_info(folder: String, kind: Option<DeviceKind>) -> ProjectInfo {
     let path = Path::new(&folder).join("bc.toml");
     if !path.exists() {
-        let detected = bc_cli::detect::detect(Path::new(&folder)).map(|d| DetectedView {
+        let detected = bc_cli::detect::detect(Path::new(&folder), bc_cli::detect::Os::of(kind)).map(|d| DetectedView {
             kind: d.kind,
             reason: d.reason,
             suggestions: d
@@ -542,6 +545,7 @@ async fn run_job_inner(
             phase(&started_phase, if service { "Detaching…" } else { "Cancelling…" });
         },
         Some(&root),
+        bc_cli::detect::Os::of(resolved.kind),
         &RouteMemory::at(&state.home),
         move |text: &str| {
             let _ = writeln!(notice_log.lock().unwrap(), "\n{text}");
@@ -1022,7 +1026,7 @@ fn main() {
             // the crate version stays 0.1.0.
             log(format_args!("Borrowed Compute {} starting", app.package_info().version));
             let list = app.state::<AppState>().nearby.clone();
-            watch_nearby(app.handle().clone(), list);
+            watch_nearby(app.handle().clone(), home.clone(), list);
 
             let open = MenuItem::with_id(app, "open", "Open Borrowed Compute", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit (stops lending)", true, None::<&str>)?;
@@ -1108,7 +1112,7 @@ fn main() {
             set_cloud_url,
             join_mac,
             leave_mac,
-            nearby_macs,
+            nearby_devices,
             lend::keep_account_here,
             lend::set_lending,
             lend::list_pairings,

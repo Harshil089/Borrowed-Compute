@@ -277,6 +277,7 @@ async fn auto_fix_installs_dependencies_and_runs_again() {
         &mut err,
         std::future::pending(),
         Some(proj.path()),
+        bc_cli::detect::Os::Unix,
         &bc_cli::route::RouteMemory::none(),
         |n: &str| notices.lock().unwrap().push(n.to_string()),
     )
@@ -335,6 +336,7 @@ async fn service_keeps_running_after_detach_until_stopped() {
         &mut err,
         tokio::time::sleep(Duration::from_secs(2)),
         None,
+        bc_cli::detect::Os::Unix,
         &memory,
         |_: &str| {},
     )
@@ -434,6 +436,7 @@ async fn forwards_a_service_port_to_localhost() {
         &mut Vec::new(),
         tokio::time::sleep(Duration::from_secs(1)),
         None,
+        bc_cli::detect::Os::Unix,
         &memory,
         |_: &str| {},
     )
