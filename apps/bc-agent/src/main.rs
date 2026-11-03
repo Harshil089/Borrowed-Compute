@@ -53,6 +53,11 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // The relay inside a job's AppContainer, and the elevated setup, on Windows.
+    #[cfg(windows)]
+    if let Some(code) = bc_agent::sandbox_windows::helper_main() {
+        std::process::exit(code);
+    }
     // Keys and the session token belong in the OS keychain, not in files.
     bc_net::use_keychain();
     let cli = Cli::parse();
