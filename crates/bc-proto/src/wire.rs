@@ -27,6 +27,9 @@ pub enum WireError {
     Decode(String),
 }
 
+/// Largest project archive a device accepts. Both sides keep it on disk, not in memory.
+pub const MAX_ARCHIVE_BYTES: u64 = 20 << 30;
+
 /// The job as the agent runs it: resolved from a [`JobSpec`] on the client.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JobRequest {

@@ -9,8 +9,10 @@ use bc_proto::wire::{AgentMsg, ClientMsg, JobRequest, JobUsage, OutputStream, Se
 use bc_proto::JobSpec;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::{Endpoint, SecretKey};
+use tokio::io::AsyncReadExt;
 
 use crate::autofix;
+use crate::pack::Archive;
 use crate::route::RouteMemory;
 
 const UPLOAD_CHUNK: usize = 1 << 20;
@@ -104,7 +106,7 @@ pub async fn run_remote(
     endpoint: &Endpoint,
     mac: EndpointAddr,
     spec: &JobSpec,
-    archive: Vec<u8>,
+    archive: Archive,
     stdout: &mut impl Write,
     stderr: &mut impl Write,
     cancel: impl std::future::Future<Output = ()>,
@@ -130,7 +132,7 @@ pub async fn run_on_mac(
     net: NetConfig,
     mac: EndpointAddr,
     spec: &JobSpec,
-    archive: Vec<u8>,
+    archive: Archive,
     stdout: &mut impl Write,
     stderr: &mut impl Write,
     cancel: impl std::future::Future<Output = ()>,
@@ -197,7 +199,7 @@ async fn run_routed(
     net: NetConfig,
     mac: EndpointAddr,
     spec: &JobSpec,
-    archive: Vec<u8>,
+    archive: Archive,
     stdout: &mut impl Write,
     stderr: &mut impl Write,
     cancel: impl std::future::Future<Output = ()>,
@@ -255,7 +257,7 @@ async fn run_attempt(
     endpoint: &Endpoint,
     mac: EndpointAddr,
     spec: &JobSpec,
-    archive: Vec<u8>,
+    archive: Archive,
     stdout: &mut impl Write,
     stderr: &mut impl Write,
     cancel: impl std::future::Future<Output = ()>,
@@ -264,7 +266,7 @@ async fn run_attempt(
     let t0 = Instant::now();
     let job_id = new_job_id();
     let mut timings = Timings {
-        archive_bytes: archive.len() as u64,
+        archive_bytes: archive.len,
         ..Default::default()
     };
 
@@ -281,15 +283,21 @@ async fn run_attempt(
     }
     timings.connect = t0.elapsed();
 
-    let req = JobRequest::from_spec(job_id.clone(), spec, archive.len() as u64);
+    let req = JobRequest::from_spec(job_id.clone(), spec, archive.len);
     send_msg(&mut send, &ClientMsg::Submit(req)).await?;
     match recv_msg::<AgentMsg>(&mut recv).await? {
         AgentMsg::Accepted { .. } => {}
         AgentMsg::Rejected { reason } => return Ok(done(job_id, Exit::Rejected(reason), timings, t0, None)),
         other => bail!("unexpected reply to Submit {other:?}"),
     }
-    for chunk in archive.chunks(UPLOAD_CHUNK) {
-        tokio::time::timeout(UPLOAD_STALL, send_msg(&mut send, &ClientMsg::Upload { data: chunk.to_vec() }))
+    let mut file = tokio::fs::File::from_std(archive.open().context("reading the archive")?);
+    let mut chunk = vec![0; UPLOAD_CHUNK];
+    loop {
+        let read = file.read(&mut chunk).await.context("reading the archive")?;
+        if read == 0 {
+            break;
+        }
+        tokio::time::timeout(UPLOAD_STALL, send_msg(&mut send, &ClientMsg::Upload { data: chunk[..read].to_vec() }))
             .await
             .map_err(|_| anyhow::anyhow!("upload stalled for {}s", UPLOAD_STALL.as_secs()))??;
     }

@@ -45,12 +45,15 @@ impl Default for RunnerConfig {
     }
 }
 
+/// The uploaded project as a tar stream: a temporary file on disk, or bytes in tests.
+pub type Archive = Box<dyn std::io::Read + Send>;
+
 /// Runs the job and sends `Started`, `Output` and a final `Exited` or `Failed` to `tx`.
 /// Returns the workspace path, which no longer exists when this returns.
 pub async fn run_job(
     config: &RunnerConfig,
     req: &JobRequest,
-    archive: Vec<u8>,
+    archive: Archive,
     tx: mpsc::Sender<AgentMsg>,
 ) -> PathBuf {
     run_job_with(config, req, archive, tx, None).await
@@ -82,7 +85,7 @@ impl StartedJob {
 pub async fn run_job_with(
     config: &RunnerConfig,
     req: &JobRequest,
-    archive: Vec<u8>,
+    archive: Archive,
     tx: mpsc::Sender<AgentMsg>,
     pid: Option<tokio::sync::oneshot::Sender<StartedJob>>,
 ) -> PathBuf {
@@ -116,7 +119,7 @@ const PROJECT_DIR: &str = "project";
 /// deleting the workspace deletes them too.
 const CACHE_DIR: &str = "cache";
 
-async fn prepare(config: &RunnerConfig, archive: Vec<u8>) -> Result<tempfile::TempDir> {
+async fn prepare(config: &RunnerConfig, archive: Archive) -> Result<tempfile::TempDir> {
     tokio::fs::create_dir_all(&config.work_root)
         .await
         .with_context(|| format!("creating {}", config.work_root.display()))?;
@@ -126,12 +129,12 @@ async fn prepare(config: &RunnerConfig, archive: Vec<u8>) -> Result<tempfile::Te
     let root = workspace.path().join(PROJECT_DIR);
     tokio::fs::create_dir_all(workspace.path().join(CACHE_DIR).join("tmp")).await?;
     tokio::fs::create_dir_all(&root).await?;
-    tokio::task::spawn_blocking(move || unpack(&archive, &root)).await??;
+    tokio::task::spawn_blocking(move || unpack(archive, &root)).await??;
     Ok(workspace)
 }
 
 /// Unpacks a tar archive, refusing any entry that would land outside `root`.
-fn unpack(archive: &[u8], root: &Path) -> Result<()> {
+fn unpack(archive: impl std::io::Read, root: &Path) -> Result<()> {
     let mut tar = tar::Archive::new(archive);
     tar.set_preserve_permissions(true);
     for entry in tar.entries()? {
@@ -505,7 +508,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    fn archive(files: &[(&str, &str)]) -> Vec<u8> {
+    fn archive(files: &[(&str, &str)]) -> Archive {
         let mut builder = tar::Builder::new(Vec::new());
         for (path, body) in files {
             let mut header = tar::Header::new_gnu();
@@ -516,7 +519,7 @@ mod tests {
                 .append_data(&mut header, path, body.as_bytes())
                 .unwrap();
         }
-        builder.into_inner().unwrap()
+        Box::new(std::io::Cursor::new(builder.into_inner().unwrap()))
     }
 
     fn request(argv: &[&str], timeout_secs: Option<u64>) -> JobRequest {
@@ -531,7 +534,7 @@ mod tests {
         }
     }
 
-    async fn run(req: JobRequest, archive: Vec<u8>) -> (Vec<AgentMsg>, PathBuf, PathBuf) {
+    async fn run(req: JobRequest, archive: Archive) -> (Vec<AgentMsg>, PathBuf, PathBuf) {
         let root = tempfile::tempdir().unwrap();
         let config = RunnerConfig {
             work_root: root.path().to_path_buf(),
@@ -723,13 +726,13 @@ mod tests {
         let bytes = builder.into_inner().unwrap();
 
         let root = tempfile::tempdir().unwrap();
-        assert!(unpack(&bytes, root.path()).is_err());
+        assert!(unpack(bytes.as_slice(), root.path()).is_err());
         assert!(!root.path().parent().unwrap().join("evil.t").exists());
     }
 
     /// The Windows runner: an AppContainer and a Job Object around each job.
     #[cfg(windows)]
-    async fn run_within(req: JobRequest, archive: Vec<u8>) -> Vec<AgentMsg> {
+    async fn run_within(req: JobRequest, archive: Archive) -> Vec<AgentMsg> {
         tokio::time::timeout(Duration::from_secs(60), run(req, archive))
             .await
             .expect("the job's output closed once it ended")
@@ -782,11 +785,11 @@ mod tests {
         let npm = find_program("npm", std::env::var_os("PATH").as_deref(), Path::new("."));
         let cli = npm.with_file_name("node_modules").join("npm").join("bin").join("npm-cli.js");
         let read = format!("require('fs').readFileSync({:?})", cli.display().to_string());
-        let node = run_within(request(&["node", "-e", &read], None), Vec::new()).await;
+        let node = run_within(request(&["node", "-e", &read], None), archive(&[])).await;
         if exited(&node).0 != Some(0) {
             return eprintln!("npm's files are not open to AppContainers on this machine; skipping: {}", output(&node, OutputStream::Stderr));
         }
-        let msgs = run_within(request(&["npm", "--version"], None), Vec::new()).await;
+        let msgs = run_within(request(&["npm", "--version"], None), archive(&[])).await;
         assert_eq!(exited(&msgs).0, Some(0), "{}", output(&msgs, OutputStream::Stderr));
     }
 
@@ -829,7 +832,7 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn windows_times_out_and_counts_cpu() {
-        let msgs = run_within(request(&["cmd", "/c", "for /l %i in (0,0,1) do @rem"], Some(2)), Vec::new()).await;
+        let msgs = run_within(request(&["cmd", "/c", "for /l %i in (0,0,1) do @rem"], Some(2)), archive(&[])).await;
         let (code, timed_out, usage) = exited(&msgs);
         assert_eq!((code, timed_out), (None, true));
         assert!(usage.expect("usage").user_ms > 0);
@@ -842,7 +845,7 @@ mod tests {
     async fn windows_background_processes_end_with_the_job() {
         let msgs = run_within(
             request(&["cmd", "/c", "start", "/b", "cmd", "/c", "for /l %i in (0,0,1) do @rem"], None),
-            Vec::new(),
+            archive(&[]),
         )
         .await;
         assert!(!exited(&msgs).1);
@@ -853,7 +856,7 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn windows_pnpm_uses_its_hoisted_layout() {
-        let msgs = run_within(request(&["cmd", "/c", "echo %npm_config_node_linker%"], None), Vec::new()).await;
+        let msgs = run_within(request(&["cmd", "/c", "echo %npm_config_node_linker%"], None), archive(&[])).await;
         assert!(output(&msgs, OutputStream::Stdout).contains("hoisted"), "{msgs:?}");
     }
 
@@ -869,12 +872,12 @@ mod tests {
                 continue;
             };
             let read = format!("require('fs').readFileSync({:?})", script.display().to_string());
-            let node = run_within(request(&["node", "-e", &read], None), Vec::new()).await;
+            let node = run_within(request(&["node", "-e", &read], None), archive(&[])).await;
             if exited(&node).0 != Some(0) {
                 eprintln!("{tool}'s files are not open to AppContainers on this machine; skipping");
                 continue;
             }
-            let msgs = run_within(request(&[tool, "--version"], None), Vec::new()).await;
+            let msgs = run_within(request(&[tool, "--version"], None), archive(&[])).await;
             assert_eq!(exited(&msgs).0, Some(0), "{tool}: {}", output(&msgs, OutputStream::Stderr));
         }
     }

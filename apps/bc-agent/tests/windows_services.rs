@@ -34,7 +34,7 @@ async fn services_are_reached_through_a_relay() {
     let runner = RunnerConfig { work_root: root.path().into(), default_timeout: Duration::from_secs(30), denied_ports: Vec::new(), guest: false };
     let services = Services::default();
     let owner = iroh::SecretKey::from_bytes(&[1; 32]).public();
-    drop(services.start(runner, req, archive.into_inner().unwrap(), owner, None));
+    drop(services.start(runner, req, Box::new(std::io::Cursor::new(archive.into_inner().unwrap())), owner, None));
 
     let mut listening = false;
     for _ in 0..100 {
