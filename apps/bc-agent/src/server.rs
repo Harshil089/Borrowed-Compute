@@ -2,13 +2,14 @@
 
 use anyhow::{bail, Context, Result};
 use bc_net::{recv_msg, recv_msg_max, send_msg};
-use bc_proto::wire::{AgentMsg, ClientMsg, PROTOCOL_VERSION};
+use bc_proto::wire::{AgentMsg, ClientMsg, MAX_ARCHIVE_BYTES, PROTOCOL_VERSION};
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use iroh::EndpointId;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::events::{AgentEvent, EventSender, JobEnd};
@@ -16,14 +17,12 @@ use crate::paired::PairedDevices;
 use crate::runner::{run_job, RunnerConfig};
 use crate::services::{Attached, Services, StopError};
 
-/// Largest project archive accepted in Phase one, before chunked sync exists.
-pub const MAX_ARCHIVE: u64 = 2 << 30;
 /// Runs (not services) one device may have going at once.
 pub const MAX_JOBS_PER_DEVICE: usize = 4;
 /// Services one device may keep running at once; each also keeps the Mac awake.
 pub const MAX_SERVICES_PER_DEVICE: usize = 8;
-/// Upload bytes held in memory at once across all devices, before they are unpacked.
-pub const MAX_UPLOAD_BYTES: u64 = 4 << 30;
+/// Upload bytes on disk at once across all devices, before they are unpacked.
+pub const MAX_UPLOAD_BYTES: u64 = 2 * MAX_ARCHIVE_BYTES;
 
 /// What paired devices are using now, so one device cannot exhaust the Mac.
 #[derive(Debug, Clone, Default)]
@@ -181,6 +180,15 @@ fn handshake_slot(config: &AgentConfig, conn: &Connection) -> Option<tokio::sync
 }
 
 pub async fn serve_connection(config: &AgentConfig, conn: Connection) -> Result<()> {
+    let result = serve_job(config, conn.clone()).await;
+    // Dropping the connection would leave the device with a bare "closed by peer: 0".
+    if let Err(e) = &result {
+        conn.close(3u32.into(), format!("{e:#}").as_bytes());
+    }
+    result
+}
+
+async fn serve_job(config: &AgentConfig, conn: Connection) -> Result<()> {
     let peer = conn.remote_id();
     let Some(slot) = handshake_slot(config, &conn) else {
         return Ok(());
@@ -252,10 +260,14 @@ pub async fn serve_connection(config: &AgentConfig, conn: Connection) -> Result<
         }
         other => bail!("expected Submit, Attach, Stop or ListServices, got {other:?}"),
     };
-    if req.archive_bytes > MAX_ARCHIVE {
-        let reason = format!("project is {} bytes, limit is {MAX_ARCHIVE}", req.archive_bytes);
-        send_msg(&mut send, &AgentMsg::Rejected { reason: reason.clone() }).await?;
-        bail!(reason);
+    if req.archive_bytes > MAX_ARCHIVE_BYTES {
+        let reason = format!(
+            "the project is {:.1} GB and the limit is {} GB",
+            req.archive_bytes as f64 / (1u64 << 30) as f64,
+            MAX_ARCHIVE_BYTES >> 30
+        );
+        config.emit(AgentEvent::JobRejected { client: peer.to_string(), reason: reason.clone() });
+        return reply_and_close(&conn, send, AgentMsg::Rejected { reason }).await;
     }
     let mut slot = match config.limits.claim(peer, req.archive_bytes, req.service, &config.services) {
         Ok(slot) => slot,
@@ -263,23 +275,32 @@ pub async fn serve_connection(config: &AgentConfig, conn: Connection) -> Result<
     };
     send_msg(&mut send, &AgentMsg::Accepted { job_id: req.job_id.clone() }).await?;
 
-    let mut archive = Vec::with_capacity(req.archive_bytes as usize);
+    // An unnamed temporary file: the system deletes it once the job is unpacked or ends.
+    tokio::fs::create_dir_all(&config.runner.work_root).await?;
+    let file = tempfile::tempfile_in(&config.runner.work_root).context("storing the upload")?;
+    let mut file = tokio::io::BufWriter::new(tokio::fs::File::from_std(file));
+    let mut received = 0u64;
     loop {
         match recv_msg::<ClientMsg>(&mut recv).await? {
             ClientMsg::Upload { data } => {
-                archive.extend_from_slice(&data);
-                if archive.len() as u64 > req.archive_bytes {
+                received += data.len() as u64;
+                if received > req.archive_bytes {
                     bail!("upload is larger than the declared {} bytes", req.archive_bytes);
                 }
+                file.write_all(&data).await.context("storing the upload")?;
             }
             ClientMsg::UploadDone => break,
             ClientMsg::Cancel => return Ok(()),
             other => bail!("expected Upload, got {other:?}"),
         }
     }
-    if archive.len() as u64 != req.archive_bytes {
-        bail!("upload is {} bytes, declared {}", archive.len(), req.archive_bytes);
+    if received != req.archive_bytes {
+        bail!("upload is {received} bytes, declared {}", req.archive_bytes);
     }
+    file.flush().await.context("storing the upload")?;
+    let mut file = file.into_inner().into_std().await;
+    std::io::Seek::rewind(&mut file)?;
+    let archive: crate::runner::Archive = Box::new(std::io::BufReader::new(file));
 
     let mut runner = config.runner.clone();
     runner.guest = !config.paired.contains(&peer);

@@ -64,7 +64,7 @@ impl Services {
         &self,
         runner: RunnerConfig,
         req: JobRequest,
-        archive: Vec<u8>,
+        archive: crate::runner::Archive,
         owner: EndpointId,
         events: Option<EventSender>,
     ) -> Attached {
@@ -316,10 +316,10 @@ mod tests {
         }
     }
 
-    fn empty_archive() -> Vec<u8> {
+    fn empty_archive() -> crate::runner::Archive {
         let mut b = tar::Builder::new(Vec::new());
         b.finish().unwrap();
-        b.into_inner().unwrap()
+        Box::new(std::io::Cursor::new(b.into_inner().unwrap()))
     }
 
     fn device(n: u8) -> EndpointId {

@@ -8,10 +8,14 @@
 //! file system, the git index and the shebang, and converts CRLF to LF in scripts.
 
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::{BufWriter, Read, Seek};
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
+use bc_proto::wire::MAX_ARCHIVE_BYTES;
 use globset::{Glob, GlobSetBuilder};
 use ignore::WalkBuilder;
 
@@ -21,9 +25,28 @@ const FILE_MODE: u32 = 0o644;
 const BINARY_PROBE: usize = 8 * 1024;
 const SCRIPT_EXTENSIONS: [&str; 3] = ["sh", "bash", "zsh"];
 
-/// Archives `root`, honoring `.gitignore` and `excludes`, and always skipping `.git`.
-/// Paths in the archive use `/` separators so they unpack the same way on the Mac.
-pub fn pack(root: &Path, excludes: &[String]) -> Result<Vec<u8>> {
+/// A packed project. It lives in a temporary file, so its size is not bounded by memory.
+#[derive(Clone)]
+pub struct Archive {
+    file: Arc<tempfile::NamedTempFile>,
+    pub len: u64,
+}
+
+impl Archive {
+    /// A new handle on the archive, read from the start.
+    pub fn open(&self) -> std::io::Result<File> {
+        self.file.reopen()
+    }
+}
+
+/// Files above this size are streamed into the archive and never treated as scripts.
+const MAX_SCRIPT_BYTES: u64 = 1 << 20;
+
+/// Archives `root`, honoring `.gitignore` and `excludes`, and always skipping `.git` and
+/// `node_modules`: install commands rebuild it on the Mac, and it is often most of the
+/// project. Paths in the archive use `/` separators so they unpack the same way on the Mac.
+/// A project over [`MAX_ARCHIVE_BYTES`] fails before anything is read.
+pub fn pack(root: &Path, excludes: &[String]) -> Result<Archive> {
     let mut globs = GlobSetBuilder::new();
     for pattern in excludes {
         globs.add(Glob::new(pattern).with_context(|| format!("bad exclude {pattern:?}"))?);
@@ -37,11 +60,12 @@ pub fn pack(root: &Path, excludes: &[String]) -> Result<Vec<u8>> {
         .git_exclude(true)
         .git_global(false)
         .require_git(false)
-        .filter_entry(|e| e.file_name() != ".git")
+        .filter_entry(|e| {
+            e.file_name() != ".git" && !(e.file_name() == "node_modules" && e.file_type().is_some_and(|t| t.is_dir()))
+        })
         .build();
 
-    let mut tar = tar::Builder::new(Vec::new());
-    tar.follow_symlinks(false);
+    let mut files = Vec::new();
     for entry in walker {
         let entry = entry?;
         let Some(file_type) = entry.file_type() else { continue };
@@ -53,29 +77,71 @@ pub fn pack(root: &Path, excludes: &[String]) -> Result<Vec<u8>> {
         if globs.is_match(&name) {
             continue;
         }
-        if file_type.is_symlink() {
+        let size = if file_type.is_file() { entry.metadata().with_context(|| format!("reading {name}"))?.len() } else { 0 };
+        files.push((entry, name, size));
+    }
+    let total: u64 = files.iter().map(|(_, _, size)| size).sum();
+    if total > MAX_ARCHIVE_BYTES {
+        bail!("{}", too_big(files.iter().map(|(_, name, size)| (name.as_str(), *size)), total));
+    }
+
+    let mut tar = tar::Builder::new(BufWriter::new(tempfile::NamedTempFile::new().context("creating the archive")?));
+    tar.follow_symlinks(false);
+    for (entry, name, size) in files {
+        if entry.file_type().is_some_and(|t| t.is_symlink()) {
             tar.append_path_with_name(entry.path(), &name)
                 .with_context(|| format!("adding {name}"))?;
             continue;
         }
 
         let metadata = entry.metadata().with_context(|| format!("reading {name}"))?;
-        let mut data = std::fs::read(entry.path()).with_context(|| format!("reading {name}"))?;
         let git_exec = git_modes.as_ref().map(|modes| modes.get(&name).copied());
+        let mut header = tar::Header::new_gnu();
+        header.set_mtime(mtime_secs(&metadata));
+        header.set_entry_type(tar::EntryType::Regular);
+        if size > MAX_SCRIPT_BYTES {
+            let mut file = File::open(entry.path()).with_context(|| format!("reading {name}"))?;
+            let mut head = [0u8; 2];
+            let read = file.read(&mut head)?;
+            file.rewind()?;
+            let exec = is_executable(fs_executable(&metadata), git_exec, &head[..read]);
+            header.set_size(size);
+            header.set_mode(if exec { EXEC_MODE } else { FILE_MODE });
+            tar.append_data(&mut header, &name, file.take(size))
+                .with_context(|| format!("adding {name}"))?;
+            continue;
+        }
+        let mut data = std::fs::read(entry.path()).with_context(|| format!("reading {name}"))?;
         let exec = is_executable(fs_executable(&metadata), git_exec, &data);
         if is_script(&name, exec, &data) {
             data = crlf_to_lf(data);
         }
-
-        let mut header = tar::Header::new_gnu();
         header.set_size(data.len() as u64);
         header.set_mode(if exec { EXEC_MODE } else { FILE_MODE });
-        header.set_mtime(mtime_secs(&metadata));
-        header.set_entry_type(tar::EntryType::Regular);
         tar.append_data(&mut header, &name, data.as_slice())
             .with_context(|| format!("adding {name}"))?;
     }
-    Ok(tar.into_inner()?)
+    let file = tar.into_inner()?.into_inner().map_err(|e| e.into_error())?;
+    let len = file.as_file().metadata()?.len();
+    Ok(Archive { file: Arc::new(file), len })
+}
+
+/// Says the project is too big and names its three biggest top-level files or folders.
+fn too_big<'a>(files: impl Iterator<Item = (&'a str, u64)>, total: u64) -> String {
+    let gb = |bytes: u64| format!("{:.1} GB", bytes as f64 / (1u64 << 30) as f64);
+    let mut by_top: HashMap<&str, u64> = HashMap::new();
+    for (name, size) in files {
+        *by_top.entry(name.split('/').next().unwrap_or(name)).or_default() += size;
+    }
+    let mut top: Vec<_> = by_top.into_iter().collect();
+    top.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    let biggest: Vec<_> = top.iter().take(3).map(|(name, size)| format!("{name} ({})", gb(*size))).collect();
+    format!(
+        "the project is {} and the limit is {}. Biggest: {}. Add what the run does not need to .gitignore.",
+        gb(total),
+        gb(MAX_ARCHIVE_BYTES),
+        biggest.join(", ")
+    )
 }
 
 /// Executable if the file system says so, or git records it as `100755`. A file git
@@ -180,8 +246,8 @@ mod tests {
         data: Vec<u8>,
     }
 
-    fn entries(archive: &[u8]) -> HashMap<String, Entry> {
-        tar::Archive::new(archive)
+    fn entries(archive: &Archive) -> HashMap<String, Entry> {
+        tar::Archive::new(archive.open().unwrap())
             .entries()
             .unwrap()
             .map(|e| {
@@ -229,6 +295,8 @@ mod tests {
             (".git/HEAD", "ref"),
             ("data/big.bin", "data"),
             (".env.example", "A=1"),
+            ("node_modules/left-pad/index.js", "module.exports = 1"),
+            ("web/node_modules/x.js", "1"),
         ] {
             write(root, path, body.as_bytes());
         }
@@ -237,6 +305,27 @@ mod tests {
         let mut names: Vec<_> = entries(&archive).into_keys().collect();
         names.sort();
         assert_eq!(names, [".env.example", ".gitignore", "Cargo.toml", "src/main.rs"]);
+    }
+
+    #[test]
+    fn streams_big_files_and_keeps_their_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = format!("#!/bin/sh\r\n{}", "x".repeat(MAX_SCRIPT_BYTES as usize));
+        write(dir.path(), "big.sh", body.as_bytes());
+        let archive = pack(dir.path(), &[]).unwrap();
+        let big = &entries(&archive)["big.sh"];
+        // Too big to be a script: sent as is, with its mode from the shebang.
+        assert_eq!(big.data, body.as_bytes());
+        assert_eq!(big.mode, EXEC_MODE);
+    }
+
+    #[test]
+    fn too_big_names_the_biggest_folders() {
+        let gb = 1u64 << 30;
+        let files = [("node_modules/a", 5 * gb), ("dist/b", gb), ("src/c", 1), ("dist/d", gb), ("x", 2)];
+        let msg = too_big(files.into_iter(), 7 * gb);
+        assert!(msg.starts_with("the project is 7.0 GB and the limit is 20.0 GB."), "{msg}");
+        assert!(msg.contains("Biggest: node_modules (5.0 GB), dist (2.0 GB), x (0.0 GB)."), "{msg}");
     }
 
     #[test]

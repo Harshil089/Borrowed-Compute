@@ -534,7 +534,7 @@ async fn run_job_inner(
         .await
         .context("packing")??;
 
-    phase(app, format!("Connecting and uploading {}…", human_bytes(archive.len() as u64)));
+    phase(app, format!("Connecting and uploading {}…", human_bytes(archive.len)));
     let key = load_or_create_key(&key_path(&state.home))?;
     let (log_path, log) = open_job_log(&state.home, mac, folder, &spec.job.argv)?;
     let mut stdout = EmitWriter::new(app.clone(), "stdout", log.clone());

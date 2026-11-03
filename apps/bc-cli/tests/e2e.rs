@@ -169,6 +169,21 @@ async fn unpaired_device_is_rejected() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn too_big_project_is_rejected_with_its_reason() {
+    let s = setup().await;
+    s.paired.add(s.client.id()).unwrap();
+    let proj = project();
+    let spec = JobSpec::from_argv(vec!["true".into()]).unwrap();
+    let mut archive = pack(proj.path(), &spec.files.exclude).unwrap();
+    // Declared over the limit: the agent must answer before any upload.
+    archive.len = bc_proto::wire::MAX_ARCHIVE_BYTES + 1;
+    let outcome = run_remote(&s.client, s.agent.addr(), &spec, archive, &mut Vec::new(), &mut Vec::new(), std::future::pending())
+        .await
+        .unwrap();
+    assert!(matches!(outcome.exit, Exit::Rejected(ref r) if r.contains("limit is 20 GB")), "{:?}", outcome.exit);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn agent_refuses_large_frames_before_the_paired_check() {
     let s = setup().await;
     let conn = s.client.connect(s.agent.addr(), bc_net::JOB_ALPN).await.unwrap();

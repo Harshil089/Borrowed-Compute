@@ -34,7 +34,7 @@ async fn job(name: &str, argv: &[&str], files: &[(&str, &str)]) {
     };
     let (tx, mut rx) = tokio::sync::mpsc::channel(1024);
     let tar = archive(files);
-    let runner = tokio::spawn(async move { run_job(&config, &req, tar, tx).await });
+    let runner = tokio::spawn(async move { run_job(&config, &req, Box::new(std::io::Cursor::new(tar)), tx).await });
     let mut out = Vec::new();
     let mut end = String::new();
     while let Some(m) = rx.recv().await {
