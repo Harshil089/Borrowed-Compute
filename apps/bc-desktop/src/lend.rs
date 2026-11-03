@@ -338,6 +338,18 @@ pub async fn keep_account_here(app: AppHandle, state: State<'_, LendState>) -> C
 /// devices see this one as not lending; runs in progress finish.
 #[tauri::command]
 pub async fn set_lending(state: State<'_, LendState>, on: bool) -> CmdResult<()> {
+    // The one-time setup that needs an administrator (folder attributes for Node, the
+    // firewall rule), if the installer's run of it was declined. Lending works without it.
+    #[cfg(windows)]
+    if on {
+        let asked = tokio::task::spawn_blocking(|| {
+            bc_agent::sandbox_windows::setup_needed().then(bc_agent::sandbox_windows::request_setup)
+        })
+        .await;
+        if let Ok(Some(Err(e))) = asked {
+            log(format_args!("setup for lending was not completed: {e}"));
+        }
+    }
     std::fs::write(lending_flag(&state.paths.home), if on { "on\n" } else { "off\n" }).map_err(err)?;
     state.lending.store(on, Ordering::Relaxed);
     if let Some(agent) = state.agent.get() {

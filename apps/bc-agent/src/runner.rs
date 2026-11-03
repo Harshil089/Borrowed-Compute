@@ -56,14 +56,35 @@ pub async fn run_job(
     run_job_with(config, req, archive, tx, None).await
 }
 
-/// [`run_job`], also sending the job's process id (which is its process group id) to
-/// `pid` once it starts, so services can find the ports the job listens on.
+/// A running job, as services see it: enough to find the ports it listens on and to
+/// connect to them.
+#[derive(Clone)]
+pub struct StartedJob {
+    /// The job's process, which leads its process group on a Mac.
+    pub pid: u32,
+    #[cfg(windows)]
+    pub job: crate::sandbox_windows::JobHandle,
+}
+
+impl StartedJob {
+    /// TCP ports the job's processes listen on. Forwarding is limited to these, so a paired
+    /// device reaches its own service and nothing else on this device's localhost.
+    pub fn listening_ports(&self) -> Vec<u16> {
+        #[cfg(windows)]
+        return self.job.listening_ports();
+        #[cfg(not(windows))]
+        return crate::services::listening_ports(self.pid);
+    }
+}
+
+/// [`run_job`], also sending the started job to `started` once it runs, so services can
+/// find and reach the ports the job listens on.
 pub async fn run_job_with(
     config: &RunnerConfig,
     req: &JobRequest,
     archive: Vec<u8>,
     tx: mpsc::Sender<AgentMsg>,
-    pid: Option<tokio::sync::oneshot::Sender<u32>>,
+    pid: Option<tokio::sync::oneshot::Sender<StartedJob>>,
 ) -> PathBuf {
     let workspace = match prepare(config, archive).await {
         Ok(ws) => ws,
@@ -227,7 +248,7 @@ async fn execute(
     root: &Path,
     cache: &Path,
     tx: &mpsc::Sender<AgentMsg>,
-    pid_sink: Option<tokio::sync::oneshot::Sender<u32>>,
+    pid_sink: Option<tokio::sync::oneshot::Sender<StartedJob>>,
 ) -> Result<AgentMsg> {
     let workdir_rel = Path::new(&req.workdir);
     if !is_inside(workdir_rel) {
@@ -238,11 +259,6 @@ async fn execute(
         bail!("workdir {} does not exist in the uploaded project", req.workdir);
     }
     let (program, args) = req.argv.split_first().context("empty argv")?;
-
-    if req.service && cfg!(windows) {
-        // Forwarding needs loopback into the job's AppContainer, which Windows blocks.
-        bail!("servers that keep running are not supported on a Windows PC yet");
-    }
 
     let path = job_path().await;
     // Resolve the program on the job's PATH; Command looks it up on the agent's own.
@@ -315,7 +331,10 @@ async fn execute(
     };
 
     if let Some(sink) = pid_sink {
-        let _ = sink.send(pid);
+        #[cfg(windows)]
+        let _ = sink.send(StartedJob { pid, job: group.handle() });
+        #[cfg(not(windows))]
+        let _ = sink.send(StartedJob { pid });
     }
     let _ = tx.send(AgentMsg::Started).await;
 
@@ -827,6 +846,42 @@ mod tests {
         )
         .await;
         assert!(!exited(&msgs).1);
+    }
+
+    /// pnpm links each package into `node_modules` from its store, and the package finds
+    /// its own dependencies beside the link's target. That only works when Node resolves
+    /// the link, which it can inside the AppContainer once the folders above can be read.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_node_resolves_pnpm_links() {
+        if !find_program("node", std::env::var_os("PATH").as_deref(), Path::new(".")).is_absolute() {
+            return eprintln!("node is not installed; skipping");
+        }
+        let files = [
+            ("main.js", "console.log(require('a'))"),
+            ("node_modules/.pnpm/a@1/node_modules/a/index.js", "module.exports = 'a needs ' + require('b')"),
+            ("node_modules/.pnpm/a@1/node_modules/b/index.js", "module.exports = 'b'"),
+        ];
+        let script = "mklink /J node_modules\\a node_modules\\.pnpm\\a@1\\node_modules\\a >NUL && node main.js";
+        let msgs = run_within(request(&["cmd", "/c", script], None), archive(&files)).await;
+        assert!(output(&msgs, OutputStream::Stdout).contains("a needs b"), "{}", output(&msgs, OutputStream::Stderr));
+    }
+
+    /// Global packages npm installs (yarn, pnpm) come with a batch file that only starts
+    /// their script with Node; the runner starts the script directly.
+    #[cfg(windows)]
+    #[test]
+    fn windows_runs_npm_shims_with_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("node_modules").join("yarn").join("bin");
+        std::fs::create_dir_all(&script).unwrap();
+        std::fs::write(script.join("yarn.js"), "").unwrap();
+        std::fs::write(dir.path().join("node.exe"), "").unwrap();
+        let shim = dir.path().join("yarn.cmd");
+        std::fs::write(&shim, "@ECHO off\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"  \"%dp0%\\node_modules\\yarn\\bin\\yarn.js\" %*\r\n").unwrap();
+        let (application, line) = crate::sandbox_windows::command_line_for_tests(&shim, &["install".into()], Path::new("C:\\work"));
+        assert_eq!(application, dir.path().join("node.exe").display().to_string());
+        assert!(line.ends_with("yarn.js install"), "{line}");
     }
 
     #[cfg(windows)]

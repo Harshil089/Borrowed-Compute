@@ -1004,6 +1004,12 @@ fn stays_in_background(app: &AppHandle) -> bool {
 }
 
 fn main() {
+    // This program also runs as a relay inside a job's AppContainer and as the elevated
+    // one-time setup on Windows.
+    #[cfg(windows)]
+    if let Some(code) = bc_agent::sandbox_windows::helper_main() {
+        std::process::exit(code);
+    }
     // Keys and the session token belong in the OS keychain, not in files.
     bc_net::use_keychain();
     let home = device_home();

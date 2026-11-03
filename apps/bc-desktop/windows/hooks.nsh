@@ -5,6 +5,8 @@
 ; to kill Borrowed Compute" and the update stops. Before that check, wait for this user's
 ; copy of the app to exit, and force it closed if it is still there after 10 seconds.
 
+!include FileFunc.nsh
+
 !macro BC_CLOSE_APP
   Push $R7
   Push $R8
@@ -51,4 +53,26 @@
 !macro NSIS_HOOK_PREUNINSTALL
   !insertmacro BC_CLOSE_APP
   !insertmacro BC_SET_EXE_ASIDE
+!macroend
+
+; The one-time setup that needs an administrator (the app's firewall rule for lending and
+; nearby discovery, and folder attributes Node needs inside a job's sandbox), on a fresh
+; install only: updates pass /UPDATE and should not ask again. The app checks first
+; whether anything is left to do, so UAC asks only when it is; declining is fine, and
+; turning on lending offers it again.
+!macro NSIS_HOOK_POSTINSTALL
+  Push $R0
+  Push $R1
+  ${GetParameters} $R0
+  ClearErrors
+  ${GetOptions} $R0 "/UPDATE" $R1
+  ${If} ${Errors}
+    nsExec::Exec `"$INSTDIR\${MAINBINARYNAME}.exe" --bc-setup-check`
+    Pop $R1
+    ${If} $R1 == 1
+      ExecShellWait "runas" "$INSTDIR\${MAINBINARYNAME}.exe" "--bc-setup" SW_HIDE
+    ${EndIf}
+  ${EndIf}
+  Pop $R1
+  Pop $R0
 !macroend

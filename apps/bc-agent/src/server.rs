@@ -435,25 +435,52 @@ async fn forward_stream(services: &Services, job_id: &str, mut send: SendStream,
         send.finish()?;
         bail!(reason);
     }
-    let tcp = match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
-        Ok(tcp) => tcp,
-        // Some servers listen on IPv6 localhost only.
-        Err(_) => tokio::net::TcpStream::connect(("::1", port)).await?,
-    };
-    let _ = tcp.set_nodelay(true);
-    send_msg(&mut send, &AgentMsg::Accepted { job_id: job_id.to_string() }).await?;
-    let (mut tcp_read, mut tcp_write) = tcp.into_split();
-    let upstream = async {
-        tokio::io::copy(&mut recv, &mut tcp_write).await?;
-        tokio::io::AsyncWriteExt::shutdown(&mut tcp_write).await
-    };
-    let downstream = async {
-        tokio::io::copy(&mut tcp_read, &mut send).await?;
-        send.finish().map_err(std::io::Error::other)
-    };
-    let (up, down) = tokio::join!(upstream, downstream);
-    up.and(down)?;
-    Ok(())
+    #[cfg(windows)]
+    {
+        // The agent cannot reach into the job's AppContainer over loopback, so a relay
+        // inside it does (`sandbox_windows::JobHandle::relay`).
+        let job = services.job(job_id).context("the service has ended")?;
+        let relayed = tokio::task::spawn_blocking(move || job.job.relay(port)).await??;
+        send_msg(&mut send, &AgentMsg::Accepted { job_id: job_id.to_string() }).await?;
+        let (mut input, mut output) = (tokio::fs::File::from_std(relayed.input), tokio::fs::File::from_std(relayed.output));
+        let upstream = async {
+            tokio::io::copy(&mut recv, &mut input).await?;
+            // Closing the pipe tells the relay the client is done sending.
+            tokio::io::AsyncWriteExt::flush(&mut input).await?;
+            drop(input);
+            Ok::<_, std::io::Error>(())
+        };
+        let downstream = async {
+            tokio::io::copy(&mut output, &mut send).await?;
+            send.finish().map_err(std::io::Error::other)
+        };
+        let (up, down) = tokio::join!(upstream, downstream);
+        drop(relayed.process);
+        up.and(down)?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let tcp = match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+            Ok(tcp) => tcp,
+            // Some servers listen on IPv6 localhost only.
+            Err(_) => tokio::net::TcpStream::connect(("::1", port)).await?,
+        };
+        let _ = tcp.set_nodelay(true);
+        send_msg(&mut send, &AgentMsg::Accepted { job_id: job_id.to_string() }).await?;
+        let (mut tcp_read, mut tcp_write) = tcp.into_split();
+        let upstream = async {
+            tokio::io::copy(&mut recv, &mut tcp_write).await?;
+            tokio::io::AsyncWriteExt::shutdown(&mut tcp_write).await
+        };
+        let downstream = async {
+            tokio::io::copy(&mut tcp_read, &mut send).await?;
+            send.finish().map_err(std::io::Error::other)
+        };
+        let (up, down) = tokio::join!(upstream, downstream);
+        up.and(down)?;
+        Ok(())
+    }
 }
 
 /// One invite request over [`bc_net::GUEST_ALPN`]: checks the invite, shows the guest a

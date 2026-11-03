@@ -4,8 +4,8 @@
 //! belongs to the agent instead: it has no timeout, keeps running when the PC disconnects
 //! or sleeps, and ends only when its process exits or it is stopped (by the device that
 //! started it, or from the Mac app). Its recent output is kept in memory, never on disk,
-//! so a client can attach later and see what it missed. While any service runs, the Mac
-//! is kept awake with `caffeinate`.
+//! so a client can attach later and see what it missed. While any service runs, the
+//! device is kept awake (`caffeinate` on a Mac, `SetThreadExecutionState` on Windows).
 //!
 //! Stopping a service drops its job, which kills the process group and deletes the
 //! workspace, the same guarantees as a cancelled job.
@@ -19,7 +19,7 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::task::AbortHandle;
 
 use crate::events::{AgentEvent, EventSender, JobEnd};
-use crate::runner::{run_job_with, RunnerConfig};
+use crate::runner::{run_job_with, RunnerConfig, StartedJob};
 
 /// Output kept per service for clients that attach later.
 const BACKLOG_BYTES: usize = 256 << 10;
@@ -32,13 +32,13 @@ pub struct Services {
 #[derive(Default)]
 struct Inner {
     running: HashMap<String, Entry>,
-    awake: Option<tokio::process::Child>,
+    awake: Option<Awake>,
 }
 
 struct Entry {
     info: ServiceInfo,
-    /// The job's process, which leads its process group.
-    pid: Option<u32>,
+    /// The running job, once it has started.
+    job: Option<StartedJob>,
     started: bool,
     backlog: VecDeque<AgentMsg>,
     backlog_bytes: usize,
@@ -91,9 +91,9 @@ impl Services {
             let services = guard.services.clone();
             let id = guard.job_id.clone();
             tokio::spawn(async move {
-                if let Ok(pid) = pid_rx.await {
+                if let Ok(job) = pid_rx.await {
                     if let Some(entry) = services.inner.lock().unwrap().running.get_mut(&id) {
-                        entry.pid = Some(pid);
+                        entry.job = Some(job);
                     }
                 }
             });
@@ -118,7 +118,7 @@ impl Services {
         });
         inner.running.insert(
             info.job_id.clone(),
-            Entry { info, pid: None, started: false, backlog: VecDeque::new(), backlog_bytes: 0, live, task: task.abort_handle() },
+            Entry { info, job: None, started: false, backlog: VecDeque::new(), backlog_bytes: 0, live, task: task.abort_handle() },
         );
         if inner.awake.is_none() {
             inner.awake = keep_awake();
@@ -172,11 +172,11 @@ impl Services {
     /// [`Services::list`] with the ports each service listens on.
     pub async fn list_with_ports(&self, client: Option<EndpointId>) -> Vec<ServiceInfo> {
         let mut list = self.list(client);
-        let pids: Vec<Option<u32>> = {
+        let jobs: Vec<Option<StartedJob>> = {
             let inner = self.inner.lock().unwrap();
-            list.iter().map(|s| inner.running.get(&s.job_id).and_then(|e| e.pid)).collect()
+            list.iter().map(|s| inner.running.get(&s.job_id).and_then(|e| e.job.clone())).collect()
         };
-        let ports = tokio::task::spawn_blocking(move || pids.into_iter().map(|p| p.map(listening_ports).unwrap_or_default()).collect::<Vec<_>>())
+        let ports = tokio::task::spawn_blocking(move || jobs.into_iter().map(|j| j.map(|j| j.listening_ports()).unwrap_or_default()).collect::<Vec<_>>())
             .await
             .unwrap_or_default();
         for (service, ports) in list.iter_mut().zip(ports) {
@@ -187,11 +187,15 @@ impl Services {
 
     /// Ports `job_id` listens on now; empty if it is not running.
     pub async fn ports(&self, job_id: &str) -> Vec<u16> {
-        let pid = self.inner.lock().unwrap().running.get(job_id).and_then(|e| e.pid);
-        match pid {
-            Some(pid) => tokio::task::spawn_blocking(move || listening_ports(pid)).await.unwrap_or_default(),
+        match self.job(job_id) {
+            Some(job) => tokio::task::spawn_blocking(move || job.listening_ports()).await.unwrap_or_default(),
             None => Vec::new(),
         }
+    }
+
+    /// The running job behind `job_id`, if it has started.
+    pub fn job(&self, job_id: &str) -> Option<StartedJob> {
+        self.inner.lock().unwrap().running.get(job_id).and_then(|e| e.job.clone())
     }
 
     fn record(&self, job_id: &str, msg: AgentMsg) {
@@ -229,7 +233,7 @@ impl Drop for EndGuard {
         let mut inner = self.services.inner.lock().unwrap();
         inner.running.remove(&self.job_id);
         if inner.running.is_empty() {
-            // kill_on_drop ends caffeinate, so the Mac may sleep again.
+            // Dropping it lets the device sleep again.
             inner.awake = None;
         }
         drop(inner);
@@ -242,10 +246,9 @@ impl Drop for EndGuard {
     }
 }
 
-/// TCP ports that any process in group `pgid` listens on, from `lsof`. Forwarding is
-/// limited to these, so a paired device reaches its own service and nothing else on the
-/// Mac's localhost.
-fn listening_ports(pgid: u32) -> Vec<u16> {
+/// TCP ports that any process in group `pgid` listens on, from `lsof`.
+#[cfg(not(windows))]
+pub(crate) fn listening_ports(pgid: u32) -> Vec<u16> {
     let out = std::process::Command::new("/usr/sbin/lsof")
         .args(["-nP", "-a", "-g", &pgid.to_string(), "-iTCP", "-sTCP:LISTEN", "-Fn"])
         .output();
@@ -260,9 +263,13 @@ fn listening_ports(pgid: u32) -> Vec<u16> {
     ports
 }
 
+/// Keeps the device awake while it lives.
+type Awake = Box<dyn Send>;
+
 /// Keeps the Mac from sleeping while the returned process lives: `-i` blocks idle sleep,
 /// `-s` system sleep on power, and `-w` ends it if the agent itself dies.
-fn keep_awake() -> Option<tokio::process::Child> {
+#[cfg(not(windows))]
+fn keep_awake() -> Option<Awake> {
     if !cfg!(target_os = "macos") {
         return None;
     }
@@ -272,6 +279,23 @@ fn keep_awake() -> Option<tokio::process::Child> {
         .spawn()
         .map_err(|e| eprintln!("could not keep the Mac awake: {e}"))
         .ok()
+        .map(|child| Box::new(child) as Awake)
+}
+
+/// Keeps the PC from sleeping until the returned value is dropped. The request belongs to
+/// the thread that makes it, so a thread of its own holds it.
+#[cfg(windows)]
+fn keep_awake() -> Option<Awake> {
+    use windows_sys::Win32::System::Power::{SetThreadExecutionState, ES_CONTINUOUS, ES_SYSTEM_REQUIRED};
+    let (done, wait) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        // SAFETY: plain flags for this thread.
+        unsafe { SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED) };
+        // Returns once the sender is dropped.
+        let _ = wait.recv();
+        unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
+    });
+    Some(Box::new(done))
 }
 
 #[cfg(all(test, unix))]
