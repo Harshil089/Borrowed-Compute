@@ -352,10 +352,19 @@ async fn sign_out_locally(state: &AppState, lend: &LendState) {
     lend.signed_in_or_out().await;
 }
 
-/// Checks that a Borrowed Compute cloud answers at `url`, without saving it.
+/// Normalizes a device code. The app pairs by code only; web addresses stay a `bc` option.
+fn device_code(input: &str) -> CmdResult<String> {
+    let url = bc_auth::normalize_cloud_url(input).map_err(err_chain)?;
+    if !url.starts_with("iroh://") {
+        return Err("That is not a device code. Copy the code from the other computer.".into());
+    }
+    Ok(url)
+}
+
+/// Checks that the account device with this code answers, without saving it.
 #[tauri::command]
 async fn test_cloud_url(url: String) -> CmdResult<String> {
-    let url = bc_auth::normalize_cloud_url(&url).map_err(err_chain)?;
+    let url = device_code(&url)?;
     CloudClient::new(&url, None).health().await.map_err(err_chain)?;
     Ok(url)
 }
@@ -364,6 +373,7 @@ async fn test_cloud_url(url: String) -> CmdResult<String> {
 /// out and signs in again there.
 #[tauri::command]
 async fn set_cloud_url(app: AppHandle, state: State<'_, AppState>, lend: State<'_, LendState>, url: String) -> CmdResult<String> {
+    let url = device_code(&url)?;
     let before = cloud_url_for(&state.home);
     let saved = save_cloud_url(&state.home, &url).map_err(err_chain)?;
     if saved != before {
