@@ -84,7 +84,7 @@
 .connect p.muted { font-size: 13px; }
 .address { display: flex; align-items: stretch; border-radius: var(--radius-sm); box-shadow: 0 0 0 1px var(--border-strong); overflow: hidden; }
 .address span { flex: 1; min-width: 0; padding: 10px 12px; background: var(--subtle); font: 500 12.5px/1.45 var(--mono); color: var(--ink); overflow-wrap: anywhere; -webkit-user-select: text; user-select: text; }
-.address .code { font-size: 12.5px; letter-spacing: 0; font-weight: 500; }
+.address .code { font-size: 12.5px; letter-spacing: 0; font-weight: 500; white-space: normal; }
 .address button { border-radius: 0; box-shadow: -1px 0 0 var(--border-strong); }
 .steps { margin: 0; padding-left: 20px; color: var(--ink-2); font-size: 13px; display: flex; flex-direction: column; gap: 4px; }
 

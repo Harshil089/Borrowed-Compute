@@ -290,29 +290,31 @@ $("nearby").addEventListener("click", (event) => {
   if (pick) switchToMac(pick.dataset.switchMac, pick.dataset.name);
 });
 
-// ---- Add a Mac: a nearby one, one by its code, or one someone shared ----
-function renderAddNearby() {
+// ---- Add a device: one of yours signs in with the account code; someone else's by invite ----
+const copyIcon = `<svg class="icon"><use href="#i-copy"/></svg>Copy`;
+function renderAdd() {
+  const code = codeOf(status.cloud_url);
+  $("add-account").innerHTML = code
+    ? `<span class="mono code">${esc(code)}</span><button data-copy="${esc(code)}">${copyIcon}</button>`
+    : `<span>Sign in first.</span>`;
+  // Only devices already on this account: picking another would mean switching accounts.
   const known = new Set(allMacs().map((m) => m.endpoint_id));
-  $("add-nearby").classList.toggle("hidden", !nearby.length);
-  $("add-nearby-list").innerHTML = nearby.map((n) =>
-    known.has(n.id) ? nearbyButton(n, "data-pick-mac", "Select") : nearbyButton(n, "data-switch-mac", "Switch")).join("");
+  const mine = nearby.filter((n) => known.has(n.id));
+  $("add-nearby").classList.toggle("hidden", !mine.length);
+  $("add-nearby-list").innerHTML = mine.map((n) => nearbyButton(n, "data-pick-mac", "Select")).join("");
 }
-$("add-open").addEventListener("click", () => { renderAddNearby(); $("add-dialog").classList.remove("hidden"); });
+$("add-open").addEventListener("click", () => { renderAdd(); $("add-dialog").classList.remove("hidden"); });
 $("add-close").addEventListener("click", () => $("add-dialog").classList.add("hidden"));
 $("add-nearby-list").addEventListener("click", (event) => {
   const own = event.target.closest("[data-pick-mac]");
-  const other = event.target.closest("[data-switch-mac]");
   $("add-dialog").classList.add("hidden");
   if (own) {
     // Already on the account: select it, and start pairing if it is not paired yet.
     const mac = allMacs().find((m) => m.endpoint_id === own.dataset.pickMac);
     if (mac) document.querySelector(`[data-mac="${CSS.escape(mac.name)}"]`)?.click();
     document.querySelector(`[data-pair="${CSS.escape(mac?.name || "")}"]`)?.click();
-  } else if (other) {
-    switchToMac(other.dataset.switchMac, other.dataset.name);
   }
 });
-$("add-code").addEventListener("click", () => { $("add-dialog").classList.add("hidden"); $("settings").click(); });
 $("join-open").addEventListener("click", () => $("add-dialog").classList.add("hidden"));
 
 function updateRunButton() {

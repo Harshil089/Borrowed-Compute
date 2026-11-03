@@ -329,13 +329,18 @@
     <div class="dialog">
       <div class="dialog-body">
         <h1 id="add-title" class="dialog-title">Add a device</h1>
+        <div class="field">
+          <span class="label">One of your computers</span>
+          <p class="muted">Install Borrowed Compute on it. When it asks where your account lives, paste this code and sign in. It then shows up in your list, on any network, and you pair it once.</p>
+          <div id="add-account" class="address"></div>
+        </div>
         <div id="add-nearby" class="field hidden">
-          <span class="label">On this network</span>
+          <span class="label">Already signed in, on this network</span>
           <div id="add-nearby-list" class="nearby-list"></div>
         </div>
-        <div class="add-options">
-          <button id="add-code" class="add-option"><b>Enter the account device's code</b><span>For one that is not on this network.</span></button>
-          <button id="join-open" class="add-option"><b>Use a device someone shared</b><span>Paste the invite its owner sent you.</span></button>
+        <div class="field">
+          <span class="label">Someone else's computer</span>
+          <button id="join-open" class="add-option"><b>Paste an invite</b><span>Its owner makes one under Sharing in Borrowed Compute. You stay signed in to your own account.</span></button>
         </div>
       </div>
       <div class="dialog-actions"><button id="add-close">Close</button></div>
