@@ -419,6 +419,9 @@ pub fn spawn(
     let mut env = env.to_vec();
     if confinement != Confinement::Off {
         env.push(("NODE_OPTIONS".into(), node_options(&env, paths_resolve)));
+        // Windows does not let an AppContainer create junctions, which pnpm links every
+        // package with; its hoisted layout copies packages into place like npm instead.
+        env.push(("npm_config_node_linker".into(), "hoisted".into()));
     }
     let (pid, process) = launch(
         &shared,
@@ -709,18 +712,24 @@ fn resolved_folders(workspace: &Path, path: Option<&OsStr>) -> Vec<PathBuf> {
 /// attributes: not a listing, not the files inside. Returns the folders this process may
 /// not change, such as `C:\` and `C:\Users`, which need [`setup`] as an administrator.
 fn open_folder_attributes(capability: PSID, folders: &[PathBuf]) -> Vec<PathBuf> {
-    static OPEN: AtomicBool = AtomicBool::new(false);
-    if OPEN.load(Ordering::Relaxed) {
-        return Vec::new();
-    }
+    // Folders already open, so each job checks only what is new to it.
+    static OPEN: std::sync::Mutex<std::collections::BTreeSet<PathBuf>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
     let mut above: Vec<&Path> = folders.iter().flat_map(|f| f.ancestors().skip(1)).collect();
     above.retain(|d| d.exists());
     above.sort();
     above.dedup();
-    let missing: Vec<PathBuf> =
-        above.into_iter().filter(|dir| ensure_access(dir, capability, FILE_READ_ATTRIBUTES).is_err()).map(Path::to_path_buf).collect();
-    if missing.is_empty() {
-        OPEN.store(true, Ordering::Relaxed);
+    let mut open = OPEN.lock().unwrap();
+    let mut missing = Vec::new();
+    for dir in above {
+        if open.contains(dir) {
+            continue;
+        }
+        match ensure_access(dir, capability, FILE_READ_ATTRIBUTES) {
+            Ok(()) => {
+                open.insert(dir.to_path_buf());
+            }
+            Err(_) => missing.push(dir.to_path_buf()),
+        }
     }
     missing
 }
@@ -1141,6 +1150,12 @@ fn check(ok: BOOL) -> io::Result<()> {
     } else {
         Ok(())
     }
+}
+
+/// The script a Node shim runs, for the runner's tests.
+#[cfg(test)]
+pub(crate) fn shim_script_for_tests(program: &Path) -> Option<PathBuf> {
+    node_shim(program, std::env::var_os("PATH").as_deref()).map(|(_, script)| script)
 }
 
 /// [`command_line`] as strings, for the runner's tests.

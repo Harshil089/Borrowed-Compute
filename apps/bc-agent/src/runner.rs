@@ -848,23 +848,35 @@ mod tests {
         assert!(!exited(&msgs).1);
     }
 
-    /// pnpm links each package into `node_modules` from its store, and the package finds
-    /// its own dependencies beside the link's target. That only works when Node resolves
-    /// the link, which it can inside the AppContainer once the folders above can be read.
+    /// pnpm links packages with junctions, which Windows does not let an AppContainer
+    /// create, so sandboxed jobs ask pnpm for its hoisted layout.
     #[cfg(windows)]
     #[tokio::test]
-    async fn windows_node_resolves_pnpm_links() {
-        if !find_program("node", std::env::var_os("PATH").as_deref(), Path::new(".")).is_absolute() {
-            return eprintln!("node is not installed; skipping");
+    async fn windows_pnpm_uses_its_hoisted_layout() {
+        let msgs = run_within(request(&["cmd", "/c", "echo %npm_config_node_linker%"], None), Vec::new()).await;
+        assert!(output(&msgs, OutputStream::Stdout).contains("hoisted"), "{msgs:?}");
+    }
+
+    /// yarn and pnpm installed through npm run from their shims where this machine has
+    /// them and opens their files to AppContainers (as `windows_runs_npm_from_program_files`).
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_runs_global_yarn_and_pnpm() {
+        for tool in ["yarn", "pnpm"] {
+            let program = find_program(tool, std::env::var_os("PATH").as_deref(), Path::new("."));
+            let Some(script) = crate::sandbox_windows::shim_script_for_tests(&program) else {
+                eprintln!("{tool} is not installed through npm here; skipping");
+                continue;
+            };
+            let read = format!("require('fs').readFileSync({:?})", script.display().to_string());
+            let node = run_within(request(&["node", "-e", &read], None), Vec::new()).await;
+            if exited(&node).0 != Some(0) {
+                eprintln!("{tool}'s files are not open to AppContainers on this machine; skipping");
+                continue;
+            }
+            let msgs = run_within(request(&[tool, "--version"], None), Vec::new()).await;
+            assert_eq!(exited(&msgs).0, Some(0), "{tool}: {}", output(&msgs, OutputStream::Stderr));
         }
-        let files = [
-            ("main.js", "console.log(require('a'))"),
-            ("node_modules/.pnpm/a@1/node_modules/a/index.js", "module.exports = 'a needs ' + require('b')"),
-            ("node_modules/.pnpm/a@1/node_modules/b/index.js", "module.exports = 'b'"),
-        ];
-        let script = "mklink /J node_modules\\a node_modules\\.pnpm\\a@1\\node_modules\\a >NUL && node main.js";
-        let msgs = run_within(request(&["cmd", "/c", script], None), archive(&files)).await;
-        assert!(output(&msgs, OutputStream::Stdout).contains("a needs b"), "{}", output(&msgs, OutputStream::Stderr));
     }
 
     /// Global packages npm installs (yarn, pnpm) come with a batch file that only starts
