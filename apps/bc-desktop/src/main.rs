@@ -1143,6 +1143,7 @@ fn main() {
             lend::approve_guest,
             lend::remove_guest,
             lend::recent_jobs,
+            lend::cpu_load,
             lend::open_logs,
             lend::get_settings,
             lend::set_run_in_background

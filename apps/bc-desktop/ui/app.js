@@ -74,7 +74,45 @@ function setRoute() {
   $("route-from-name").textContent = myName || "This PC";
   $("route-to").textContent = selectedMac ? deviceCode(selectedMac) : "DEV";
   $("route-to-name").textContent = selectedMac || "Choose a device";
+  $("node-from-code").textContent = deviceCode(myName || "PC");
+  $("node-from-name").textContent = myName || "";
+  $("node-to-code").textContent = selectedMac ? deviceCode(selectedMac) : "DEV";
+  $("node-to-name").textContent = selectedMac || "Choose a device";
+  const mac = allMacs().find((d) => d.name === selectedMac);
+  $("node-to-kind").textContent = !mac ? "" : mac.shared ? "Shared with you" : `${mac.kind === "windows" ? "PC" : "Mac"} · ${mac.online ? "online" : "offline"}`;
 }
+
+// The route strip: the dot travels out with the upload and back with the result, and the
+// computer the job is on lights up.
+let routeAt = "idle";
+function setRouteLeg(leg, failed) {
+  const fill = $("wire-fill"), packet = $("packet");
+  const still = window.motion?.reduced() ?? false;
+  const wire = (f, dur) => { fill.style.setProperty("--dur", `${still ? 0 : dur}ms`); fill.style.setProperty("--f", String(f)); };
+  const travel = (from, to, back, dur) => {
+    packet.classList.toggle("back", back);
+    packet.style.setProperty("--dur", "0ms");
+    packet.style.setProperty("--x", String(from));
+    void packet.offsetWidth;
+    packet.classList.add("on");
+    packet.style.setProperty("--dur", `${still ? 0 : dur}ms`);
+    packet.style.setProperty("--x", String(to));
+    clearTimeout(packet.hideTimer);
+    packet.hideTimer = setTimeout(() => packet.classList.remove("on"), still ? 0 : dur);
+  };
+  $("node-from").classList.toggle("active", leg === "pack" || leg === "upload");
+  $("node-to").classList.toggle("active", leg === "run" && !failed);
+  if (leg === "idle" || leg === "pack") { wire(0, 0); packet.classList.remove("on"); }
+  else if (leg === "upload" && routeAt !== "upload") { wire(1, 900); travel(0, 1, false, 900); }
+  else if (leg === "run") wire(1, 300);
+  else if (leg === "done" && routeAt !== "done") { wire(1, 300); travel(1, 0, true, 500); }
+  routeAt = leg;
+}
+$("relay-only").addEventListener("change", () => {
+  const relay = $("relay-only").checked;
+  $("wire").classList.toggle("relay", relay);
+  $("wire-label").textContent = relay ? "via relay · encrypted" : "direct · encrypted";
+});
 function setLeg(leg, failed = false) {
   const legs = $("legs");
   const at = leg === "idle" ? -1 : leg === "done" ? LEGS.length : LEGS.indexOf(leg);
@@ -87,6 +125,7 @@ function setLeg(leg, failed = false) {
   // The marker sits at the start of the active phase, or at the Mac once the run is done.
   const p = leg === "idle" ? 0 : leg === "done" ? 1 : (at + 0.5) / LEGS.length;
   legs.style.setProperty("--p", String(p));
+  setRouteLeg(leg, failed);
 }
 
 function showError(message) {
@@ -231,6 +270,7 @@ function renderMacs() {
   setRoute();
   updateRunButton();
   renderNearby();
+  window.motion?.syncNav();
 }
 
 // ---- Devices on this network ----
@@ -321,7 +361,7 @@ function updateRunButton() {
   const mac = allMacs().find((d) => d.name === selectedMac);
   const paired = mac && pairingFor(mac)?.status === "approved";
   $("run").disabled = running || !selectedMac || !$("folder").value.trim();
-  $("run").textContent = selectedMac ? `Run on ${selectedMac}` : "Run";
+  $("run-label").innerHTML = `${esc(selectedMac ? `Run on ${selectedMac}` : "Run")} <kbd>${window.motion?.mod ?? "⌘"}↵</kbd>`;
   if (selectedMac && mac && !paired) {
     $("run").title = `Pair with ${selectedMac} first`;
   } else {
@@ -889,12 +929,12 @@ function renderResult(r) {
   const u = r.usage;
   const [cls, word] = stampFor(r);
   const cores = u && u.wall_ms > 0 ? ((u.user_ms + u.system_ms) / u.wall_ms).toFixed(1) : null;
-  const row = (label, value) => `<dt>${label}</dt><dd>${value}</dd>`;
+  const row = (label, value) => `<dt>${label}</dt><dd data-count>${value}</dd>`;
   $("result").innerHTML = `
     <div class="result-top">
       <div class="result-time">
         <span class="label">${u ? `Ran on ${esc(selectedMac || "the other computer")}` : "Total"}</span>
-        <strong>${fig(u ? u.wall_ms : t.total_ms)}</strong>
+        <strong data-count>${fig(u ? u.wall_ms : t.total_ms)}</strong>
       </div>
       <span class="stamp ${cls}">${esc(word)}</span>
     </div>
@@ -915,6 +955,30 @@ function renderResult(r) {
       ${row("First out", fig(t.first_log_ms))}
     </dl>`;
   $("result").classList.remove("hidden");
+  window.motion?.countUp($("result"));
+}
+
+// While a run or server is up, the Run button becomes its clock.
+let runTimer = null;
+function clockText(secs) {
+  const s = Math.max(0, Math.floor(secs)), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  const ss = String(s % 60).padStart(2, "0");
+  return h ? `${h}:${String(m).padStart(2, "0")}:${ss}` : `${m}:${ss}`;
+}
+function startRunTimer(service, sinceMs = Date.now()) {
+  const tick = () => {
+    const secs = (Date.now() - sinceMs) / 1000;
+    $("run-time").textContent = service ? `Serving · ${clockText(secs)}` : secs < 60 ? `${secs.toFixed(1)} s` : clockText(secs);
+  };
+  tick();
+  clearInterval(runTimer);
+  runTimer = setInterval(tick, service ? 1000 : 100);
+  $("run").classList.add("is-running");
+}
+function stopRunTimer() {
+  clearInterval(runTimer);
+  runTimer = null;
+  $("run").classList.remove("is-running");
 }
 
 function sizeOf(n) {
@@ -933,8 +997,9 @@ async function runJob() {
   consoleEl.textContent = "";
   atBottom = true;
   $("result").classList.add("hidden");
-  $("run").classList.add("hidden");
   const service = $("as-service").checked;
+  startRunTimer(service);
+  updateRunButton();
   $("cancel").textContent = service ? "Detach" : "Cancel run";
   $("cancel").title = service ? "Stop watching. The service keeps running on the other computer." : "";
   $("cancel").classList.remove("hidden");
@@ -971,7 +1036,7 @@ async function runJob() {
     showError(String(e));
   } finally {
     running = false;
-    $("run").classList.remove("hidden");
+    stopRunTimer();
     $("cancel").classList.add("hidden");
     updateRunButton();
     loadServices();
@@ -988,7 +1053,9 @@ async function watchService(jobId) {
   atBottom = true;
   renderServices();
   $("result").classList.add("hidden");
-  $("run").classList.add("hidden");
+  const started = services.find((s) => s.job_id === jobId)?.started_at;
+  startRunTimer(true, started ? started * 1000 : Date.now());
+  updateRunButton();
   $("cancel").textContent = "Detach";
   $("cancel").title = "Stop watching. The service keeps running on the other computer.";
   $("cancel").classList.remove("hidden");
@@ -1005,7 +1072,7 @@ async function watchService(jobId) {
     showError(String(e));
   } finally {
     running = false;
-    $("run").classList.remove("hidden");
+    stopRunTimer();
     $("cancel").classList.add("hidden");
     updateRunButton();
     loadServices();
@@ -1013,6 +1080,33 @@ async function watchService(jobId) {
 }
 
 $("run").addEventListener("click", runJob);
+document.addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && !$("run-view").classList.contains("hidden") && !$("run").disabled) {
+    e.preventDefault();
+    runJob();
+  }
+});
+
+// The command palette's Use-side entries: devices to run on, then actions.
+window.motion?.addCommands(() => {
+  if (!status?.signed_in) return [];
+  const runOn = allMacs().map((m) => ({
+    group: "Run on",
+    label: m.name,
+    sub: m.shared ? "Shared with you" : `${m.kind === "windows" ? "PC" : "Mac"} · ${m.online ? "online" : "offline"}`,
+    icon: "i-laptop",
+    run: () => selectMac(m.name),
+  }));
+  const actions = [];
+  if (!$("run").disabled) actions.push({ group: "Actions", label: `Run ${$("command").value.trim() || "the folder's command"}`, sub: `${window.motion.mod}↵`, icon: "i-plane", run: runJob });
+  actions.push(
+    { group: "Actions", label: "Choose a project folder", icon: "i-folder", run: () => $("choose").click() },
+    { group: "Actions", label: "Add a device", icon: "i-plus", run: () => $("add-open").click() },
+    { group: "Actions", label: "Check for updates", icon: "i-down", run: () => $("updates").click() },
+    { group: "Actions", label: "Sign out", icon: "i-out", run: () => $("signout").click() },
+  );
+  return runOn.concat(actions);
+});
 $("cancel").addEventListener("click", () => { $("cancel").disabled = true; invoke("cancel_job"); });
 $("clear").addEventListener("click", () => {
   consoleEl.textContent = "";

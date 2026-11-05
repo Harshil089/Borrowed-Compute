@@ -12,7 +12,7 @@
 <body>
   <svg class="sprite" aria-hidden="true">
     <symbol id="i-mark" viewBox="0 0 32 32">
-      <rect width="32" height="32" rx="8" fill="#635bff"/>
+      <rect width="32" height="32" rx="8" fill="#111216"/>
       <rect x="9.5" y="9.5" width="13" height="13" rx="2.5" fill="none" stroke="#fff" stroke-width="2"/>
       <path d="M13 6.5v3M19 6.5v3M13 22.5v3M19 22.5v3M6.5 13h3M6.5 19h3M22.5 13h3M22.5 19h3" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
       <rect x="13.5" y="13.5" width="5" height="5" rx="1" fill="#fff"/>
@@ -71,7 +71,8 @@
 
   <!-- Signed in -->
   <div id="app-view" class="app hidden">
-    <aside class="sidebar">
+    <aside class="sidebar" id="sidebar">
+      <div class="nav-pill" id="nav-pill" aria-hidden="true"></div>
       <div class="side-brand brand"><svg><use href="#i-mark"/></svg><span class="wordmark">Borrowed Compute</span></div>
 
       <div class="side-section">
@@ -129,6 +130,11 @@
         <div id="error" class="banner bad hidden"></div>
 
         <section class="card run">
+          <div class="route" aria-hidden="true">
+            <div class="node" id="node-from"><span class="node-ico" id="node-from-code">PC</span><span class="node-text"><b>This computer</b><small id="node-from-name"></small></span></div>
+            <div class="wire" id="wire"><span class="wire-label" id="wire-label">direct · encrypted</span><i class="wire-fill" id="wire-fill"></i><i class="packet" id="packet"></i></div>
+            <div class="node to" id="node-to"><span class="node-ico" id="node-to-code">DEV</span><span class="node-text"><b id="node-to-name">Choose a device</b><small id="node-to-kind"></small></span></div>
+          </div>
           <div class="run-fields">
             <label class="field" for="folder">
               <span class="label">Project folder</span>
@@ -165,7 +171,7 @@
               <span id="hint" class="hint"></span>
             </div>
             <button id="cancel" class="danger hidden">Cancel</button>
-            <button id="run" class="primary run-btn">Run</button>
+            <button id="run" class="primary run-btn"><span class="rb-idle" id="run-label">Run</span><span class="rb-live"><span class="spinner"></span><span id="run-time">0.0 s</span></span></button>
           </div>
         </section>
 
@@ -202,26 +208,34 @@
           <div id="requests" class="requests"></div>
         </section>
 
-        <section class="card live-run">
+        <section class="card live-run" id="live-run">
           <div class="card-head">
-            <h2 class="heading">Current run</h2>
+            <h2 class="heading" id="live-heading">Current run</h2>
             <div class="tabs"><span id="arr-tab" class="tab red">Waiting</span><span id="arr-date" class="tab"></span></div>
           </div>
-          <div class="card-body live-body">
-            <div class="route-line">
-              <span id="arr-from" class="hidden">PC</span><span id="arr-to" class="hidden">MAC</span>
-              <span id="arr-from-name" class="route-name">Another device</span><span class="arrow">→</span><span id="arr-to-name" class="route-name">This computer</span>
+          <div class="live-grid">
+            <div class="card-body live-body">
+              <div class="route-line">
+                <span id="arr-from" class="hidden">PC</span><span id="arr-to" class="hidden">MAC</span>
+                <span id="arr-from-name" class="route-name">Another device</span><span class="arrow">→</span><span id="arr-to-name" class="route-name">This computer</span>
+              </div>
+              <div class="arr-run">
+                <span id="arr-cmd" class="arr-cmd">No runs yet. When a paired device sends one, it shows here live.</span>
+                <span id="arr-clock" class="arr-clock"></span>
+              </div>
+              <ol id="arr-legs" class="legs idle" aria-label="Latest run">
+                <li data-leg="upload"><span>Upload</span></li>
+                <li data-leg="run"><span>Run</span></li>
+                <li data-leg="return"><span>Return</span></li>
+                <span class="jet" aria-hidden="true"></span>
+              </ol>
             </div>
-            <div class="arr-run">
-              <span id="arr-cmd" class="arr-cmd">No runs yet. When a paired device sends one, it shows here live.</span>
-              <span id="arr-clock" class="arr-clock"></span>
+            <div class="cores-side">
+              <div class="cores-head"><span id="cores-title">Cores on this computer</span><span id="cores-busy" class="num">idle</span></div>
+              <div id="cores" class="cores" aria-hidden="true"></div>
+              <div class="heat-legend" id="heat-legend"><span data-t="low" class="on">Light</span><span data-t="mid">Medium</span><span data-t="high">Heavy</span></div>
+              <p class="cores-note">Measured once a second across this computer while a run or server is up.</p>
             </div>
-            <ol id="arr-legs" class="legs idle" aria-label="Latest run">
-              <li data-leg="upload"><span>Upload</span></li>
-              <li data-leg="run"><span>Run</span></li>
-              <li data-leg="return"><span>Return</span></li>
-              <span class="jet" aria-hidden="true"></span>
-            </ol>
           </div>
           <div id="arr-stub" class="arr-stub hidden"></div>
         </section>
@@ -419,6 +433,7 @@
     </div>
   </div>
 
+  <script src="motion.js"></script>
   <script src="app.js"></script>
   <script src="lend.js"></script>
 </body>
