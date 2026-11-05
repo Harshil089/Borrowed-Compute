@@ -4,6 +4,7 @@ pub mod autofix;
 pub mod detect;
 pub mod flows;
 pub mod forward;
+pub mod mesh;
 pub mod pack;
 pub mod route;
 pub mod run;

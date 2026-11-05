@@ -27,6 +27,10 @@ pub fn relay_map(url: &str) -> Result<RelayMap> {
 /// apart from the job protocol so adding it changed nothing for existing devices.
 pub const GUEST_ALPN: &[u8] = b"borrowed-compute/guest/1";
 
+/// ALPN for several devices working as one (`bc-mesh`): link probes and pipeline stages.
+/// Kept apart from the job protocol so it versions on its own.
+pub const MESH_ALPN: &[u8] = b"borrowed-compute/mesh/1";
+
 /// ALPN for the job protocol. The version suffix tracks [`wire::PROTOCOL_VERSION`].
 pub const JOB_ALPN: &[u8] = b"borrowed-compute/job/2";
 
@@ -44,7 +48,7 @@ pub struct NetConfig {
 }
 
 /// Binds an endpoint with this device's key, ready to dial and accept job connections,
-/// connections to the Mac's cloud and invite requests.
+/// connections to the Mac's cloud, invite requests and mesh connections.
 ///
 /// When this process already runs an agent with the same key ([`share_endpoint`]), that
 /// endpoint comes back instead: two endpoints with one key push each other off the relay.
@@ -53,7 +57,7 @@ pub async fn bind(secret: SecretKey, config: NetConfig) -> Result<Endpoint> {
     if let Some(shared) = SHARED.lock().unwrap().as_ref().filter(|e| e.id() == secret.public()) {
         return Ok(shared.clone());
     }
-    bind_with(secret, config, vec![JOB_ALPN.to_vec(), CLOUD_ALPN.to_vec(), GUEST_ALPN.to_vec()]).await
+    bind_with(secret, config, vec![JOB_ALPN.to_vec(), CLOUD_ALPN.to_vec(), GUEST_ALPN.to_vec(), MESH_ALPN.to_vec()]).await
 }
 
 /// The endpoint the agent in this process listens on, which a device that both lends and

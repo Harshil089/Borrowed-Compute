@@ -104,6 +104,28 @@ enum Command {
         #[arg(long)]
         to: Option<String>,
     },
+    /// Use several paired devices at once: measure them, and plan a model across them.
+    Mesh {
+        #[command(subcommand)]
+        action: MeshAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum MeshAction {
+    /// Measure every paired device at once: path, round trip, upload rate, memory.
+    Probe,
+    /// Show where each part of a model would run on your paired devices, and how fast.
+    Plan {
+        /// A model name; run without one to list them.
+        model: Option<String>,
+        /// Serve many requests at once instead of one conversation as fast as possible.
+        #[arg(long)]
+        throughput: bool,
+        /// Tokens accepted per pipeline pass with speculative decoding (1 = off).
+        #[arg(long, default_value_t = 1.0)]
+        speculate: f64,
+    },
 }
 
 #[tokio::main]
@@ -338,6 +360,75 @@ async fn main() -> Result<()> {
             }
             std::process::exit(outcome.exit.status());
         }
+        Command::Mesh { action } => mesh(&cloud, &key_path, action).await?,
+    }
+    Ok(())
+}
+
+async fn mesh(cloud: &CloudClient, key_path: &std::path::Path, action: MeshAction) -> Result<()> {
+    use bc_mesh::plan::Goal;
+    let model = match &action {
+        MeshAction::Plan { model: None, .. } => {
+            for m in bc_mesh::plan::catalog() {
+                let gb = (m.layer_bytes * m.layers as u64 + m.extra_bytes) as f64 / (1u64 << 30) as f64;
+                println!("{:<16} {:>4} layers  {gb:>6.1} GB (4-bit)", m.name, m.layers);
+            }
+            return Ok(());
+        }
+        MeshAction::Plan { model: Some(name), .. } => {
+            Some(bc_cli::mesh::find_model(name).with_context(|| format!("unknown model {name:?}; run `bc mesh plan` for the list"))?)
+        }
+        MeshAction::Probe => None,
+    };
+    let key = load_or_create_key(key_path)?;
+    let me = key.public().to_string();
+    let targets = bc_cli::mesh::paired_devices(signed_in(cloud)?, &me).await?;
+    if targets.is_empty() {
+        bail!("this device is not paired with any device yet; pair with `bc pair <device>`");
+    }
+    let endpoint = bc_net::bind(key, mac_net(cloud, false).await).await?;
+    println!("Measuring {} devices at once…", targets.len());
+    let devices = bc_cli::mesh::probe_all(&endpoint, targets).await;
+    bc_net::release(endpoint).await;
+    let gb = |b: u64| b as f64 / (1u64 << 30) as f64;
+    for d in &devices {
+        match &d.report {
+            Ok(r) => println!(
+                "{:<20} {:<6} {:>7.1} ms  {:>8.1} Mbit/s up  {:>5.1}/{:<5.1} GB free  {:>5.1} GB/s memory  {}",
+                d.name,
+                if r.via_relay { "relay" } else { "direct" },
+                r.rtt_ms,
+                r.up_bytes_s * 8.0 / 1e6,
+                gb(r.device.mem_available),
+                gb(r.device.mem_total),
+                r.device.mem_bw / 1e9,
+                r.device.os,
+            ),
+            Err(e) => println!("{:<20} unreachable: {e}", d.name),
+        }
+    }
+    let (Some(model), MeshAction::Plan { throughput, speculate, .. }) = (model, action) else { return Ok(()) };
+    let goal = if throughput { Goal::Throughput } else { Goal::Latency };
+    let (plan, usable) = bc_cli::mesh::plan_for(&model, &devices, goal, speculate);
+    if plan.pipelines.is_empty() {
+        bail!("{} does not fit in the free memory of these devices together", model.name);
+    }
+    println!();
+    for (i, p) in plan.pipelines.iter().enumerate() {
+        println!("Pipeline {}:", i + 1);
+        for s in &p.stages {
+            println!("  {:<20} layers {:>3}..{:<3}", usable[s.device].name, s.layers.start, s.layers.end);
+        }
+        println!(
+            "  {:.0} ms a token for one conversation ({:.0} ms of it network), {:.1} tokens/s with every stage busy, {:.0} ms network per 1000 prompt tokens",
+            p.token_ms, p.network_ms, p.tokens_per_s, p.prefill_net_ms_per_1k
+        );
+    }
+    if plan.pipelines.len() > 1 {
+        println!("{:.1} tokens/s across {} replicas", plan.tokens_per_s(), plan.pipelines.len());
+    }
+    for &d in &plan.unused {
+        println!("Not needed: {}", usable[d].name);
     }
     Ok(())
 }

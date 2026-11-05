@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 bc-proto.workspace = true
 bc-net.workspace = true
+bc-mesh.workspace = true
 bc-auth.workspace = true
 serde_json.workspace = true
 serde.workspace = true

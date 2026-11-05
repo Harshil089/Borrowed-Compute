@@ -1,0 +1,22 @@
+[package]
+name = "bc-mesh"
+description = "Several devices working as one: link probes, placement planning and pipelined activation transport for Borrowed Compute."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bc-proto.workspace = true
+bc-net.workspace = true
+iroh.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_bytes.workspace = true
+rand.workspace = true
+sysinfo = { version = "0.37", default-features = false, features = ["system"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+
+[dev-dependencies]
+bc-net = { path = "../bc-net", features = ["test-utils"] }
+iroh-relay = { workspace = true, features = ["server", "test-utils"] }
