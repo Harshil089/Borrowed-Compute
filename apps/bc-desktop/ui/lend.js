@@ -25,6 +25,7 @@ const seenRequests = new Set();
 const ARR_LEGS = ["upload", "run", "return"];
 let arrivalsKey = null;
 let liveSince = null;
+let endedAt = null; // when the last run on the card ended
 
 function setArrivalLegs(at, failed) {
   const legs = $("arr-legs");
@@ -63,6 +64,7 @@ function renderArrivals() {
     $("arr-clock").textContent = "";
     $("arr-stub").classList.add("hidden");
     liveSince = null;
+    endedAt = null;
     setArrivalLegs(-1, false);
     return;
   }
@@ -77,15 +79,18 @@ function renderArrivals() {
     $("arr-tab").textContent = "Running";
     $("arr-stub").classList.add("hidden");
     liveSince = job.started_ms;
+    endedAt = null;
     tickClock();
     setArrivalLegs(1, false);
     return;
   }
 
   liveSince = null;
+  endedAt = job.finished_ms || null;
   const [cls, word] = jobState(job);
   $("arr-tab").textContent = word;
-  $("arr-clock").textContent = job.finished_ms ? ago(job.finished_ms) : "";
+  if (!endedAt) $("arr-clock").textContent = "";
+  tickClock();
   const landed = cls === "ok";
   setArrivalLegs(landed ? ARR_LEGS.length : 1, !landed);
   const u = job.end.usage;
@@ -107,6 +112,7 @@ function renderArrivals() {
 
 function renderServing(svc) {
   liveSince = svc.started_at * 1000;
+  endedAt = null;
   tickClock();
   const key = `svc:${svc.job_id}:${svc.ports.join(",")}`;
   if (key === arrivalsKey) return;
@@ -127,7 +133,15 @@ function renderServing(svc) {
   stub.classList.remove("hidden", "arrived");
 }
 
+// Once a run ends, the figure counts the time since, so it never sits at "just now".
 function tickClock() {
+  if (liveSince == null && endedAt != null) {
+    const s = (Date.now() - endedAt) / 1000;
+    $("arr-clock").innerHTML = s < 86400
+      ? `${esc(window.motion.since(s))}<i>ago</i>`
+      : esc(new Date(endedAt).toLocaleDateString());
+    return;
+  }
   if (liveSince == null) return;
   const s = Math.max(0, Math.round((Date.now() - liveSince) / 1000));
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
@@ -190,13 +204,6 @@ function showError(message) {
   box.classList.toggle("hidden", !message);
 }
 
-function ago(ms) {
-  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
-  if (s < 60) return "just now";
-  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
-  return new Date(ms).toLocaleDateString();
-}
 
 // Three-letter codes, like airport codes: initials of a multi-word name, else its first letters.
 function deviceCode(name) {

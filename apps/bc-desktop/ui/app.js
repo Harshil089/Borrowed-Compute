@@ -135,10 +135,9 @@ function showError(message) {
 
 function ago(secs) {
   if (secs == null) return "never seen";
-  if (secs < 120) return `seen ${secs}s ago`;
-  if (secs < 7200) return `seen ${Math.floor(secs / 60)} min ago`;
-  if (secs < 172800) return `seen ${Math.floor(secs / 3600)} h ago`;
-  return `seen ${Math.floor(secs / 86400)} days ago`;
+  if (secs < 86400) return `seen ${window.motion.since(secs)} ago`;
+  const days = Math.floor(secs / 86400);
+  return `seen ${days} ${days === 1 ? "day" : "days"} ago`;
 }
 
 // Signed out but with a Mac someone shared: the app works as a guest, without an account.

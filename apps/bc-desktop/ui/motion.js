@@ -157,8 +157,54 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
+// Elapsed time as people read it: "42s", "27 min", "1 h 27 min".
+function since(secs) {
+  const s = Math.max(0, Math.round(secs));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)} min`;
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return m ? `${h} h ${m} min` : `${h} h`;
+}
+
+// ---- Window frame: on a Mac the page runs up under the title bar (titleBarStyle Overlay) ----
+if (isMac) document.documentElement.classList.add("mac-frame");
+
+// ---- Sidebar: hide it when not needed, remembered between launches ----
+function setSidebar(hidden) {
+  $("app-view")?.classList.toggle("side-hidden", hidden);
+  const btn = $("side-toggle");
+  if (btn) {
+    const label = hidden ? "Show sidebar" : "Hide sidebar";
+    btn.title = `${label} (${mod}\\)`;
+    btn.setAttribute("aria-label", label);
+    btn.setAttribute("aria-expanded", String(!hidden));
+  }
+  try { localStorage.setItem("sidebar", hidden ? "hidden" : "shown"); } catch { /* storage off */ }
+  if (!hidden) requestAnimationFrame(() => syncNav(true));
+}
+const sidebarHidden = () => $("app-view")?.classList.contains("side-hidden");
+$("side-toggle")?.addEventListener("click", () => setSidebar(!sidebarHidden()));
+try { if (localStorage.getItem("sidebar") === "hidden") setSidebar(true); } catch { /* storage off */ }
+document.addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key === "\\") {
+    if ($("app-view")?.classList.contains("hidden")) return;
+    e.preventDefault();
+    setSidebar(!sidebarHidden());
+  }
+});
+// Listed after the app's own commands, which the later scripts add.
+addEventListener("DOMContentLoaded", () => sources.push(() => [{
+  group: "View",
+  label: sidebarHidden() ? "Show sidebar" : "Hide sidebar",
+  icon: "i-sidebar",
+  sub: `${mod}\\`,
+  run: () => setSidebar(!sidebarHidden()),
+}]));
+
 window.motion = {
   mod,
+  since,
+  setSidebar,
   reduced,
   moveNav,
   syncNav,

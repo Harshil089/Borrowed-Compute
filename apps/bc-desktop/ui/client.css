@@ -220,3 +220,26 @@
   .signin-side { border-left: none; border-top: 1px solid var(--border); }
   .node-text small { display: none; }
 }
+
+/* ---- Window frame and sidebar toggle ----
+   On a Mac the page runs up under the title bar, so the bar takes the app's own colour in
+   either theme. The strip keeps the window draggable; content clears the traffic lights. */
+.titlebar { display: none; }
+.mac-frame .titlebar { display: block; position: fixed; top: 0; left: 0; right: 0; height: 28px; z-index: 15; }
+.mac-frame .side-brand { padding-top: 36px; }
+.mac-frame .page-head { padding-top: 40px; }
+.mac-frame .view.scrolled .page-head { padding-top: 34px; }
+
+.app { --side-w: 252px; }
+.side-toggle { position: fixed; z-index: 16; top: 16px; left: calc(var(--side-w) - 36px); }
+.mac-frame .side-toggle { top: 2px; left: 80px; }
+.app.side-hidden { grid-template-columns: minmax(0, 1fr); }
+.app.side-hidden .sidebar { display: none; }
+.app.side-hidden .side-toggle { left: 12px; }
+.mac-frame .app.side-hidden .side-toggle { left: 80px; }
+.app.side-hidden .page-head { padding-left: 48px; }
+.mac-frame .app.side-hidden .page-head { padding-left: 32px; }
+@media (max-width: 860px) {
+  .app { --side-w: 220px; }
+  .mac-frame .app.side-hidden .page-head { padding-left: 18px; }
+}
