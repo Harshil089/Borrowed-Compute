@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/bc-proto",
     "crates/bc-net",
+    "crates/bc-mesh",
     "apps/bc-agent",
     "apps/bc-cli",
     "apps/bc-cloud",
@@ -20,6 +21,7 @@ publish = false
 [workspace.dependencies]
 bc-proto = { path = "crates/bc-proto" }
 bc-net = { path = "crates/bc-net" }
+bc-mesh = { path = "crates/bc-mesh" }
 bc-auth = { path = "crates/bc-auth" }
 bc-secrets = { path = "crates/bc-secrets" }
 bc-agent = { path = "apps/bc-agent" }

@@ -513,6 +513,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bc-auth",
+ "bc-mesh",
  "bc-net",
  "bc-proto",
  "clap",
@@ -552,6 +553,7 @@ dependencies = [
  "anyhow",
  "bc-agent",
  "bc-auth",
+ "bc-mesh",
  "bc-net",
  "bc-proto",
  "clap",
@@ -611,6 +613,22 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-updater",
  "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "bc-mesh"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bc-net",
+ "bc-proto",
+ "iroh",
+ "iroh-relay",
+ "rand 0.8.8",
+ "serde",
+ "serde_bytes",
+ "sysinfo",
  "tokio",
 ]
 

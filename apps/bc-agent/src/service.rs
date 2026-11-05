@@ -40,6 +40,9 @@ pub struct Agent {
     config: AgentConfig,
     /// Off, the device still serves its cloud but refuses jobs and invites.
     lending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Probes and pipeline stages from paired devices. No inference engine yet, so it
+    /// answers probes and turns stages away.
+    mesh: bc_mesh::stage::Host,
 }
 
 impl Agent {
@@ -59,7 +62,11 @@ impl Agent {
         let mut config = AgentConfig::new(RunnerConfig::default(), paths.paired());
         config.events = events;
         config.guests = paths.guests();
-        Ok(Agent { endpoint, config, lending: Default::default() })
+        // Paired devices only: a guest may run jobs but not measure or use this device as
+        // part of a pipeline.
+        let paired = config.paired.clone();
+        let mesh = bc_mesh::stage::Host::new(endpoint.clone(), std::sync::Arc::new(move |id| paired.contains(id)), None);
+        Ok(Agent { endpoint, config, lending: Default::default(), mesh })
     }
 
     /// Shares the built-in cloud on `127.0.0.1:port` with other devices over iroh.
@@ -153,6 +160,7 @@ impl Agent {
         while let Some(incoming) = self.endpoint.accept().await {
             let config = self.config.clone();
             let lending = self.lending();
+            let mesh = self.mesh.clone();
             tokio::spawn(async move {
                 let result = async {
                     let conn = incoming.await?;
@@ -173,6 +181,9 @@ impl Agent {
                     }
                     if conn.alpn() == bc_net::GUEST_ALPN {
                         return serve_guest(&config, conn).await;
+                    }
+                    if conn.alpn() == bc_net::MESH_ALPN {
+                        return mesh.serve(conn).await;
                     }
                     serve_connection(&config, conn).await
                 }
