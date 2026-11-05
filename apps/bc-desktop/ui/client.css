@@ -20,7 +20,7 @@
 .side-note { font-size: 12px; color: var(--ink-3); padding: 2px 8px 6px; line-height: 1.45; }
 .side-foot .segmented { margin: 4px 8px 6px; }
 .side-foot .segmented button { flex: 1; }
-.side-foot .avatar { font-size: 10px; }
+.side-foot .avatar { font-size: 11px; }
 
 .macs { display: flex; flex-direction: column; gap: 2px; }
 .mac {
@@ -33,7 +33,7 @@
 .mac.selected, .mac.selected:hover { background: transparent; }
 .mac-code {
   width: 28px; height: 28px; border-radius: 7px; display: grid; place-items: center;
-  font: 600 10px/1 var(--sans); color: var(--ink-2); background: var(--fill); box-shadow: var(--hl), inset 0 0 0 0.5px var(--border);
+  font: 600 11px/1 var(--sans); color: var(--ink-2); background: var(--fill); box-shadow: var(--hl), inset 0 0 0 0.5px var(--border);
   transition: background 0.22s var(--ease), color 0.22s var(--ease);
 }
 .mac.selected .mac-code { color: var(--on-accent); background: var(--accent); box-shadow: none; }
@@ -100,7 +100,7 @@
 .node.to { flex-direction: row-reverse; text-align: right; }
 .node-ico {
   width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; flex: none;
-  font: 600 10.5px/1 var(--sans); color: var(--ink-2); background: var(--fill); box-shadow: var(--hl), inset 0 0 0 0.5px var(--border);
+  font: 600 11px/1 var(--sans); color: var(--ink-2); background: var(--fill); box-shadow: var(--hl), inset 0 0 0 0.5px var(--border);
   transition: box-shadow 0.26s var(--ease), background 0.26s var(--ease), color 0.26s var(--ease);
 }
 .node.active .node-ico { color: var(--ink); background: var(--accent-soft); box-shadow: var(--hl), inset 0 0 0 1px var(--border-strong), 0 0 0 4px var(--fill), 0 6px 18px -6px var(--glow); }
