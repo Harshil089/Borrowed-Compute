@@ -8,4 +8,5 @@ pub mod mesh;
 pub mod pack;
 pub mod route;
 pub mod run;
+pub mod serve;
 pub mod shared;

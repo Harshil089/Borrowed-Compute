@@ -14,12 +14,16 @@ path = "src/main.rs"
 bc-proto.workspace = true
 bc-net.workspace = true
 bc-mesh.workspace = true
+bc-infer.workspace = true
+axum.workspace = true
+futures-util = "0.3"
+rand.workspace = true
 bc-auth.workspace = true
 serde_json.workspace = true
 serde.workspace = true
 iroh.workspace = true
 anyhow.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "time", "fs", "io-util"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "time", "fs", "io-util", "net"] }
 tar.workspace = true
 ignore.workspace = true
 globset.workspace = true
@@ -30,3 +34,4 @@ tempfile.workspace = true
 bc-agent = { path = "../bc-agent" }
 bc-net = { path = "../../crates/bc-net", features = ["test-utils"] }
 iroh-relay = { workspace = true, features = ["server"] }
+reqwest.workspace = true

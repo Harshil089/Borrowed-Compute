@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 bc-proto.workspace = true
 bc-net.workspace = true
+bc-infer.workspace = true
 iroh.workspace = true
 anyhow.workspace = true
 serde.workspace = true
@@ -18,5 +19,6 @@ sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["net", "io-util"] }
 bc-net = { path = "../bc-net", features = ["test-utils"] }
 iroh-relay = { workspace = true, features = ["server", "test-utils"] }

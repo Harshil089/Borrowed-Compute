@@ -4,6 +4,7 @@ members = [
     "crates/bc-proto",
     "crates/bc-net",
     "crates/bc-mesh",
+    "crates/bc-infer",
     "apps/bc-agent",
     "apps/bc-cli",
     "apps/bc-cloud",
@@ -22,6 +23,7 @@ publish = false
 bc-proto = { path = "crates/bc-proto" }
 bc-net = { path = "crates/bc-net" }
 bc-mesh = { path = "crates/bc-mesh" }
+bc-infer = { path = "crates/bc-infer" }
 bc-auth = { path = "crates/bc-auth" }
 bc-secrets = { path = "crates/bc-secrets" }
 bc-agent = { path = "apps/bc-agent" }

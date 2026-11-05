@@ -1,0 +1,16 @@
+[package]
+name = "bc-infer"
+description = "Borrowed Compute's inference engine: quantized transformers run a layer range at a time, weights read by byte range into memory."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+reqwest.workspace = true
+tokio = { workspace = true, features = ["rt", "fs"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

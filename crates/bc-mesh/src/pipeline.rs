@@ -14,7 +14,7 @@ use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::{Endpoint, EndpointAddr};
 
 use crate::codec::Encoding;
-use crate::msg::{Activation, Batch, MeshMsg, Payload, StageSetup};
+use crate::msg::{Activation, Batch, MeshMsg, Meta, Payload, StageSetup};
 use crate::ticket::Ticket;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -96,9 +96,9 @@ pub async fn open(endpoint: &Endpoint, model: &str, targets: &[Target], encoding
 }
 
 impl Input {
-    pub async fn send(&mut self, seq: u64, activation: &Activation) -> Result<()> {
+    pub async fn send(&mut self, seq: u64, meta: Meta, activation: &Activation) -> Result<()> {
         let payload = Payload::encode(activation, self.encoding);
-        send_msg(&mut self.send, &MeshMsg::Batch(Batch { seq, payload })).await
+        send_msg(&mut self.send, &MeshMsg::Batch(Batch { seq, payload, meta })).await
     }
 
     /// No more batches. Results already in flight still arrive.
@@ -112,9 +112,9 @@ impl Input {
 
 impl Output {
     /// The next result, or `None` once the pipeline has finished.
-    pub async fn recv(&mut self) -> Result<Option<(u64, Activation)>> {
+    pub async fn recv(&mut self) -> Result<Option<(u64, Meta, Activation)>> {
         match recv_msg::<MeshMsg>(&mut self.recv).await? {
-            MeshMsg::Batch(b) => Ok(Some((b.seq, b.payload.decode()?))),
+            MeshMsg::Batch(b) => Ok(Some((b.seq, b.meta, b.payload.decode()?))),
             MeshMsg::End => Ok(None),
             MeshMsg::Error { reason } => bail!("the pipeline failed: {reason}"),
             other => bail!("unexpected frame {other:?}"),

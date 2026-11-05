@@ -551,16 +551,21 @@ name = "bc-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "bc-agent",
  "bc-auth",
+ "bc-infer",
  "bc-mesh",
  "bc-net",
  "bc-proto",
  "clap",
+ "futures-util",
  "globset",
  "ignore",
  "iroh",
  "iroh-relay",
+ "rand 0.8.8",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tar",
@@ -595,13 +600,17 @@ name = "bc-desktop"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "bc-agent",
  "bc-auth",
  "bc-cli",
  "bc-cloud",
+ "bc-infer",
+ "bc-mesh",
  "bc-net",
  "bc-proto",
  "humantime",
+ "iroh",
  "libc",
  "objc2",
  "serde",
@@ -617,10 +626,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "bc-infer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "reqwest 0.12.28",
+ "serde",
+ "tokio",
+]
+
+[[package]]
 name = "bc-mesh"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bc-infer",
  "bc-net",
  "bc-proto",
  "iroh",

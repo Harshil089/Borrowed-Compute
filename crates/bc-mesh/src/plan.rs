@@ -43,25 +43,40 @@ pub struct Model {
     pub extra_bytes: u64,
     /// Width of the hidden state sent between stages, in values.
     pub hidden: u32,
+    /// Where its GGUF file is published.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// A small model of the same family (same vocabulary) to draft tokens with.
+    #[serde(default)]
+    pub draft: Option<String>,
 }
 
 const GB: u64 = 1 << 30;
 
-/// Models the CLI knows by name. Sizes are for 4-bit quantized weights (Q4_K_M).
+/// Models known by name: 4-bit quantized (Q4_K_M) GGUF files on Hugging Face. Sizes are
+/// for planning without a download; running a model reads its real header.
 pub fn catalog() -> Vec<Model> {
-    let m = |name: &str, layers: u32, total_gb: f64, extra_gb: f64, hidden: u32| Model {
+    let hf = |path: &str| Some(format!("https://huggingface.co/{path}"));
+    let m = |name: &str, layers: u32, total_gb: f64, extra_gb: f64, hidden: u32, url: Option<String>, draft: Option<&str>| Model {
         name: name.into(),
         layers,
         layer_bytes: (((total_gb - extra_gb) * GB as f64) / layers as f64) as u64,
         extra_bytes: (extra_gb * GB as f64) as u64,
         hidden,
+        url,
+        draft: draft.map(String::from),
     };
     vec![
-        m("llama-3.1-8b", 32, 4.9, 0.6, 4096),
-        m("qwen2.5-32b", 64, 19.9, 0.9, 5120),
-        m("llama-3.3-70b", 80, 42.5, 1.3, 8192),
-        m("qwen2.5-72b", 80, 47.4, 1.4, 8192),
-        m("llama-3.1-405b", 126, 243.0, 2.6, 16384),
+        m("qwen2.5-0.5b", 24, 0.46, 0.13, 896, hf("Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf"), None),
+        m("llama-3.2-1b", 16, 0.75, 0.2, 2048, hf("bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf"), None),
+        m("qwen2.5-1.5b", 28, 1.04, 0.2, 1536, hf("Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf"), Some("qwen2.5-0.5b")),
+        m("qwen2.5-7b", 28, 4.36, 0.6, 3584, hf("bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf"), Some("qwen2.5-0.5b")),
+        m("llama-3.1-8b", 32, 4.58, 0.6, 4096, hf("bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"), Some("llama-3.2-1b")),
+        m("qwen2.5-32b", 64, 18.5, 0.9, 5120, hf("bartowski/Qwen2.5-32B-Instruct-GGUF/resolve/main/Qwen2.5-32B-Instruct-Q4_K_M.gguf"), Some("qwen2.5-0.5b")),
+        m("llama-3.3-70b", 80, 39.6, 1.3, 8192, hf("bartowski/Llama-3.3-70B-Instruct-GGUF/resolve/main/Llama-3.3-70B-Instruct-Q4_K_M.gguf"), Some("llama-3.2-1b")),
+        m("qwen2.5-72b", 80, 44.2, 1.4, 8192, hf("bartowski/Qwen2.5-72B-Instruct-GGUF/resolve/main/Qwen2.5-72B-Instruct-Q4_K_M.gguf"), Some("qwen2.5-0.5b")),
+        // Published only as split files, which the engine does not read yet: plans only.
+        m("llama-3.1-405b", 126, 226.0, 2.6, 16384, None, Some("llama-3.2-1b")),
     ]
 }
 
@@ -367,7 +382,7 @@ mod tests {
     use super::*;
 
     fn model(layers: u32) -> Model {
-        Model { name: "m".into(), layers, layer_bytes: GB, extra_bytes: 0, hidden: 8192 }
+        Model { name: "m".into(), layers, layer_bytes: GB, extra_bytes: 0, hidden: 8192, url: None, draft: None }
     }
 
     fn dev(name: &str, mem_gb: u64, bw_gbs: f64) -> Device {
@@ -493,7 +508,10 @@ mod tests {
     fn catalog_sizes_are_consistent() {
         for m in catalog() {
             let total = m.layer_bytes * m.layers as u64 + m.extra_bytes;
-            assert!(total > 4 * GB && m.hidden >= 4096, "{}", m.name);
+            assert!(total > GB / 4 && m.hidden >= 896, "{}", m.name);
+            if let Some(d) = &m.draft {
+                assert!(catalog().iter().any(|c| &c.name == d), "{}'s draft {d} is in the catalog", m.name);
+            }
         }
     }
 }
