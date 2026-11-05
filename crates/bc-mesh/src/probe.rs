@@ -68,17 +68,26 @@ pub async fn probe(endpoint: &Endpoint, addr: impl Into<EndpointAddr>) -> Result
 /// This device, as a probe reports it.
 pub async fn report(engine: bool) -> DeviceReport {
     let mem_bw = tokio::task::spawn_blocking(memory_bandwidth).await.unwrap_or(0.0);
-    let mut sys = sysinfo::System::new();
-    sys.refresh_memory();
+    let (mem_total, mem_available) = memory();
     DeviceReport {
         name: sysinfo::System::host_name().unwrap_or_default(),
         os: std::env::consts::OS.into(),
         cores: std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1),
-        mem_total: sys.total_memory(),
-        mem_available: sys.available_memory(),
+        mem_total,
+        mem_available,
         mem_bw,
         engine,
     }
+}
+
+/// Total and available memory. macOS can report no available memory at all under
+/// pressure, though inactive and cached pages would be handed over; then what is not in
+/// use counts as available.
+pub fn memory() -> (u64, u64) {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+    let total = sys.total_memory();
+    (total, sys.available_memory().max(total.saturating_sub(sys.used_memory())))
 }
 
 /// Copy bandwidth (read plus write), measured once per process: the best of a few

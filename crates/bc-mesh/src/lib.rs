@@ -8,6 +8,8 @@
 //! ([`codec`]). See `docs/mesh.md` for the design and the reasoning behind it.
 
 pub mod codec;
+pub mod engine;
+pub mod llm;
 pub mod msg;
 pub mod pipeline;
 pub mod plan;

@@ -10,6 +10,7 @@
 
 mod lend;
 mod logs;
+mod mesh;
 #[cfg(target_os = "macos")]
 mod quit_guard;
 
@@ -1037,6 +1038,7 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState { home: home.clone(), job: StdMutex::new(None), forwarding: StdMutex::new(None), forwards: Arc::default(), nearby: Arc::default() })
         .manage(lend)
+        .manage(mesh::MeshState::default())
         .setup(move |app| {
             // The app's version comes from tauri.conf.json, which CI sets for each release;
             // the crate version stays 0.1.0.
@@ -1129,6 +1131,12 @@ fn main() {
             join_mac,
             leave_mac,
             nearby_devices,
+            mesh::mesh_models,
+            mesh::mesh_probe,
+            mesh::mesh_status,
+            mesh::mesh_start,
+            mesh::mesh_stop,
+            mesh::mesh_chat,
             lend::keep_account_here,
             lend::set_lending,
             lend::list_pairings,

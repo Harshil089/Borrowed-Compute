@@ -17,7 +17,7 @@ use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::{Endpoint, EndpointId};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::msg::{Activation, Batch, MeshMsg, Payload, StageSetup};
+use crate::msg::{Activation, Batch, MeshMsg, Meta, Payload, StageSetup};
 use crate::probe;
 use crate::ticket::Ticket;
 
@@ -32,11 +32,13 @@ const QUEUE: usize = 4;
 
 /// One device's part of a model. `forward` runs on a blocking thread.
 pub trait Stage: Send {
-    fn forward(&mut self, input: Activation) -> Result<Activation>;
+    fn forward(&mut self, meta: &Meta, input: Activation) -> Result<Activation>;
 }
 
-/// Builds the stage a setup asks for, or says why this device cannot.
-pub type StageFactory = Arc<dyn Fn(&StageSetup) -> Result<Box<dyn Stage>> + Send + Sync>;
+/// Builds the stage a setup asks for (loading weights can take a while), or says why
+/// this device cannot.
+pub type StageFactory = Arc<dyn Fn(StageSetup) -> BoxFuture<Result<Box<dyn Stage>>> + Send + Sync>;
+pub type BoxFuture<T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send>>;
 /// Whether a device may probe this one or set a stage up on it: the agent's paired list.
 pub type Trust = Arc<dyn Fn(&EndpointId) -> bool + Send + Sync>;
 
@@ -107,7 +109,7 @@ impl Host {
     async fn run_stage(&self, conn: Connection, mut control: SendStream, setup_recv: RecvStream, coordinator: EndpointId, setup: StageSetup) -> Result<()> {
         let built = match &self.factory {
             None => Err(anyhow::anyhow!("this device has no inference engine")),
-            Some(factory) => factory(&setup),
+            Some(factory) => factory(setup.clone()).await,
         };
         let stage = match built {
             Ok(s) => s,
@@ -203,15 +205,18 @@ async fn pump(mut stage: Box<dyn Stage>, mut input: RecvStream, mut out: SendStr
     let mut failure = None;
     while let Some(batch) = in_rx.recv().await {
         let seq = batch.seq;
-        let (back, result) = tokio::task::spawn_blocking(move || {
-            let r = batch.payload.decode().and_then(|a| stage.forward(a));
-            (stage, r)
+        let mut meta = batch.meta;
+        let (back, result, meta) = tokio::task::spawn_blocking(move || {
+            let started = std::time::Instant::now();
+            let r = batch.payload.decode().and_then(|a| stage.forward(&meta, a));
+            meta.stage_ms.push(started.elapsed().as_secs_f32() * 1000.0);
+            (stage, r, meta)
         })
         .await?;
         stage = back;
         match result {
             Ok(a) => {
-                let msg = MeshMsg::Batch(Batch { seq, payload: Payload::encode(&a, encoding) });
+                let msg = MeshMsg::Batch(Batch { seq, payload: Payload::encode(&a, encoding), meta });
                 if out_tx.send(msg).await.is_err() {
                     break;
                 }

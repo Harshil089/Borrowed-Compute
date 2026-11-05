@@ -65,7 +65,7 @@ impl Agent {
         // Paired devices only: a guest may run jobs but not measure or use this device as
         // part of a pipeline.
         let paired = config.paired.clone();
-        let mesh = bc_mesh::stage::Host::new(endpoint.clone(), std::sync::Arc::new(move |id| paired.contains(id)), None);
+        let mesh = bc_mesh::stage::Host::new(endpoint.clone(), std::sync::Arc::new(move |id| paired.contains(id)), Some(bc_mesh::engine::factory()));
         Ok(Agent { endpoint, config, lending: Default::default(), mesh })
     }
 

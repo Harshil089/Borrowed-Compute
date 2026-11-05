@@ -30,6 +30,7 @@
     <symbol id="i-laptop" viewBox="0 0 16 16"><rect x="3" y="3" width="10" height="7.5" rx="1"/><path d="M1.5 13h13"/></symbol>
     <symbol id="i-users" viewBox="0 0 16 16"><circle cx="6" cy="5.5" r="2.5"/><path d="M1.5 13.5c.4-2.4 2.2-3.8 4.5-3.8s4.1 1.4 4.5 3.8M10.5 3.2a2.4 2.4 0 0 1 0 4.6M12 9.9c1.4.5 2.3 1.7 2.5 3.6"/></symbol>
     <symbol id="i-gear" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.8v1.6M8 12.6v1.6M14.2 8h-1.6M3.4 8H1.8M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1M12.4 12.4l-1.1-1.1M4.7 4.7 3.6 3.6"/></symbol>
+    <symbol id="i-mesh" viewBox="0 0 16 16"><circle cx="3.5" cy="4" r="1.75"/><circle cx="12.5" cy="4" r="1.75"/><circle cx="8" cy="12" r="1.75"/><path d="M5.25 4h5.5M4.4 5.5l2.7 5M11.6 5.5l-2.7 5"/></symbol>
     <symbol id="i-sidebar" viewBox="0 0 16 16"><rect x="1.75" y="2.75" width="12.5" height="10.5" rx="2"/><path d="M6 2.75v10.5"/></symbol>
     <symbol id="i-out" viewBox="0 0 16 16"><path d="M6 13.5H3.5a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1H6M10.5 11 13.5 8l-3-3M13.5 8H6"/></symbol>
   </svg>
@@ -89,6 +90,7 @@
           </span>
         </div>
         <div id="macs" class="macs"></div>
+        <button class="nav-item" data-nav="mesh" data-title="Mesh"><svg class="icon"><use href="#i-mesh"/></svg>Mesh<span id="mesh-live" class="count hidden">On</span></button>
       </div>
 
       <div id="nearby-box" class="side-section hidden">
@@ -300,6 +302,50 @@
         </section>
       </div>
 
+      <!-- Mesh: one model across several devices -->
+      <div class="page hidden" data-page="mesh">
+        <section class="block">
+          <div class="card mesh-start">
+            <p class="muted">Run one model across your paired devices, wherever they are. Each device downloads only its own layers, keeps them in memory while the model runs, and drops them when you stop.</p>
+            <div class="mesh-form">
+              <label class="field"><span class="label">Model</span><select id="mesh-model" aria-label="Model"></select></label>
+              <div class="field"><span class="label">Plan for</span>
+                <div class="segmented" role="group" aria-label="Plan for"><button data-goal="latency" aria-pressed="true">One conversation</button><button data-goal="throughput" aria-pressed="false">Many requests</button></div>
+              </div>
+              <div class="mesh-actions"><button id="mesh-measure">Measure devices</button><button id="mesh-run" class="primary">Start</button></div>
+            </div>
+            <div id="mesh-phase" class="row muted hidden"><span class="spinner"></span><span id="mesh-phase-text"></span></div>
+            <div id="mesh-msg" class="banner hidden"></div>
+          </div>
+        </section>
+        <section id="mesh-running" class="block hidden">
+          <div class="block-head"><h2 class="heading">Serving <span id="mesh-name"></span></h2><button id="mesh-stop" class="danger">Stop</button></div>
+          <div class="card connect">
+            <p>Any app that speaks the OpenAI API can use it at this address:</p>
+            <div id="mesh-url" class="address"></div>
+          </div>
+        </section>
+        <section id="mesh-plan-block" class="block hidden">
+          <h2 class="heading">Where each part runs</h2>
+          <div id="mesh-plan" class="table card"></div>
+        </section>
+        <section class="block">
+          <h2 class="heading">Your devices</h2>
+          <div id="mesh-devices" class="table card"><div class="board-empty">Measure your devices to see each link and how much memory each can give.</div></div>
+        </section>
+        <section id="mesh-try" class="block hidden">
+          <h2 class="heading">Try it</h2>
+          <div class="card mesh-chat">
+            <form id="mesh-chat-form" class="invite-form">
+              <input id="mesh-prompt" type="text" placeholder="Ask the model something" autocomplete="off" aria-label="Message">
+              <button id="mesh-send" type="submit" class="primary">Send</button>
+            </form>
+            <div id="mesh-answer" class="mesh-answer hidden"></div>
+            <p id="mesh-stats" class="muted"></p>
+          </div>
+        </section>
+      </div>
+
       <!-- Settings -->
       <div class="page hidden" data-page="settings">
         <section class="block">
@@ -441,5 +487,6 @@
   <script src="motion.js"></script>
   <script src="app.js"></script>
   <script src="lend.js"></script>
+  <script src="mesh.js"></script>
 </body>
 </html>

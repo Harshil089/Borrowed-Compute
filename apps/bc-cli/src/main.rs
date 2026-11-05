@@ -126,6 +126,34 @@ enum MeshAction {
         #[arg(long, default_value_t = 1.0)]
         speculate: f64,
     },
+    /// Run a model across your paired devices and answer one prompt.
+    Run {
+        /// A model name from `bc mesh plan`, or the https address of a .gguf file.
+        model: String,
+        prompt: String,
+        #[arg(long, default_value_t = 256)]
+        max_tokens: usize,
+        #[arg(long, default_value_t = 0.0)]
+        temperature: f32,
+        /// A small model of the same family on this computer for speculative decoding:
+        /// a name, an address or a file. `none` turns it off.
+        #[arg(long)]
+        draft: Option<String>,
+        #[arg(long)]
+        throughput: bool,
+    },
+    /// Run a model across your paired devices behind an OpenAI-compatible endpoint on
+    /// this computer, until Ctrl+C.
+    Serve {
+        model: String,
+        #[arg(long, default_value_t = 8484)]
+        port: u16,
+        #[arg(long)]
+        draft: Option<String>,
+        /// Plan for many requests at once (replicas, balanced stages).
+        #[arg(long)]
+        throughput: bool,
+    },
 }
 
 #[tokio::main]
@@ -367,6 +395,9 @@ async fn main() -> Result<()> {
 
 async fn mesh(cloud: &CloudClient, key_path: &std::path::Path, action: MeshAction) -> Result<()> {
     use bc_mesh::plan::Goal;
+    if let MeshAction::Run { .. } | MeshAction::Serve { .. } = action {
+        return mesh_run(cloud, key_path, action).await;
+    }
     let model = match &action {
         MeshAction::Plan { model: None, .. } => {
             for m in bc_mesh::plan::catalog() {
@@ -379,6 +410,7 @@ async fn mesh(cloud: &CloudClient, key_path: &std::path::Path, action: MeshActio
             Some(bc_cli::mesh::find_model(name).with_context(|| format!("unknown model {name:?}; run `bc mesh plan` for the list"))?)
         }
         MeshAction::Probe => None,
+        MeshAction::Run { .. } | MeshAction::Serve { .. } => unreachable!(),
     };
     let key = load_or_create_key(key_path)?;
     let me = key.public().to_string();
@@ -476,4 +508,82 @@ fn ago(secs: i64) -> String {
         s if s < 172_800 => format!("{}h ago", s / 3600),
         s => format!("{}d ago", s / 86_400),
     }
+}
+
+async fn mesh_run(cloud: &CloudClient, key_path: &std::path::Path, action: MeshAction) -> Result<()> {
+    use bc_mesh::plan::Goal;
+    let key = load_or_create_key(key_path)?;
+    let me = key.public().to_string();
+    let signed = signed_in(cloud)?.clone();
+    let targets = bc_cli::mesh::paired_devices(&signed, &me).await?;
+    if targets.is_empty() {
+        bail!("this device is not paired with any device yet; pair with `bc pair <device>`");
+    }
+    let endpoint = bc_net::bind(key, mac_net(cloud, false).await).await?;
+    let (model, draft, throughput) = match &action {
+        MeshAction::Run { model, draft, throughput, .. } | MeshAction::Serve { model, draft, throughput, .. } => (model.clone(), draft.clone(), *throughput),
+        _ => unreachable!(),
+    };
+    let goal = if throughput { Goal::Throughput } else { Goal::Latency };
+    let session = std::sync::Arc::new(
+        bc_cli::mesh::Session::start(endpoint.clone(), targets, &model, goal, draft.as_deref(), |s| eprintln!("bc: {s}")).await?,
+    );
+    for (i, p) in session.layout().await.iter().enumerate() {
+        let stages: Vec<String> = p.iter().map(|(n, l)| format!("{n} {}..{}", l.start, l.end)).collect();
+        eprintln!("bc: pipeline {}: {}", i + 1, stages.join(" → "));
+    }
+    match action {
+        MeshAction::Run { prompt, max_tokens, temperature, .. } => {
+            let llm = session.llm.clone();
+            let ids = llm.tokenizer.encode(&llm.tokenizer.chat_prompt(&[("user".into(), prompt)]));
+            let sampling = bc_infer::Sampling { temperature, top_p: 0.95, seed: rand_seed() };
+            let (_, stats) = llm
+                .generate(&ids, max_tokens, sampling, |t| {
+                    print!("{t}");
+                    let _ = std::io::stdout().flush();
+                })
+                .await?;
+            println!();
+            let decode_s = (stats.total_ms - stats.first_token_ms).max(1.0) / 1000.0;
+            eprintln!(
+                "bc: {} prompt tokens, first token after {:.0} ms; {} tokens in {} passes, {:.1} tokens/s",
+                stats.prompt_tokens, stats.first_token_ms, stats.generated, stats.passes, stats.generated.saturating_sub(1) as f64 / decode_s
+            );
+        }
+        MeshAction::Serve { port, .. } => {
+            let (cloud_c, me_c) = (signed.clone(), me.clone());
+            let served = std::sync::Arc::new(bc_cli::serve::Served {
+                session: session.clone(),
+                targets: std::sync::Arc::new(move || {
+                    let (c, m) = (cloud_c.clone(), me_c.clone());
+                    Box::pin(async move { bc_cli::mesh::paired_devices(&c, &m).await })
+                }),
+            });
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.with_context(|| format!("port {port} is taken"))?;
+            eprintln!("bc: serving {} at http://127.0.0.1:{port}/v1 (OpenAI-compatible). Ctrl+C stops it.", session.name);
+            let balancer = session.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    match balancer.rebalance().await {
+                        Ok(true) => eprintln!("bc: moved layers to match how busy each device is"),
+                        Ok(false) => {}
+                        Err(e) => eprintln!("bc: rebalancing failed: {e:#}"),
+                    }
+                }
+            });
+            axum::serve(listener, bc_cli::serve::router(served))
+                .with_graceful_shutdown(async {
+                    let _ = tokio::signal::ctrl_c().await;
+                })
+                .await?;
+        }
+        _ => unreachable!(),
+    }
+    bc_net::release(endpoint).await;
+    Ok(())
+}
+
+fn rand_seed() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(7)
 }

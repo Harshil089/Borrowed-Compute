@@ -154,3 +154,24 @@ div.setting { cursor: default; }
 
 /* The sidebar's lending status sits beside its heading. */
 #lend-nav .side-title .pill { padding: 2px 7px; font-size: 11px; }
+
+/* ---- Mesh ---- */
+.mesh-start { display: flex; flex-direction: column; gap: 14px; padding: 18px; }
+.mesh-start > p { font-size: 13px; line-height: 1.55; }
+.mesh-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px 16px; }
+.mesh-form .field { min-width: 0; }
+.mesh-form select {
+  min-width: 200px; font: 400 13.5px/1.4 var(--sans); color: var(--ink); background: var(--fill);
+  border: none; border-radius: var(--radius-sm); padding: 7px 10px; box-shadow: inset 0 0 0 1px var(--border);
+}
+.mesh-form select:focus { outline: none; box-shadow: inset 0 0 0 1px var(--ink-3), var(--focus); }
+.mesh-actions { display: flex; gap: 8px; margin-left: auto; }
+.mesh-dev, .mesh-stage { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 14px; align-items: center; padding: 11px 16px; border-top: 1px solid var(--border); }
+.mesh-dev:first-child, .mesh-stage:first-child, .board-head + .mesh-dev, .board-head + .mesh-stage { border-top: none; }
+.mesh-stage { grid-template-columns: 28px minmax(0, 1fr) auto; }
+.mesh-step { font: 500 12px/1 var(--mono); color: var(--ink-3); }
+.mesh-layers { position: relative; height: 4px; border-radius: 2px; background: var(--fill); margin-top: 6px; overflow: hidden; }
+.mesh-layers span { position: absolute; top: 0; bottom: 0; background: var(--accent); border-radius: 2px; }
+.mesh-sum { padding: 11px 16px; border-top: 1px solid var(--border); font-size: 12px; color: var(--ink-3); background: var(--subtle); }
+.mesh-chat { display: flex; flex-direction: column; gap: 12px; padding: 16px; }
+.mesh-answer { white-space: pre-wrap; font-size: 13.5px; line-height: 1.6; color: var(--ink); -webkit-user-select: text; user-select: text; }

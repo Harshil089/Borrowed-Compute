@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use bc_mesh::codec::Encoding;
-use bc_mesh::msg::{Activation, StageSetup, Tensor};
+use bc_mesh::msg::{Activation, Meta, StageSetup, Tensor};
 use bc_mesh::pipeline::{self, Target};
 use bc_mesh::probe::probe;
 use bc_mesh::stage::{Host, Stage, StageFactory};
@@ -49,7 +49,7 @@ struct ToyStage {
 }
 
 impl Stage for ToyStage {
-    fn forward(&mut self, input: Activation) -> Result<Activation> {
+    fn forward(&mut self, _meta: &Meta, input: Activation) -> Result<Activation> {
         std::thread::sleep(self.delay);
         match input {
             Activation::Hidden(t) => Ok(Activation::Hidden(run_layers(self.layers.clone(), &t))),
@@ -59,7 +59,7 @@ impl Stage for ToyStage {
 }
 
 fn factory(delay: Duration) -> StageFactory {
-    Arc::new(move |s: &StageSetup| Ok(Box::new(ToyStage { layers: s.layers.clone(), delay }) as Box<dyn Stage>))
+    Arc::new(move |s: StageSetup| Box::pin(async move { Ok(Box::new(ToyStage { layers: s.layers.clone(), delay }) as Box<dyn Stage>) }))
 }
 
 struct Mesh {
@@ -110,12 +110,12 @@ async fn run(m: &Mesh, splits: &[std::ops::Range<u32>], encoding: Encoding, batc
     let (mut tx, mut rx) = pipeline::open(&m.coordinator, "toy", &targets(m, splits), encoding).await.unwrap();
     let sender = tokio::spawn(async move {
         for seq in 0..batches {
-            tx.send(seq, &Activation::Hidden(input(seq))).await.unwrap();
+            tx.send(seq, Meta::default(), &Activation::Hidden(input(seq))).await.unwrap();
         }
         tx.finish().await.unwrap();
     });
     let mut out = Vec::new();
-    while let Some((seq, a)) = tokio::time::timeout(Duration::from_secs(30), rx.recv()).await.unwrap().unwrap() {
+    while let Some((seq, _, a)) = tokio::time::timeout(Duration::from_secs(30), rx.recv()).await.unwrap().unwrap() {
         let Activation::Hidden(t) = a else { panic!("expected hidden states") };
         out.push((seq, t));
     }

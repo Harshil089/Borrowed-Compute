@@ -64,6 +64,27 @@ pub struct Batch {
     /// Set by the coordinator; stages keep it, so results can be matched to requests.
     pub seq: u64,
     pub payload: Payload,
+    #[serde(default)]
+    pub meta: Meta,
+}
+
+/// What a batch is part of. Stages keep a key/value cache per `stream` (one conversation)
+/// and cut it back to `pos` before running the batch, so a rejected speculative guess or a
+/// replayed request never leaves stale entries.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Meta {
+    pub stream: u64,
+    /// Position of the batch's first row in the stream.
+    pub pos: u32,
+    /// The last stage returns a token for every row (speculative checking) instead of
+    /// only the last.
+    pub all_rows: bool,
+    pub sampling: bc_infer::Sampling,
+    /// Rows (tokens) in the batch, as sent.
+    pub rows: u32,
+    /// Milliseconds each stage spent computing, appended stage by stage: what live
+    /// balancing measures.
+    pub stage_ms: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

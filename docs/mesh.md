@@ -83,52 +83,127 @@ The planner already takes this into account (`--speculate`). This is the single 
 
 Each stage runs three tasks joined by short queues: reading, computing and writing (`stage.rs`). It receives batch n+1 and sends batch n−1 while computing batch n. With several requests in flight, every device works at once. The tests check it: 8 batches through 3 stages that each take 150 ms must finish well under the 3.6 s they would take one after another (ideal: about 1.5 s).
 
-## 4. What is built (M1)
+## 4. The engine (`crates/bc-infer`)
 
-`crates/bc-mesh`:
+Borrowed Compute runs models with its own engine, written for this design: any contiguous range of layers runs on its own, and weights are read by byte range straight into memory.
 
-| Module | Does |
+**Weights stay compressed in memory.** GGUF stores each layer as blocks of 32 or 256 weights sharing one or two f16 scales. The engine supports these block formats, which together cover every common 4-, 5-, 6- and 8-bit file:
+
+| Format | Formula |
 |---|---|
-| `probe.rs` | Measures a device and its link over the mesh protocol: median of 5 pings, upload rate (2 MB), free memory, cores and memory bandwidth (measured once per process). |
-| `plan.rs` | The planner: layer ranges, ring order, replicas, latency and throughput estimates, speculative decoding, and `replan` with hysteresis. Includes a catalog of models at 4 bits. |
-| `ticket.rs` | Signed hop tickets. |
-| `codec.rs` | Int8 activations with a scale per group of 64 values; f32 when results must match exactly. |
-| `stage.rs` | The device side: answers probes; runs a stage (the `Stage` trait) between the previous device and the next. |
-| `pipeline.rs` | The coordinator side: sets stages up last to first, then streams batches in at one end and results out at the other. |
+| Q4_0 | x = d·(q − 8) |
+| Q4_1 | x = d·q + m |
+| Q5_0 | x = d·(q − 16), the fifth bit packed separately |
+| Q5_1 | x = d·q + m, the fifth bit packed separately |
+| Q8_0 | x = d·q |
+| Q4_K, Q5_K | 8 groups of 32 per 256 weights, each with a 6-bit scale and min: x = d·sc·q − dmin·m |
+| Q6_K | 16 groups of 16 with i8 scales: x = d·sc·(q − 32) |
 
-**Protocol.** Mesh connections use their own protocol name, `MESH_ALPN` (`borrowed-compute/mesh/1`), so the job protocol is unchanged.
+F32, F16 and BF16 are read too.
 
-**Agent.** The agent serves mesh connections from paired devices while lending is on. It answers probes but turns stages away: there is no inference engine yet.
+**Products are integer.** Each input row is quantized to int8 per block of 32 (scale = max|x|/127). Each weight group, unpacked once to small integers with a scale s and an offset o, then meets the input:
 
-**CLI.**
-- `bc mesh probe` measures every paired device at once.
-- `bc mesh plan <model> [--throughput] [--speculate N]` shows where each layer range would run, and how fast.
-- The same steps are in `bc_cli::mesh`, ready for the desktop app.
+> Σ wᵢxᵢ ≈ d_x · (s · Σ qᵢpᵢ + o · Σ pᵢ)
 
-**Tests.** `crates/bc-mesh/tests/pipeline.rs` runs, through a local relay with direct paths off:
-- a stand-in model split over three devices, matching a single-device run bit for bit with f32, and closely with int8;
-- the stage overlap;
-- three devices probed at once;
-- refusal by a device without an engine;
-- refusal of strangers' probes and forged feeds.
+The inner sum is in i32 and compiles to the CPU's integer multiply-add. This is llama.cpp's method. A block is unpacked once and used for every input row while it is in cache, so a 300-token prompt chunk or a 5-row speculative check costs little more than one token.
 
-The planner has unit tests for every rule above.
+**Work-stealing threads.** Products are cut into small pieces handed out from a shared counter. When the system pauses a thread, for instance because a lender's owner is using the machine, it delays one small piece rather than a fixed share. `BC_INFER_THREADS` caps the cores the engine takes.
 
-## 5. Roadmap
+**The transformer** follows the Llama and Qwen2 families. Each layer computes:
 
-- **M2 — the engine.** A `Stage` that runs real layers: candle (Rust, Metal and CUDA, reads GGUF) with a quantized Llama/Qwen forward pass limited to a layer range. Token ids in at the first stage, sampled tokens out at the last; a KV cache per stage; chunked prefill; weights fetched by byte range, kept only for the session. Why not llama.cpp's RPC backend? It is a star: the main host drives every device's graph and pushes weights over the network at load. That is the opposite of 3.1 and 3.4.
-- **M3 — serving.** `bc mesh serve <model>` exposes an OpenAI-compatible endpoint on the coordinator's localhost. Requests are routed across replicas, with continuous batching on each stage.
-- **M4 — live balancing.**
-  - Stages report time per batch and queue depth.
-  - `replan` runs on a timer and applies between requests.
-  - Layer margins (3.3) make shifts instant.
-  - Devices probe each other with tickets, so the planner uses real device-to-device links instead of the upper bound it uses now.
-  - When a stage drops out, the pipeline is replanned and the requests in flight restart from their tokens.
-- **M5 — speculative decoding**, with a draft model on the coordinator.
-- **M6 — the app.** A Mesh page: devices and links, the plan, live load per stage, and "start serving".
+> h = x + W_o · Attn(RoPE(W_q·n(x)), RoPE(W_k·n(x)), W_v·n(x))
+> x′ = h + W_down · (SiLU(W_gate·n(h)) ⊙ W_up·n(h))
 
-## 6. Limits to know
+- n is RMSNorm.
+- Attention is grouped-query, with causal softmax(q·kᵀ/√d)·v.
+- RoPE rotates each dimension pair by p·θᵢ, θᵢ = base^(−2i/d), divided by Llama 3.1's per-frequency factors when the file has them. Llama rotates neighbouring pairs; Qwen2 rotates i with i + d/2.
+- Qwen's query/key/value biases and tied embeddings are handled.
 
-- One conversation gets no faster from more devices (3.2). The mesh buys bigger models and more parallel requests.
-- Through a relay, prompts of thousands of tokens take seconds to cross each hop. Multi-turn chat sends only the new turn, so this is paid once per conversation, not per message.
-- Activations reveal the prompt, so only the owner's own paired devices take part. Guests never do.
+**Text.**
+- **SentencePiece:** score-ordered merges with byte fallback.
+- **Byte-level BPE:** rank-ordered merges after GPT-4-style word splitting. Llama 3 groups digits in threes; Qwen splits every digit.
+- **Control tokens** such as `<|im_start|>` are matched whole.
+- **Chat templates:** ChatML and Llama 3.
+
+**Checked against real models.** Each was run whole and split in two; both runs give identical tokens, with the split at layer n/2.
+
+| Model | Tested with |
+|---|---|
+| stories15M (Q8_0, Q4_0) | A coherent story |
+| Qwen2.5-0.5B-Instruct (Q4_K_M) | "The capital of France is Paris." |
+| Llama-3.2-1B-Instruct (Q4_K_M) | "391" for 17×23, "Tokyo" for Japan's capital |
+
+## 5. The mesh, end to end
+
+**Lending device** (`bc_mesh::engine`, served by the agent to paired devices while lending):
+- A stage setup names the model's https address and a layer range.
+- The device reads the GGUF header, then only its own tensors, by byte range, straight into RAM. Nothing is written to disk.
+- Weights stay in memory while a stage uses them, plus two minutes, so a rebalanced pipeline that keeps most layers on this device does not fetch them again. Then they are dropped. Quitting the app drops everything.
+- A stage refuses ranges larger than 90% of free memory.
+- A stage keeps a KV cache per conversation (up to 16) and cuts it back to the batch's position before running. That makes speculative rollbacks and replays exact.
+- The last stage samples: greedy, or temperature with top-p and a seed. It returns token ids, never the 150k-wide score vector.
+- **Owner decision, 2026-11-06:** weights may stay in memory on a lending device while the model runs, never on disk.
+
+**Coordinator** (`bc_mesh::llm`):
+- A `Client` multiplexes any number of requests over one pipeline. Stages answer in the order batches arrive, so requests go out back to back and every stage stays busy.
+- `Llm::generate` sends a prompt in chunks of 256 tokens without waiting between them (chunked prefill, as in Sarathi). It then decodes, speculatively when a draft model is loaded and the request is greedy:
+  - the draft guesses 4 tokens;
+  - one pass returns the target's own choice at every row;
+  - the longest agreeing prefix is kept, plus the target's next token.
+
+  The text is exactly what the target alone writes (Leviathan et al., 2023, greedy case).
+- Each stage reports its compute time per batch, which feeds live balancing.
+
+**Serving** (`bc_cli::mesh::Session`, `bc_cli::serve`):
+- **Starting:** `Session::start` probes every paired device at once and keeps those with an engine. It reads the model's real sizes from its header, plans, and opens one pipeline per replica.
+- **Live balancing:** every 60 seconds `rebalance` turns the measured stage times back into an effective speed per device. A device whose owner got busy looks slower and gets fewer layers. Layers move only when the new plan is at least 15% better.
+- **Recovery:** when a pipeline fails, `recover` probes again, leaves out devices that do not answer, plans again and retries the request once.
+- **Endpoint:** `bc mesh serve` exposes `POST /v1/chat/completions` (streamed or not) and `GET /v1/models` on localhost, so any OpenAI client uses the mesh.
+
+**Commands and app:**
+
+| Command | Does |
+|---|---|
+| `bc mesh probe` | Measures every paired device at once |
+| `bc mesh plan [model] [--throughput] [--speculate N]` | Shows where each part would run and how fast |
+| `bc mesh run <model> "<prompt>" [--draft <model>|none]` | Answers one prompt |
+| `bc mesh serve <model> [--port 8484] [--throughput]` | Serves the model until Ctrl+C |
+
+`<model>` is a catalog name (Qwen2.5 0.5B to 72B, Llama 3.1 8B, 3.2 1B, 3.3 70B) or a GGUF https address.
+
+The desktop app has a **Mesh** page under Use. It picks the model and the goal, measures the devices, shows where each part runs (with the measured time per stage), starts and stops serving, shows the endpoint address, and has a box to try the model.
+
+**Tests:**
+
+| Test | Checks |
+|---|---|
+| Unit | Every block format against its definition; integer kernels against dequantization; tokenizers, sampling, the planner, tickets, the codec |
+| `crates/bc-mesh/tests/llm.rs` | Through a local relay with direct paths off: a model split over three devices that each fetched only their own layers writes exactly the single-computer text; two conversations and a 300-token chunked prompt run at once; speculative decoding is exact with a perfect and an imperfect draft, and takes far fewer passes with the perfect one |
+| `apps/bc-cli/tests/mesh_serve.rs` | An OpenAI client chats with a model served by two devices, streamed and not, with the same answer both ways |
+| `real_model_over_three_devices` (ignored; `BC_TEST_MODEL=…`) | Qwen2.5-0.5B over three relayed stages on one Mac: 33 tokens/s (stages at 7.6, 7.7 and 11.4 ms per token) |
+
+## 6. References
+
+| Source | What it gave |
+|---|---|
+| Huang et al., *GPipe* (2019) | Pipeline parallelism with micro-batches |
+| Shoeybi et al., *Megatron-LM* (2019) | Tensor parallelism: two all-reduces per layer, unfit for wide-area links |
+| Borzunov et al., *Petals* (2023) | Serving large models over the internet in layer blocks |
+| Leviathan, Kalman and Matias, *Fast Inference from Transformers via Speculative Decoding* (2023); Chen et al., *Accelerating LLM Decoding with Speculative Sampling* (2023) | Speculative decoding |
+| Agrawal et al., *Sarathi* (2023) | Chunked prefill |
+| Yu et al., *Orca* (2022) | Iteration-level scheduling |
+| Dettmers et al., *LLM.int8()* (2022) | Outlier channels, hence per-group activation scales |
+| Su et al., *RoFormer* (2021) | RoPE |
+| Ainslie et al., *GQA* (2023) | Grouped-query attention |
+| ggml / llama.cpp | The GGUF format and the K-quant layouts |
+
+The planner's throughput split assigns each layer where the stage total stays smallest. For contiguous counts with per-stage costs nᵢ·tᵢ, this minimizes the largest stage time: an exchange argument shows that any other assignment can be improved toward it.
+
+## 7. Limits and next steps
+
+- **CPU only.** Metal and CUDA kernels would multiply per-device speed; the mesh does not change.
+- **One-file GGUF only.** Split files, like Llama 3.1 405B's, are planned but cannot run yet.
+- **The draft model serializes requests.** While one greedy request drafts, others wait; a draft per replica would remove that.
+- **Device-to-device links are estimated.** The planner uses an upper bound through the coordinator's side of the internet. Ticketed device-to-device probes would measure them.
+- **Int8 activations drift slightly.** On the wire and inside products, int8 can flip a near-tie token after a few dozen tokens compared with f32. Greedy text then differs slightly from an f32 run, but stays exact across any split.
+- **Single conversation speed.** Adding devices fits larger models and serves more requests at once; one conversation is fastest on the fewest, fastest devices (3.2).
