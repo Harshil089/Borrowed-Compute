@@ -23,6 +23,12 @@ pub enum MeshMsg {
     BulkDone,
     /// Bytes received and microseconds from the first to the last.
     BulkAck { bytes: u64, micros: u64 },
+    /// Coordinator to device A: measure your link to `addr` (device B).
+    ProbePeer { addr: EndpointAddr, ticket: Ticket },
+    /// Device A to device B: the coordinator that signed the ticket, which B must trust.
+    PeerHello { coordinator: iroh::EndpointId, ticket: Ticket },
+    /// Device A to the coordinator: the link it measured.
+    PeerLink { rtt_ms: f64, up_bytes_s: f64, via_relay: bool },
     // Running a pipeline.
     Setup(StageSetup),
     /// From the previous stage, on its own connection.

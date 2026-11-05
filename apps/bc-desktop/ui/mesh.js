@@ -109,7 +109,7 @@ async function measure() {
 async function start() {
   const m = models.find((x) => x.name === $("mesh-model").value);
   if (m && !m.runnable) {
-    message(`${m.name} is published only as split files, which the engine does not read yet. You can still plan it.`, "warn");
+    message(`${m.name} has no published address. You can still plan it.`, "warn");
     return;
   }
   message("");

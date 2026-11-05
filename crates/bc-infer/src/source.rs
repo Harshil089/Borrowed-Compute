@@ -22,13 +22,36 @@ pub enum Source {
     /// A local file, for the coordinator's own models and tests. Never accepted from
     /// another device.
     File(std::path::PathBuf),
+    /// A model published as several files (`…-00001-of-00007.gguf`, and so on): the first
+    /// holds the metadata, each holds some of the tensors.
+    Split(Vec<Source>),
+}
+
+/// The other files of a split model, from the first one's name: `x-00001-of-00003.gguf`
+/// gives `x-00001…`, `x-00002…` and `x-00003-of-00003.gguf`.
+fn split_parts(s: &str) -> Option<Vec<String>> {
+    let stem = s.strip_suffix(".gguf")?;
+    let (head, count) = stem.rsplit_once("-of-")?;
+    let (base, first) = head.rsplit_once('-')?;
+    if first.len() != 5 || count.len() != 5 || first != "00001" {
+        return None;
+    }
+    let n: usize = count.parse().ok()?;
+    (n > 1).then(|| (1..=n).map(|i| format!("{base}-{i:05}-of-{count}.gguf")).collect())
 }
 
 impl Source {
     /// A model location given by a person on this device.
     pub fn parse_local(s: &str) -> Result<Self> {
+        if let Some(parts) = split_parts(s) {
+            return Ok(Source::Split(parts.iter().map(|p| Source::one_local(p)).collect::<Result<_>>()?));
+        }
+        Source::one_local(s)
+    }
+
+    fn one_local(s: &str) -> Result<Self> {
         if s.starts_with("http://") || s.starts_with("https://") {
-            return Source::parse_remote(s);
+            return Source::one_remote(s);
         }
         Ok(Source::File(s.into()))
     }
@@ -36,6 +59,13 @@ impl Source {
     /// A model location sent by another device: web addresses only, and plain http only
     /// to this computer, so a device cannot point a lender at files or its local network.
     pub fn parse_remote(s: &str) -> Result<Self> {
+        if let Some(parts) = split_parts(s) {
+            return Ok(Source::Split(parts.iter().map(|p| Source::one_remote(p)).collect::<Result<_>>()?));
+        }
+        Source::one_remote(s)
+    }
+
+    fn one_remote(s: &str) -> Result<Self> {
         let url = reqwest::Url::parse(s).with_context(|| format!("{s:?} is not a web address"))?;
         let host = url.host_str().unwrap_or_default().trim_start_matches('[').trim_end_matches(']');
         let loopback = host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
@@ -50,11 +80,13 @@ impl Source {
         match self {
             Source::Http(u) => u.clone(),
             Source::File(p) => p.display().to_string(),
+            Source::Split(parts) => parts.first().map(|p| p.label()).unwrap_or_default(),
         }
     }
 
     pub async fn read(&self, start: u64, end: u64) -> Result<Vec<u8>> {
         match self {
+            Source::Split(_) => bail!("a split model is read file by file"),
             Source::File(p) => {
                 let p = p.clone();
                 tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
@@ -87,8 +119,22 @@ impl Source {
         }
     }
 
-    /// The GGUF header, reading more of the file until it fits.
+    /// The GGUF header, reading more of the file until it fits. For a split model: the
+    /// first file's metadata with every file's tensors, each marked with its file.
     pub async fn header(&self) -> Result<Header> {
+        if let Source::Split(parts) = self {
+            let headers = futures_join(parts.iter().map(|p| Box::pin(p.header()))).await;
+            let mut merged: Option<Header> = None;
+            for (i, h) in headers.into_iter().enumerate() {
+                let mut h = h.with_context(|| format!("part {} of the model", i + 1))?;
+                h.tensors.iter_mut().for_each(|t| t.file = i);
+                match merged.as_mut() {
+                    None => merged = Some(h),
+                    Some(m) => m.tensors.extend(h.tensors),
+                }
+            }
+            return merged.context("a split model with no parts");
+        }
         let mut len = 1u64 << 20;
         loop {
             let bytes = self.read(0, len).await?;
@@ -103,6 +149,20 @@ impl Source {
     /// Fetches `wanted` tensors into memory: adjacent ranges merged, big ones split, a few
     /// requests at a time. `progress` gets bytes done and bytes in all.
     pub async fn tensors(&self, wanted: &[&TensorInfo], progress: impl Fn(u64, u64) + Send + Sync) -> Result<HashMap<String, Arc<QTensor>>> {
+        if let Source::Split(parts) = self {
+            let mut map = HashMap::new();
+            for (i, part) in parts.iter().enumerate() {
+                let mine: Vec<&TensorInfo> = wanted.iter().copied().filter(|t| t.file == i).collect();
+                if !mine.is_empty() {
+                    map.extend(part.file_tensors(&mine, &progress).await?);
+                }
+            }
+            return Ok(map);
+        }
+        self.file_tensors(wanted, &progress).await
+    }
+
+    async fn file_tensors(&self, wanted: &[&TensorInfo], progress: &(dyn Fn(u64, u64) + Send + Sync)) -> Result<HashMap<String, Arc<QTensor>>> {
         let mut ranges: Vec<(u64, u64)> = wanted.iter().map(|t| (t.range.start, t.range.end)).collect();
         ranges.sort();
         let mut spans: Vec<(u64, u64)> = Vec::new();
@@ -191,6 +251,17 @@ async fn futures_join<F: std::future::Future>(futs: impl Iterator<Item = F>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_names_expand() {
+        assert_eq!(
+            split_parts("https://h/m/x-Q4-00001-of-00003.gguf").unwrap(),
+            ["https://h/m/x-Q4-00001-of-00003.gguf", "https://h/m/x-Q4-00002-of-00003.gguf", "https://h/m/x-Q4-00003-of-00003.gguf"]
+        );
+        assert!(split_parts("https://h/m/x-00002-of-00003.gguf").is_none(), "only from the first part");
+        assert!(split_parts("https://h/m/x.gguf").is_none());
+        assert!(matches!(Source::parse_remote("https://h/m/x-00001-of-00002.gguf").unwrap(), Source::Split(p) if p.len() == 2));
+    }
 
     #[test]
     fn remote_sources_are_web_addresses_only() {

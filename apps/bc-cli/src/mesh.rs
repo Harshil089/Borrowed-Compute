@@ -72,7 +72,35 @@ pub async fn probe_all(endpoint: &Endpoint, devices: Vec<(String, EndpointAddr)>
 
 /// Plans `model` over the devices that answered. Plan device indexes point into the
 /// returned list.
+/// Measured links between devices, by index into the list given to [`plan_for`].
+pub type Pairs = Vec<((usize, usize), Link)>;
+
+/// Has every pair of `devices` measure the link between them, all at once. Pairs that
+/// fail are left out; the planner then estimates them through this device.
+pub async fn probe_pairs(endpoint: &Endpoint, devices: &[MeshDevice]) -> Pairs {
+    let mut tasks = Vec::new();
+    for i in 0..devices.len() {
+        for j in i + 1..devices.len() {
+            let (ep, a, b) = (endpoint.clone(), devices[i].addr.clone(), devices[j].addr.clone());
+            tasks.push(tokio::spawn(async move { ((i, j), bc_mesh::probe::probe_link(&ep, a, b).await) }));
+        }
+    }
+    let mut out = Vec::new();
+    for t in tasks {
+        if let Ok(((i, j), Ok((rtt_ms, bw, _)))) = t.await {
+            out.push(((i, j), Link { rtt_ms, bw }));
+        }
+    }
+    out
+}
+
 pub fn plan_for<'a>(model: &Model, devices: &'a [MeshDevice], goal: Goal, tokens_per_pass: f64) -> (Plan, Vec<&'a MeshDevice>) {
+    plan_with(model, devices, &Vec::new(), goal, tokens_per_pass)
+}
+
+/// [`plan_for`] with measured device-to-device links. Pair indexes are into `devices`,
+/// which must all have answered.
+pub fn plan_with<'a>(model: &Model, devices: &'a [MeshDevice], pairs: &Pairs, goal: Goal, tokens_per_pass: f64) -> (Plan, Vec<&'a MeshDevice>) {
     let usable: Vec<&MeshDevice> = devices.iter().filter(|d| d.report.is_ok()).collect();
     let reports: Vec<&LinkReport> = usable.iter().map(|d| d.report.as_ref().unwrap()).collect();
     let specs: Vec<Device> = usable
@@ -84,7 +112,12 @@ pub fn plan_for<'a>(model: &Model, devices: &'a [MeshDevice], goal: Goal, tokens
             mem_bw: r.device.mem_bw,
         })
         .collect();
-    let links = Links::from_coordinator(&reports.iter().map(|r| Link { rtt_ms: r.rtt_ms, bw: r.up_bytes_s }).collect::<Vec<_>>());
+    let mut links = Links::from_coordinator(&reports.iter().map(|r| Link { rtt_ms: r.rtt_ms, bw: r.up_bytes_s }).collect::<Vec<_>>());
+    if usable.len() == devices.len() {
+        for &((i, j), link) in pairs {
+            links.set(i, j, link);
+        }
+    }
     let opts = Options { goal, tokens_per_pass, ..Default::default() };
     (plan::plan(model, &specs, &links, &opts), usable)
 }
@@ -106,13 +139,14 @@ pub struct Session {
 
 struct SessionState {
     devices: Vec<MeshDevice>,
+    pairs: Pairs,
     plan: Plan,
 }
 
 /// A catalog name, or a model's address.
 pub fn resolve_model(name: &str) -> Result<(String, String, Option<String>)> {
     if let Some(m) = find_model(name) {
-        let url = m.url.with_context(|| format!("{name} is published only as split files, which the engine does not read yet"))?;
+        let url = m.url.with_context(|| format!("{name} has no published address"))?;
         return Ok((m.name, url, m.draft));
     }
     if name.starts_with("https://") || name.starts_with("http://") {
@@ -156,11 +190,10 @@ impl Session {
             _ => None,
         };
         let tokens_per_pass = if draft.is_some() { 2.5 } else { 1.0 };
-        let plan = {
-            let usable = stage_devices(&devices);
-            let owned: Vec<MeshDevice> = usable.iter().map(|d| MeshDevice { name: d.name.clone(), addr: d.addr.clone(), report: d.report.clone() }).collect();
-            plan_for(&spec, &owned, goal, tokens_per_pass).0
-        };
+        let owned: Vec<MeshDevice> = stage_devices(&devices).iter().map(|d| MeshDevice { name: d.name.clone(), addr: d.addr.clone(), report: d.report.clone() }).collect();
+        status("Measuring the links between your devices…");
+        let pairs = probe_pairs(&endpoint, &owned).await;
+        let plan = plan_with(&spec, &owned, &pairs, goal, tokens_per_pass).0;
         if plan.pipelines.is_empty() {
             bail!("{name} does not fit in the free memory of the reachable devices together");
         }
@@ -168,7 +201,7 @@ impl Session {
         status(&format!("Starting {} pipeline(s); each device fetches its own layers…", plan.pipelines.len()));
         let clients = open_all(&endpoint, &url, &plan, &usable).await?;
         let llm = Arc::new(Llm::new(&header, clients, draft)?);
-        Ok(Session { llm, name, url, spec, goal, endpoint, state: tokio::sync::Mutex::new(SessionState { devices, plan }) })
+        Ok(Session { llm, name, url, spec, goal, endpoint, state: tokio::sync::Mutex::new(SessionState { devices, pairs, plan }) })
     }
 
     /// Stages and devices, for display: (device name, layers) per pipeline.
@@ -203,7 +236,10 @@ impl Session {
                 }
             }
         }
-        let links = Links::from_coordinator(&reports.iter().map(|r| Link { rtt_ms: r.rtt_ms, bw: r.up_bytes_s }).collect::<Vec<_>>());
+        let mut links = Links::from_coordinator(&reports.iter().map(|r| Link { rtt_ms: r.rtt_ms, bw: r.up_bytes_s }).collect::<Vec<_>>());
+        for &((i, j), link) in &s.pairs {
+            links.set(i, j, link);
+        }
         let opts = Options { goal: self.goal, ..Default::default() };
         let next = plan::replan(&self.spec, &specs, &links, &opts, &s.plan);
         let moved = next.pipelines.iter().map(|p| &p.stages).ne(s.plan.pipelines.iter().map(|p| &p.stages));
@@ -222,13 +258,14 @@ impl Session {
         let devices = probe_all(&self.endpoint, targets).await;
         let usable = stage_devices(&devices);
         let owned: Vec<MeshDevice> = usable.iter().map(|d| MeshDevice { name: d.name.clone(), addr: d.addr.clone(), report: d.report.clone() }).collect();
-        let (plan, _) = plan_for(&self.spec, &owned, self.goal, 1.0);
+        let pairs = probe_pairs(&self.endpoint, &owned).await;
+        let (plan, _) = plan_with(&self.spec, &owned, &pairs, self.goal, 1.0);
         if plan.pipelines.is_empty() {
             bail!("the devices still reachable cannot hold {}", self.name);
         }
         let clients = open_all(&self.endpoint, &self.url, &plan, &usable).await?;
         self.llm.set_replicas(clients);
-        *self.state.lock().await = SessionState { devices, plan };
+        *self.state.lock().await = SessionState { devices, pairs, plan };
         Ok(())
     }
 }

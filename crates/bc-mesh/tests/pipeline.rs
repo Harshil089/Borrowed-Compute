@@ -217,3 +217,15 @@ fn m_config(m: &Mesh) -> NetConfig {
     let relays = m.devices[0].addr().relay_urls().next().cloned().map(iroh::RelayMap::from);
     NetConfig { relays, relay_only: true, insecure_relay_tls: true }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn devices_measure_the_link_between_them_on_the_coordinators_word() {
+    let m = mesh(2, Duration::ZERO, false).await;
+    // The two devices never paired with each other; the coordinator's ticket lets them talk.
+    let (rtt, up, relay) = bc_mesh::probe::probe_link(&m.coordinator, m.devices[0].addr(), m.devices[1].addr()).await.unwrap();
+    assert!(rtt >= 0.0 && up > 0.0 && relay);
+    // A coordinator the devices do not trust gets nowhere.
+    let stranger = bind(SecretKey::generate(), m_config(&m)).await.unwrap();
+    let err = bc_mesh::probe::probe_link(&stranger, m.devices[0].addr(), m.devices[1].addr()).await.expect_err("refused");
+    assert!(format!("{err:#}").contains("not paired"), "{err:#}");
+}

@@ -77,11 +77,35 @@ impl Host {
         if let MeshMsg::Feed { ticket } = first {
             return self.feed(conn, send, peer, recv, ticket).await;
         }
+        // A link probe from another lender, vouched for by a coordinator this device trusts.
+        if let MeshMsg::PeerHello { coordinator, ticket } = first {
+            let allowed = if (self.trust)(&coordinator) {
+                ticket.check(ticket.session, &coordinator, &peer, &self.endpoint.id())
+            } else {
+                Err(anyhow::anyhow!("device {coordinator} is not paired with this device"))
+            };
+            if let Err(e) = allowed {
+                return refuse(&conn, send, format!("{e:#}")).await;
+            }
+            send_msg(&mut send, &MeshMsg::Ready).await?;
+            let next = recv_msg::<MeshMsg>(&mut recv).await?;
+            return probe::answer(next, &mut send, &mut recv, self.factory.is_some()).await;
+        }
         if !(self.trust)(&peer) {
             return refuse(&conn, send, format!("device {peer} is not paired with this device")).await;
         }
         match first {
             MeshMsg::Setup(setup) => self.run_stage(conn, send, recv, peer, setup).await,
+            MeshMsg::ProbePeer { addr, ticket } => {
+                let reply = match probe::measure_peer(&self.endpoint, peer, addr, ticket).await {
+                    Ok(m) => m,
+                    Err(e) => MeshMsg::Error { reason: format!("{e:#}") },
+                };
+                send_msg(&mut send, &reply).await?;
+                send.finish()?;
+                let _ = tokio::time::timeout(Duration::from_secs(10), conn.closed()).await;
+                Ok(())
+            }
             other => probe::answer(other, &mut send, &mut recv, self.factory.is_some()).await,
         }
     }

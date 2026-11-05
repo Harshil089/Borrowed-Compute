@@ -61,6 +61,8 @@ pub struct TensorInfo {
     pub ty: GgmlType,
     /// Absolute byte range in the file.
     pub range: Range<u64>,
+    /// Which file of a model split over several holds it (0 for a single file).
+    pub file: usize,
 }
 
 impl TensorInfo {
@@ -203,7 +205,7 @@ pub fn parse(bytes: &[u8]) -> Result<Header> {
         let elements: u64 = dims.iter().product();
         let len = ty.bytes_for(elements as usize).with_context(|| format!("tensor {name}"))? as u64;
         let start = data_start + offset;
-        tensors.push(TensorInfo { name, dims, ty, range: start..start + len });
+        tensors.push(TensorInfo { name, dims, ty, range: start..start + len, file: 0 });
     }
     Ok(Header { version, meta, tensors, data_start })
 }

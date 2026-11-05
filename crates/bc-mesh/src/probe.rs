@@ -39,30 +39,79 @@ pub async fn probe(endpoint: &Endpoint, addr: impl Into<EndpointAddr>) -> Result
         other => bail!("unexpected reply {other:?}"),
     };
 
+    let (rtt_ms, up_bytes_s) = measure(&mut send, &mut recv, BULK_BYTES).await?;
+    let via_relay = bc_net::via_relay(&conn);
+    send.finish()?;
+    conn.close(0u32.into(), b"done");
+    Ok(LinkReport { rtt_ms, up_bytes_s, via_relay, device })
+}
+
+/// Median round trip of a few pings, then the upload rate for `bulk` bytes, on a stream
+/// whose other end runs [`answer`].
+pub(crate) async fn measure(send: &mut iroh::endpoint::SendStream, recv: &mut iroh::endpoint::RecvStream, bulk: usize) -> Result<(f64, f64)> {
     let mut rtts = Vec::with_capacity(PINGS);
     for nonce in 0..PINGS as u64 {
         let t = Instant::now();
-        send_msg(&mut send, &MeshMsg::Ping { nonce }).await?;
-        match recv_msg::<MeshMsg>(&mut recv).await? {
+        send_msg(send, &MeshMsg::Ping { nonce }).await?;
+        match recv_msg::<MeshMsg>(recv).await? {
             MeshMsg::Pong { nonce: n } if n == nonce => rtts.push(t.elapsed().as_secs_f64() * 1000.0),
             other => bail!("unexpected reply {other:?}"),
         }
     }
     rtts.sort_by(f64::total_cmp);
-
     let chunk = vec![0x5a; BULK_CHUNK];
-    for _ in 0..BULK_BYTES / BULK_CHUNK {
-        send_msg(&mut send, &MeshMsg::Bulk { data: chunk.clone() }).await?;
+    for _ in 0..bulk / BULK_CHUNK {
+        send_msg(send, &MeshMsg::Bulk { data: chunk.clone() }).await?;
     }
-    send_msg(&mut send, &MeshMsg::BulkDone).await?;
-    let up_bytes_s = match recv_msg::<MeshMsg>(&mut recv).await? {
+    send_msg(send, &MeshMsg::BulkDone).await?;
+    let up = match recv_msg::<MeshMsg>(recv).await? {
         MeshMsg::BulkAck { bytes, micros } => bytes as f64 / (micros.max(1) as f64 / 1e6),
         other => bail!("unexpected reply {other:?}"),
     };
+    Ok((rtts[PINGS / 2], up))
+}
+
+/// Bytes sent to measure a link between two devices: less than a coordinator's probe,
+/// since every pair is measured.
+const PEER_BULK: usize = 512 << 10;
+
+/// Asks device `a` to measure its link to device `b`, with a ticket that lets `b` accept
+/// `a`. Both must be paired with this device; they need not be with each other.
+pub async fn probe_link(endpoint: &Endpoint, a: EndpointAddr, b: EndpointAddr) -> Result<(f64, f64, bool)> {
+    let ticket = crate::ticket::Ticket::sign(endpoint.secret_key(), rand::random(), a.id, b.id);
+    let conn = tokio::time::timeout(CONNECT_TIMEOUT, endpoint.connect(a, MESH_ALPN))
+        .await
+        .context("the device did not answer")?
+        .context("connecting")?;
+    let (mut send, mut recv) = conn.open_bi().await?;
+    send_msg(&mut send, &MeshMsg::ProbePeer { addr: b, ticket }).await?;
+    let reply = tokio::time::timeout(Duration::from_secs(60), recv_msg::<MeshMsg>(&mut recv)).await.context("no answer in time")??;
+    conn.close(0u32.into(), b"done");
+    match reply {
+        MeshMsg::PeerLink { rtt_ms, up_bytes_s, via_relay } => Ok((rtt_ms, up_bytes_s, via_relay)),
+        MeshMsg::Error { reason } => bail!(reason),
+        other => bail!("unexpected reply {other:?}"),
+    }
+}
+
+/// On device `a`: connects to `b` with the coordinator's ticket and measures the link.
+pub(crate) async fn measure_peer(endpoint: &Endpoint, coordinator: iroh::EndpointId, b: EndpointAddr, ticket: crate::ticket::Ticket) -> Result<MeshMsg> {
+    let conn = tokio::time::timeout(CONNECT_TIMEOUT, endpoint.connect(b, MESH_ALPN))
+        .await
+        .context("the other device did not answer")?
+        .context("connecting to the other device")?;
+    let (mut send, mut recv) = conn.open_bi().await?;
+    send_msg(&mut send, &MeshMsg::PeerHello { coordinator, ticket }).await?;
+    match recv_msg::<MeshMsg>(&mut recv).await? {
+        MeshMsg::Ready => {}
+        MeshMsg::Error { reason } => bail!("the other device refused: {reason}"),
+        other => bail!("unexpected reply {other:?}"),
+    }
+    let (rtt_ms, up_bytes_s) = measure(&mut send, &mut recv, PEER_BULK).await?;
     let via_relay = bc_net::via_relay(&conn);
     send.finish()?;
     conn.close(0u32.into(), b"done");
-    Ok(LinkReport { rtt_ms: rtts[PINGS / 2], up_bytes_s, via_relay, device })
+    Ok(MeshMsg::PeerLink { rtt_ms, up_bytes_s, via_relay })
 }
 
 /// This device, as a probe reports it.

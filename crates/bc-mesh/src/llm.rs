@@ -19,9 +19,21 @@ use std::time::Instant;
 
 use anyhow::{anyhow, bail, Context, Result};
 use bc_infer::gguf::Header;
-use bc_infer::{Config, Local, Sampling, Tokenizer};
+use bc_infer::{Config, Kv, Local, Part, Sampling, Tokenizer};
 use iroh::{Endpoint, EndpointAddr};
 use tokio::sync::{oneshot, Mutex};
+
+/// Runs the draft model off the async threads: scores after each token in `tokens`.
+async fn draft_run(d: (Arc<Part>, Kv), tokens: Vec<u32>, pos: usize) -> Result<((Arc<Part>, Kv), Vec<f32>)> {
+    tokio::task::spawn_blocking(move || {
+        let (part, mut kv) = d;
+        let mut x = part.embed(&tokens)?;
+        part.forward(&mut x, tokens.len(), pos, &mut kv)?;
+        let scores = part.logits(&x, tokens.len())?;
+        Ok(((part, kv), scores))
+    })
+    .await?
+}
 
 use crate::codec::Encoding;
 use crate::msg::{Activation, Meta};
@@ -155,7 +167,8 @@ pub struct Llm {
     pub tokenizer: Tokenizer,
     pub cfg: Config,
     replicas: StdMutex<Vec<Arc<Client>>>,
-    draft: Option<Mutex<Local>>,
+    /// Shared by every request: each keeps its own cache, so drafts run side by side.
+    draft: Option<Arc<Part>>,
 }
 
 impl Llm {
@@ -166,7 +179,7 @@ impl Llm {
                 bail!("the draft model's vocabulary ({}) differs from the model's ({})", d.tokenizer.vocab(), tokenizer.vocab());
             }
         }
-        Ok(Llm { tokenizer, cfg: Config::from_header(header)?, replicas: StdMutex::new(replicas), draft: draft.map(Mutex::new) })
+        Ok(Llm { tokenizer, cfg: Config::from_header(header)?, replicas: StdMutex::new(replicas), draft: draft.map(|d| Arc::new(d.part)) })
     }
 
     pub fn replicas(&self) -> Vec<Arc<Client>> {
@@ -249,18 +262,18 @@ impl Llm {
         }
 
         let speculate = sampling.temperature <= 0.0 && self.draft.is_some();
-        let mut draft = match &self.draft {
-            Some(d) if speculate => Some(d.lock().await),
+        let mut draft: Option<(Arc<Part>, Kv)> = match &self.draft {
+            Some(d) if speculate => Some((d.clone(), d.new_kv())),
             _ => None,
         };
         let mut draft_len = 0;
-        if let Some(d) = draft.as_mut() {
-            d.scores(prompt, 0)?;
+        if let Some(d) = draft.take() {
+            draft = Some(draft_run(d, prompt.to_vec(), 0).await?.0);
             draft_len = prompt.len();
         }
         while out.len() < max_tokens {
             stats.passes += 1;
-            let Some(d) = draft.as_mut() else {
+            let Some(mut d) = draft.take() else {
                 // One token a pass.
                 let ids = client.call(meta(target_len, false), Activation::Tokens(seq[target_len..].to_vec())).await?;
                 target_len = seq.len();
@@ -274,12 +287,15 @@ impl Llm {
             let mut feed = seq[draft_len..].to_vec();
             let mut pos = draft_len;
             for _ in 0..DRAFT_TOKENS.min(max_tokens - out.len()) {
-                let scores = d.scores(&feed, pos)?;
-                let next = bc_infer::sample::argmax(&scores[(feed.len() - 1) * self.cfg.vocab..]);
-                pos += feed.len();
+                let n = feed.len();
+                let (back, scores) = draft_run(d, feed, pos).await?;
+                d = back;
+                let next = bc_infer::sample::argmax(&scores[(n - 1) * self.cfg.vocab..]);
+                pos += n;
                 guesses.push(next);
                 feed = vec![next];
             }
+            draft = Some(d);
             // Target: the real tokens it has not seen plus the guesses, every row scored.
             let base = seq.len() - target_len;
             let mut rows = seq[target_len..].to_vec();

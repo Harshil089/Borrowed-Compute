@@ -144,7 +144,7 @@ The inner sum is in i32 and compiles to the CPU's integer multiply-add. This is 
 - The last stage samples: greedy, or temperature with top-p and a seed. It returns token ids, never the 150k-wide score vector.
 - **Owner decision, 2026-11-06:** weights may stay in memory on a lending device while the model runs, never on disk.
 
-**Coordinator** (`bc_mesh::llm`):
+**Coordinator** (`bc_mesh::llm`). The draft model is shared by every request; each request keeps its own cache, and drafting runs off the async threads.
 - A `Client` multiplexes any number of requests over one pipeline. Stages answer in the order batches arrive, so requests go out back to back and every stage stays busy.
 - `Llm::generate` sends a prompt in chunks of 256 tokens without waiting between them (chunked prefill, as in Sarathi). It then decodes, speculatively when a draft model is loaded and the request is greedy:
   - the draft guesses 4 tokens;
@@ -157,6 +157,7 @@ The inner sum is in i32 and compiles to the CPU's integer multiply-add. This is 
 **Serving** (`bc_cli::mesh::Session`, `bc_cli::serve`):
 - **Starting:** `Session::start` probes every paired device at once and keeps those with an engine. It reads the model's real sizes from its header, plans, and opens one pipeline per replica.
 - **Live balancing:** every 60 seconds `rebalance` turns the measured stage times back into an effective speed per device. A device whose owner got busy looks slower and gets fewer layers. Layers move only when the new plan is at least 15% better.
+- **Measured links:** before planning, every pair of devices measures the link between them, at once. Device A connects to device B with a ticket the coordinator signed, and B accepts it only from a coordinator it is paired with. The planner then orders the ring by real device-to-device round trips instead of an upper bound.
 - **Recovery:** when a pipeline fails, `recover` probes again, leaves out devices that do not answer, plans again and retries the request once.
 - **Endpoint:** `bc mesh serve` exposes `POST /v1/chat/completions` (streamed or not) and `GET /v1/models` on localhost, so any OpenAI client uses the mesh.
 
@@ -169,7 +170,7 @@ The inner sum is in i32 and compiles to the CPU's integer multiply-add. This is 
 | `bc mesh run <model> "<prompt>" [--draft <model>|none]` | Answers one prompt |
 | `bc mesh serve <model> [--port 8484] [--throughput]` | Serves the model until Ctrl+C |
 
-`<model>` is a catalog name (Qwen2.5 0.5B to 72B, Llama 3.1 8B, 3.2 1B, 3.3 70B) or a GGUF https address.
+`<model>` is a catalog name (Qwen2.5 0.5B to 72B, Llama 3.1 8B, 3.2 1B, 3.3 70B, Hermes 3 405B) or a GGUF https address. Split GGUF files (`…-00001-of-00007.gguf`) are read as one model: the header merges every file's tensors, and each device fetches its layers from whichever files hold them.
 
 The desktop app has a **Mesh** page under Use. It picks the model and the goal, measures the devices, shows where each part runs (with the measured time per stage), starts and stops serving, shows the endpoint address, and has a box to try the model.
 
@@ -202,8 +203,5 @@ The planner's throughput split assigns each layer where the stage total stays sm
 ## 7. Limits and next steps
 
 - **CPU only.** Metal and CUDA kernels would multiply per-device speed; the mesh does not change.
-- **One-file GGUF only.** Split files, like Llama 3.1 405B's, are planned but cannot run yet.
-- **The draft model serializes requests.** While one greedy request drafts, others wait; a draft per replica would remove that.
-- **Device-to-device links are estimated.** The planner uses an upper bound through the coordinator's side of the internet. Ticketed device-to-device probes would measure them.
 - **Int8 activations drift slightly.** On the wire and inside products, int8 can flip a near-tie token after a few dozen tokens compared with f32. Greedy text then differs slightly from an f32 run, but stays exact across any split.
 - **Single conversation speed.** Adding devices fits larger models and serves more requests at once; one conversation is fastest on the fewest, fastest devices (3.2).
