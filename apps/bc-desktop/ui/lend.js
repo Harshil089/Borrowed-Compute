@@ -45,6 +45,10 @@ function renderArrivals() {
   $("arr-to").textContent = deviceCode(me);
   $("arr-to-name").textContent = me;
   $("arr-date").textContent = new Date().toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  // A server has no finish line: with no batch run live, the card shows it until it stops.
+  const svc = !(job && !job.end) && services[0];
+  if (svc) { renderServing(svc); return; }
+  $("live-heading").textContent = "Current run";
   const key = job ? `${job.job_id}:${job.end ? job.end.kind : "live"}` : "none";
   if (key === arrivalsKey) return;
   const firstRender = arrivalsKey === null;
@@ -101,12 +105,71 @@ function renderArrivals() {
   stub.classList.toggle("arrived", !firstRender);
 }
 
+function renderServing(svc) {
+  liveSince = svc.started_at * 1000;
+  tickClock();
+  const key = `svc:${svc.job_id}:${svc.ports.join(",")}`;
+  if (key === arrivalsKey) return;
+  arrivalsKey = key;
+  const from = clientName(svc.owner);
+  $("live-heading").textContent = "Serving";
+  $("arr-tab").textContent = "Serving";
+  $("arr-from").textContent = deviceCode(from);
+  $("arr-from-name").textContent = from;
+  $("arr-cmd").className = "arr-cmd argv";
+  $("arr-cmd").textContent = svc.argv.join(" ");
+  setArrivalLegs(1, false);
+  const stub = $("arr-stub");
+  stub.innerHTML = `
+    <div class="arr-time"><span class="label">${svc.ports.length > 1 ? "Ports" : "Port"}</span><strong class="num">${svc.ports.length ? esc(svc.ports.join(", ")) : "–"}</strong></div>
+    <div class="arr-figs"><span class="plain"><b>Runs until stopped</b>here or on ${esc(from)}, keeping this computer awake</span></div>
+    <button class="danger stop" data-lend-stop="${esc(svc.job_id)}" data-cmd="${esc(svc.argv.join(" "))}">Stop</button>`;
+  stub.classList.remove("hidden", "arrived");
+}
+
 function tickClock() {
   if (liveSince == null) return;
   const s = Math.max(0, Math.round((Date.now() - liveSince) / 1000));
-  $("arr-clock").innerHTML = s < 60 ? `${s}<i>s</i>` : `${Math.floor(s / 60)}<i>m</i> ${s % 60}<i>s</i>`;
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  $("arr-clock").innerHTML = s < 60 ? `${s}<i>s</i>`
+    : h ? `${h}<i>h</i> ${m}<i>m</i>` : `${m}<i>m</i> ${s % 60}<i>s</i>`;
 }
 setInterval(tickClock, 1000);
+
+// ---- This computer's cores, measured once a second while a run or server is up ----
+// Each cell's opacity is that core's measured use; the whole grid's colour shows the
+// average: ink when light, yellow over 40%, red over 66%.
+let coresIdle = true;
+function sizeCores(n) {
+  const grid = $("cores");
+  if (grid.children.length === n) return;
+  grid.innerHTML = "<div class=\"core\"><i></i></div>".repeat(n);
+  grid.style.setProperty("--cols", String(n <= 8 ? n : n <= 12 ? 6 : 8));
+}
+function paintCores(loads) {
+  sizeCores(loads.length);
+  const cells = $("cores").children;
+  let sum = 0;
+  loads.forEach((l, i) => { sum += l; cells[i].style.setProperty("--l", l > 0 ? Math.max(0.06, l).toFixed(2) : "0"); });
+  const avg = loads.length ? sum / loads.length : 0;
+  const tier = avg > 0.66 ? "high" : avg > 0.4 ? "mid" : "low";
+  const card = $("live-run");
+  card.dataset.heat = tier;
+  card.style.setProperty("--heat", (avg * 1.4).toFixed(2));
+  document.querySelectorAll("#heat-legend span").forEach((s) => s.classList.toggle("on", s.dataset.t === tier));
+  $("cores-busy").textContent = sum > 0 ? `${sum.toFixed(1)} of ${loads.length} busy` : "idle";
+}
+sizeCores(navigator.hardwareConcurrency || 8);
+$("cores-title").textContent = /Mac/.test(navigator.platform || navigator.userAgent) ? "Cores on this Mac" : "Cores on this PC";
+setInterval(async () => {
+  if (document.visibilityState !== "visible" || !status?.signed_in) return;
+  const busy = status.lending && (jobs.some((j) => !j.rejected && !j.end) || services.length > 0);
+  if (!busy) {
+    if (!coresIdle) { paintCores(new Array($("cores").children.length).fill(0)); coresIdle = true; }
+    return;
+  }
+  try { paintCores(await invoke("cpu_load")); coresIdle = false; } catch { /* next tick tries again */ }
+}, 1000);
 
 // Writes HTML only when it differs, so a poll never resets focus or replays animation.
 function setHtml(id, html) {
@@ -205,6 +268,7 @@ function render() {
   $("lend-nav").classList.toggle("hidden", !signedIn);
   if (!signedIn && !$("lend-view").classList.contains("hidden")) showRun();
   if (document.activeElement !== $("lending")) $("lending").checked = !!status?.lending;
+  $("live-run").classList.toggle("paused", !!status && !status.lending);
   if (status?.start_error) showError(`The agent could not start: ${status.start_error}`);
   else if (status?.host.hosting && status.host.error) showError(`The built-in cloud is not running: ${status.host.error}`);
   if (!signedIn) return;
@@ -221,6 +285,7 @@ function render() {
     })));
   $("requests-block").classList.toggle("hidden", !pending.length);
   const pendingHtml = pending.map((p) => `
+    <div class="fold" data-fold="${p.id}"><div>
     <div class="pass die-cut ${seenRequests.has(p.id) ? "" : "arrived"}" data-request="${p.id}">
       <div class="pass-main">
         <span class="pass-from">${esc(p.client_name)}</span>
@@ -233,7 +298,8 @@ function render() {
         <button class="primary" data-approve="${p.id}">Approve</button>
         <span class="pass-msg" id="msg-${p.id}"></span>
       </div>
-    </div>`).join("");
+    </div>
+    </div></div>`).join("");
   // Compare without the one-time arrival class, so a repeat poll is a no-op.
   // Keyed by request id only, so a poll never clears a code being typed.
   if ($("requests").dataset.key !== pending.map((p) => p.id).join()) {
@@ -436,6 +502,14 @@ async function approvePairing(id) {
   try {
     if (String(id).startsWith("g")) await invoke("approve_guest", { id: Number(id.slice(1)), code });
     else await invoke("approve", { id: Number(id), code });
+    // Confirm on the request itself, then fold it away so the page below glides up.
+    const fold = document.querySelector(`[data-fold="${id}"]`);
+    if (fold && !window.motion?.reduced()) {
+      fold.querySelector(".pass-stub").innerHTML = `<span class="pass-done">Paired</span>`;
+      await new Promise((r) => setTimeout(r, 650));
+      fold.classList.add("closing");
+      await new Promise((r) => setTimeout(r, 300));
+    }
     await refresh();
   } catch (e) {
     msg.textContent = String(e).replace(/ \(400 Bad Request\)$/, "");
@@ -554,21 +628,41 @@ $("lending").addEventListener("change", async (event) => {
 // ---- Views: the run page, or one of this device's pages, remembered between launches ----
 function showRun() {
   try { localStorage.removeItem("page"); } catch { /* storage off */ }
+  const wasHidden = $("run-view").classList.contains("hidden");
   $("lend-view").classList.add("hidden");
   $("run-view").classList.remove("hidden");
   document.querySelectorAll("[data-nav]").forEach((b) => b.setAttribute("aria-current", "false"));
+  const dir = window.motion?.syncNav() ?? 0;
+  if (wasHidden) window.motion?.enter($("run-view"), dir);
 }
 
 function showPage(name) {
+  const before = $("run-view").classList.contains("hidden") ? document.querySelector('[data-nav][aria-current="page"]')?.dataset.nav : "run";
   $("run-view").classList.add("hidden");
   $("lend-view").classList.remove("hidden");
   document.querySelectorAll("[data-page]").forEach((p) => p.classList.toggle("hidden", p.dataset.page !== name));
   document.querySelectorAll("[data-nav]").forEach((b) => b.setAttribute("aria-current", b.dataset.nav === name ? "page" : "false"));
   $("page-title").textContent = document.querySelector(`[data-nav="${name}"]`).dataset.title;
   try { localStorage.setItem("page", name); } catch { /* storage off */ }
+  $("lend-view").scrollTop = 0;
+  $("lend-view").classList.remove("scrolled");
+  const dir = window.motion?.syncNav() ?? 0;
+  if (before !== name) window.motion?.enter(document.querySelector(`[data-page="${name}"]`), dir);
 }
 document.querySelectorAll("[data-nav]").forEach((b) => b.addEventListener("click", () => showPage(b.dataset.nav)));
 window.lendUI = { showRun, showPage, refresh };
+// The command palette's This device entries.
+window.motion?.addCommands(() => {
+  if (!status?.signed_in) return [];
+  const pages = [...document.querySelectorAll("[data-nav]")].map((b) => ({
+    group: "This device",
+    label: b.dataset.title,
+    icon: b.querySelector("use")?.getAttribute("href").slice(1),
+    run: () => showPage(b.dataset.nav),
+  }));
+  pages.push({ group: "This device", label: status.lending ? "Stop lending this computer" : "Lend this computer", icon: "i-gear", run: () => $("lending").click() });
+  return pages;
+});
 let savedPage = null;
 try { savedPage = localStorage.getItem("page"); } catch { /* storage off */ }
 if (savedPage) showPage(savedPage);

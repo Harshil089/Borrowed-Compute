@@ -101,6 +101,8 @@ pub struct LendState {
     pub run_in_background: AtomicBool,
     /// Set by the menu-bar Quit and by update installs, which must really exit.
     pub quitting: AtomicBool,
+    /// Per-core CPU use between two reads, for the window's live core grid.
+    cpu: StdMutex<sysinfo::System>,
 }
 
 fn background_flag(home: &Path) -> PathBuf {
@@ -142,6 +144,7 @@ impl LendState {
             lending: AtomicBool::new(lending),
             run_in_background: AtomicBool::new(background_flag(home).exists()),
             quitting: AtomicBool::new(false),
+            cpu: StdMutex::new(sysinfo::System::new()),
         }
     }
 
@@ -437,6 +440,21 @@ pub fn remove_guest(state: State<'_, LendState>, device: String) -> CmdResult<()
     Ok(())
 }
 
+/// Each logical CPU's use since the previous read, from 0.0 to 1.0: the whole computer's
+/// load, not only the job's. The window reads it once a second while a run or server is up,
+/// so the core grid shows measured numbers. The very first read has nothing to compare
+/// against and comes back as zeros.
+#[tauri::command]
+pub fn cpu_load(state: State<'_, LendState>) -> Vec<f32> {
+    let mut sys = state.cpu.lock().unwrap_or_else(|e| e.into_inner());
+    cpu_sample(&mut sys)
+}
+
+fn cpu_sample(sys: &mut sysinfo::System) -> Vec<f32> {
+    sys.refresh_cpu_usage();
+    sys.cpus().iter().map(|cpu| (cpu.cpu_usage() / 100.0).clamp(0.0, 1.0)).collect()
+}
+
 #[tauri::command]
 pub fn recent_jobs(state: State<'_, LendState>) -> Vec<JobRecord> {
     state.jobs.lock().unwrap().iter().cloned().collect()
@@ -626,6 +644,17 @@ fn job_file_text(job: &JobRecord, output: &JobOutput) -> String {
 mod tests {
     use super::*;
     use bc_proto::wire::JobUsage;
+
+    #[test]
+    fn cpu_sample_reads_every_core_as_a_fraction() {
+        let mut sys = sysinfo::System::new();
+        cpu_sample(&mut sys);
+        std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+        let loads = cpu_sample(&mut sys);
+        let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        assert_eq!(loads.len(), cores);
+        assert!(loads.iter().all(|l| (0.0..=1.0).contains(l)), "{loads:?}");
+    }
 
     #[test]
     fn job_file_has_command_result_and_usage() {
