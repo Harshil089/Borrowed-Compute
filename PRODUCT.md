@@ -44,7 +44,7 @@ Not pixels (remote desktop, cloud streaming) and not infrastructure (SSH build f
 
 ## Brand Commitments
 
-Owner decision, 2026-11-01: the apps follow the established design language of best-in-class software, not a themed or novel world. The bar is Stripe (light, precise, indigo accent, impeccable type and tables) and native macOS apps (sidebar navigation, system type and greys, quiet motion). Light is the default with a matching dark mode. Earlier themed looks (the jet-age ticket wallet, Silicon Die) were rejected; do not reintroduce metaphors, novelty palettes or decorative motion.
+Owner decision, 2026-11-05, refining the 2026-11-01 one: the apps follow a precise, quiet language, not a themed or novel world. Ink is the only accent (black in light mode, near-white in dark), never purple or indigo. The type is Geist and Geist Mono, bundled with the app. Structure follows native apps: sidebar navigation and native window frames. Motion is suave but functional: it shows what changed, never decorates. The one place colour carries meaning beyond status is the live core grid, which moves from ink through yellow to red as measured load rises. Light is the default with a matching dark mode. Earlier themed looks (the jet-age ticket wallet, Silicon Die) were rejected; do not reintroduce metaphors or novelty palettes.
 
 ## Evidence on Hand
 
