@@ -75,8 +75,8 @@ pub fn catalog() -> Vec<Model> {
         m("qwen2.5-32b", 64, 18.5, 0.9, 5120, hf("bartowski/Qwen2.5-32B-Instruct-GGUF/resolve/main/Qwen2.5-32B-Instruct-Q4_K_M.gguf"), Some("qwen2.5-0.5b")),
         m("llama-3.3-70b", 80, 39.6, 1.3, 8192, hf("bartowski/Llama-3.3-70B-Instruct-GGUF/resolve/main/Llama-3.3-70B-Instruct-Q4_K_M.gguf"), Some("llama-3.2-1b")),
         m("qwen2.5-72b", 80, 44.2, 1.4, 8192, hf("bartowski/Qwen2.5-72B-Instruct-GGUF/resolve/main/Qwen2.5-72B-Instruct-Q4_K_M.gguf"), Some("qwen2.5-0.5b")),
-        // Published only as split files, which the engine does not read yet: plans only.
-        m("llama-3.1-405b", 126, 226.0, 2.6, 16384, None, Some("llama-3.2-1b")),
+        // Llama 3.1 405B (Meta's own files are gated; Hermes 3 is the open fine-tune), in 7 files.
+        m("hermes-3-405b", 126, 226.4, 2.6, 16384, hf("bartowski/Hermes-3-Llama-3.1-405B-GGUF/resolve/main/Hermes-3-Llama-3.1-405B-Q4_K_M/Hermes-3-Llama-3.1-405B-Q4_K_M-00001-of-00007.gguf"), Some("llama-3.2-1b")),
     ]
 }
 

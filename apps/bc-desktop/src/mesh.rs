@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use bc_cli::mesh::{paired_devices, plan_for, probe_all, MeshDevice, Session};
+use bc_cli::mesh::{paired_devices, plan_with, probe_all, probe_pairs, MeshDevice, Session};
 use bc_mesh::plan::Goal;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
@@ -120,15 +120,13 @@ pub async fn mesh_probe(state: State<'_, AppState>, model: Option<String>, throu
     let targets = targets(&state).await?;
     let ep = endpoint(&state).await?;
     let devices = probe_all(&ep, targets).await;
-    bc_net::release(ep).await;
     let mut out = Probe { devices: rows(&devices), pipelines: Vec::new(), unused: Vec::new() };
+    let usable: Vec<MeshDevice> = devices.into_iter().filter(|d| d.report.as_ref().is_ok_and(|r| r.device.engine)).collect();
+    let pairs = probe_pairs(&ep, &usable).await;
+    bc_net::release(ep).await;
     if let Some(m) = model.as_deref().and_then(bc_cli::mesh::find_model) {
-        let usable: Vec<MeshDevice> = devices
-            .into_iter()
-            .filter(|d| d.report.as_ref().is_ok_and(|r| r.device.engine))
-            .collect();
         let goal = if throughput { Goal::Throughput } else { Goal::Latency };
-        let (plan, names) = plan_for(&m, &usable, goal, 1.0);
+        let (plan, names) = plan_with(&m, &usable, &pairs, goal, 1.0);
         out.pipelines = plan
             .pipelines
             .iter()
