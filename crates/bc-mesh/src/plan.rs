@@ -95,6 +95,10 @@ pub struct Device {
     /// Bytes of weights a second its GPU reads in a decoding product, as measured.
     #[serde(default)]
     pub gpu_bw: f64,
+    /// The coordinator itself. Its stage, if it gets one, comes first: tokens start here,
+    /// so its layers cost no hop at all.
+    #[serde(default)]
+    pub local: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -261,12 +265,16 @@ pub fn estimate(model: &Model, devices: &[Device], links: &Links, opts: &Options
         .iter()
         .map(|s| stage_secs(model, &devices[s.device], s.layers.end - s.layers.start) * 1000.0)
         .collect();
+    // This computer is the coordinator: its links are the coordinator's, and the hop
+    // between the two costs nothing.
+    let at = |d: usize| if d < devices.len() && devices[d].local { c } else { d };
+    let link = |a: usize, b: usize| if at(a) == at(b) { Link { rtt_ms: 0.0, bw: f64::INFINITY } } else { links.get(at(a), at(b)) };
     // Token ids are a few bytes: those hops cost half a round trip. Hidden states also
     // pay for their bytes.
-    let mut network_ms = links.get(c, stages[0].device).rtt_ms / 2.0 + links.get(stages[stages.len() - 1].device, c).rtt_ms / 2.0;
+    let mut network_ms = link(c, stages[0].device).rtt_ms / 2.0 + link(stages[stages.len() - 1].device, c).rtt_ms / 2.0;
     let mut slowest_transfer_ms: f64 = 0.0;
     for pair in stages.windows(2) {
-        let link = links.get(pair[0].device, pair[1].device);
+        let link = link(pair[0].device, pair[1].device);
         let transfer_ms = hidden_bytes / link.bw * 1000.0;
         network_ms += link.rtt_ms / 2.0 + transfer_ms;
         slowest_transfer_ms = slowest_transfer_ms.max(transfer_ms);
@@ -370,6 +378,9 @@ fn best_pipeline(model: &Model, devices: &[Device], links: &Links, opts: &Option
     for mask in 1u32..(1 << pool.len()) {
         let mut subset: Vec<usize> = (0..pool.len()).filter(|i| mask & (1 << i) != 0).map(|i| pool[i]).collect();
         permutations(&mut subset, 0, &mut |order| {
+            if order.iter().skip(1).any(|&d| devices[d].local) {
+                return;
+            }
             if let Some(counts) = split(model, devices, order, opts.goal) {
                 let plan = estimate(model, devices, links, opts, &stages_for(order, &counts));
                 if best.as_ref().is_none_or(|b| better(opts.goal, &plan, b)) {
@@ -439,6 +450,25 @@ mod tests {
         d.gpu_bytes = vram_gb * GB;
         d.gpu_bw = bw_gbs * GB as f64;
         d
+    }
+
+    #[test]
+    fn this_computer_takes_layers_and_goes_first() {
+        // Neither holds the model alone; together they do. This computer's stage costs
+        // no hop, so it leads the ring.
+        let mut me = gpu(dev("this mac", 5, 100.0), 5, 30.0);
+        me.local = true;
+        let pc = gpu(dev("pc", 5, 50.0), 4, 21.0);
+        let p = plan(&model(8), &[pc, me], &net(2, 4.0), &Options::default());
+        let l = layers(&p.pipelines[0]);
+        assert_eq!(l.len(), 2, "{l:?}");
+        assert_eq!(l[0].0, 1, "this computer first: {l:?}");
+        // When it holds the whole model and is fastest, nothing crosses the network.
+        let mut big = gpu(dev("this mac", 64, 100.0), 64, 400.0);
+        big.local = true;
+        let p = plan(&model(8), &[dev("pc", 64, 50.0), big], &net(2, 4.0), &Options::default());
+        assert_eq!(layers(&p.pipelines[0]), [(1, 8)]);
+        assert_eq!(p.pipelines[0].network_ms, 0.0, "no hops when only this computer runs it");
     }
 
     #[test]

@@ -143,8 +143,10 @@ async fn load(setup: StageSetup, loading: Loading) -> Result<LlmStage> {
     let source = Source::parse_remote(&url)?;
     let h = header(&url, &source).await?;
     let cfg = Config::from_header(&h)?;
-    let first = setup.index == 0;
-    let last = setup.index + 1 == setup.count;
+    // By layers, not by place in the pipeline: when the coordinator holds the first
+    // layers itself, the first remote stage takes hidden states, not tokens.
+    let first = setup.layers.start == 0;
+    let last = setup.layers.end as usize == cfg.n_layer;
     let wanted = model::needed(&h, &setup.layers, first, last);
     let total: u64 = wanted.iter().map(|t| t.range.end - t.range.start).sum();
     let key = (setup.session, setup.layers.start);

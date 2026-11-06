@@ -257,7 +257,7 @@ function renderHosted() {
       <div class="mesh-stage mesh-hosted-row">
         <span class="dep-main">
           <span class="dep-cmd">${esc(h.model)}, layers ${h.layers.start}–${h.layers.end - 1} of ${h.of}</span>
-          <span class="dep-sub"><span class="kv"><b>For</b> ${esc(clientName(h.coordinator))}</span>${sub}</span>
+          <span class="dep-sub"><span class="kv"><b>For</b> ${h.coordinator === status?.device_id ? "this computer's own mesh" : esc(clientName(h.coordinator))}</span>${sub}</span>
           <span class="mesh-layers"><span style="left:${(h.layers.start / h.of) * 100}%;width:${((h.layers.end - h.layers.start) / h.of) * 100}%"></span></span>
         </span>
         ${state}

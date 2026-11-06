@@ -44,9 +44,9 @@ function renderDevices(devices) {
         <span class="dep-main">
           <span class="dep-cmd">${esc(d.name)}</span>
           <span class="dep-sub">
-            <span class="kv"><b>Path</b> ${d.relay ? "relay" : "direct"}</span>
+            ${d.local ? `<span class="kv"><b>Role</b> coordinates, and holds the first layers</span>` : `<span class="kv"><b>Path</b> ${d.relay ? "relay" : "direct"}</span>
             <span class="kv"><b>Round trip</b> <span class="num">${fmt(d.rtt_ms, 1)}<i>ms</i></span></span>
-            <span class="kv"><b>Upload</b> <span class="num">${fmt(d.up_mbps, 1)}<i>Mbit/s</i></span></span>
+            <span class="kv"><b>Upload</b> <span class="num">${fmt(d.up_mbps, 1)}<i>Mbit/s</i></span></span>`}
             <span class="kv"><b>Free memory</b> <span class="num">${fmt(d.free_gb, 1)}<i>of ${fmt(d.total_gb)} GB</i></span></span>
             <span class="kv"><b>Memory speed</b> <span class="num">${fmt(d.mem_gbs, 1)}<i>GB/s</i></span></span>
             <span class="kv"><b>GPU</b> ${d.gpu ? esc(d.gpu) : "none, runs on the CPU"}</span>
@@ -99,7 +99,7 @@ async function measure() {
     const r = await invoke("mesh_probe", { model: $("mesh-model").value, throughput: goal === "throughput" });
     renderDevices(r.devices);
     renderPlan(r.pipelines, r.unused);
-    if (!r.pipelines.length && r.devices.some((d) => d.engine)) message(`${$("mesh-model").value} does not fit in the free memory of your other devices together. This computer coordinates but holds no layers; pick a smaller model or free memory on them.`, "warn");
+    if (!r.pipelines.length && r.devices.some((d) => d.engine)) message(`${$("mesh-model").value} does not fit in the free memory of your devices together, this computer included. Pick a smaller model or free memory on them.`, "warn");
   } catch (e) {
     message(String(e));
   } finally {

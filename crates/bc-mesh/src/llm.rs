@@ -41,7 +41,7 @@ async fn draft_run(d: (Arc<Part>, Kv), tokens: Vec<u32>, pos: usize) -> Result<(
     .await?
 }
 
-use crate::msg::{Activation, Meta};
+use crate::msg::{Activation, Meta, StageSetup};
 use crate::pipeline::{self, Input, Target};
 use crate::plan::{Model, PipelinePlan};
 
@@ -53,7 +53,11 @@ type Answer = oneshot::Receiver<Result<(Meta, Activation)>>;
 
 /// One pipeline, shared by any number of requests.
 pub struct Client {
-    input: Mutex<(Input, u64)>,
+    /// The first remote stage's end, if any stage is remote, and the last batch number.
+    input: Mutex<(Option<Input>, u64)>,
+    /// This computer's own stage, when the plan gives it the model's first layers: the
+    /// coordinator computes them before anything crosses the network.
+    local: Option<Arc<StdMutex<Box<dyn crate::stage::Stage>>>>,
     pending: Arc<StdMutex<VecDeque<Reply>>>,
     alive: Arc<AtomicBool>,
     in_flight: AtomicUsize,
@@ -98,13 +102,34 @@ impl Speed {
 }
 
 impl Client {
+    /// Opens a pipeline for `plan`. A stage on a device whose address is this endpoint's
+    /// own runs here, and must be the first.
     pub async fn open(endpoint: &Endpoint, model_url: &str, plan: PipelinePlan, addrs: &[EndpointAddr], on_loading: pipeline::OnLoading<'_>) -> Result<Arc<Self>> {
-        let targets: Vec<Target> = plan.stages.iter().map(|s| Target { addr: addrs[s.device].clone(), layers: s.layers.clone() }).collect();
-        let (input, mut output) = pipeline::open(endpoint, model_url, &targets, on_loading).await?;
+        let is_local = |s: &crate::plan::StagePlan| addrs[s.device].id == endpoint.id();
+        if plan.stages.iter().skip(1).any(is_local) {
+            bail!("this computer's stage must come first in the pipeline");
+        }
+        let local = match plan.stages.first().filter(|s| is_local(s)) {
+            Some(s) => Some(Arc::new(StdMutex::new(local_stage(endpoint, model_url, s.layers.clone(), on_loading).await?))),
+            None => None,
+        };
+        let skip = local.is_some() as usize;
+        let targets: Vec<Target> = plan.stages.iter().skip(skip).map(|s| Target { addr: addrs[s.device].clone(), layers: s.layers.clone() }).collect();
         let pending: Arc<StdMutex<VecDeque<Reply>>> = Arc::default();
         let alive = Arc::new(AtomicBool::new(true));
         let stage_ms = Arc::new(StdMutex::new(vec![0.0; plan.stages.len()]));
-        let (p, a, ms) = (pending.clone(), alive.clone(), stage_ms.clone());
+        let input = if targets.is_empty() {
+            None
+        } else {
+            let (input, output) = pipeline::open(endpoint, model_url, &targets, &|i, done, total| on_loading(i + skip, done, total)).await?;
+            Self::read_replies(output, pending.clone(), alive.clone(), stage_ms.clone());
+            Some(input)
+        };
+        Ok(Arc::new(Client { input: Mutex::new((input, 0)), local, pending, alive, in_flight: AtomicUsize::new(0), plan, stage_ms, speed: StdMutex::default() }))
+    }
+
+    /// Hands each result from the last stage to the request waiting for it, in order.
+    fn read_replies(mut output: pipeline::Output, p: Arc<StdMutex<VecDeque<Reply>>>, a: Arc<AtomicBool>, ms: Arc<StdMutex<Vec<f32>>>) {
         tokio::spawn(async move {
             let failure = loop {
                 match output.recv().await {
@@ -129,7 +154,6 @@ impl Client {
                 let _ = reply.send(Err(anyhow!("{failure}")));
             }
         });
-        Ok(Arc::new(Client { input: Mutex::new((input, 0)), pending, alive, in_flight: AtomicUsize::new(0), plan, stage_ms, speed: StdMutex::default() }))
     }
 
     pub fn alive(&self) -> bool {
@@ -151,11 +175,39 @@ impl Client {
             bail!("the pipeline is down");
         }
         let (tx, rx) = oneshot::channel();
+        // Held while this computer computes its layers too, so batches stay in order.
         let mut input = self.input.lock().await;
-        self.pending.lock().unwrap().push_back(tx);
+        let (meta, act) = match &self.local {
+            Some(stage) => {
+                let stage = stage.clone();
+                tokio::task::spawn_blocking(move || -> Result<(Meta, Activation)> {
+                    let started = Instant::now();
+                    let out = stage.lock().unwrap().forward(&meta, act)?;
+                    meta.stage_ms.push(started.elapsed().as_secs_f32() * 1000.0);
+                    Ok((meta, out))
+                })
+                .await??
+            }
+            None => (meta, act),
+        };
         input.1 += 1;
         let seq = input.1;
-        input.0.send(seq, meta, &act).await?;
+        match input.0.as_mut() {
+            Some(remote) => {
+                self.pending.lock().unwrap().push_back(tx);
+                remote.send(seq, meta, &act).await?;
+            }
+            // The whole model is here: the answer is ready.
+            None => {
+                if meta.rows == 1 {
+                    let mut avg = self.stage_ms.lock().unwrap();
+                    for (a, m) in avg.iter_mut().zip(&meta.stage_ms) {
+                        *a = if *a == 0.0 { *m } else { 0.8 * *a + 0.2 * m };
+                    }
+                }
+                let _ = tx.send(Ok((meta, act)));
+            }
+        }
         Ok(rx)
     }
 
@@ -166,6 +218,30 @@ impl Client {
         match result?.1 {
             Activation::Tokens(t) => Ok(t),
             Activation::Hidden(_) => bail!("the last stage sent hidden states"),
+        }
+    }
+}
+
+/// This computer's own stage: the same engine lending devices run, its weights fetched by
+/// byte range into memory like theirs, reporting its download as stage 0.
+async fn local_stage(endpoint: &Endpoint, model_url: &str, layers: std::ops::Range<u32>, on_loading: pipeline::OnLoading<'_>) -> Result<Box<dyn crate::stage::Stage>> {
+    let setup = StageSetup { session: rand::random(), index: 0, count: 1, model: model_url.into(), layers, next: None };
+    let (tx, mut rx) = tokio::sync::watch::channel((0u64, 0u64));
+    let loading = crate::stage::Loading {
+        coordinator: endpoint.id(),
+        progress: Arc::new(move |done, total| {
+            let _ = tx.send((done, total));
+        }),
+    };
+    let build = crate::engine::factory()(setup, loading);
+    tokio::pin!(build);
+    loop {
+        tokio::select! {
+            built = &mut build => return built.context("loading this computer's layers"),
+            Ok(()) = rx.changed() => {
+                let (done, total) = *rx.borrow_and_update();
+                on_loading(0, done, total);
+            }
         }
     }
 }
