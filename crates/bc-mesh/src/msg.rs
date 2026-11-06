@@ -6,7 +6,7 @@ use anyhow::{bail, Result};
 use iroh::EndpointAddr;
 use serde::{Deserialize, Serialize};
 
-use crate::codec::{self, Encoding};
+use crate::codec;
 use crate::ticket::Ticket;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,7 +62,6 @@ pub struct StageSetup {
     pub layers: Range<u32>,
     /// The stage to feed, with the ticket that lets this device feed it.
     pub next: Option<(EndpointAddr, Ticket)>,
-    pub encoding: Encoding,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,7 +98,6 @@ pub enum Payload {
     Hidden {
         rows: u32,
         cols: u32,
-        encoding: Encoding,
         #[serde(with = "serde_bytes")]
         data: Vec<u8>,
     },
@@ -121,14 +119,13 @@ pub struct Tensor {
 }
 
 impl Payload {
-    pub fn encode(activation: &Activation, encoding: Encoding) -> Payload {
+    pub fn encode(activation: &Activation) -> Payload {
         match activation {
             Activation::Tokens(t) => Payload::Tokens(t.clone()),
             Activation::Hidden(t) => Payload::Hidden {
                 rows: t.rows as u32,
                 cols: t.cols as u32,
-                encoding,
-                data: codec::encode(&t.data, encoding),
+                data: codec::encode(&t.data),
             },
         }
     }
@@ -136,11 +133,11 @@ impl Payload {
     pub fn decode(self) -> Result<Activation> {
         match self {
             Payload::Tokens(t) => Ok(Activation::Tokens(t)),
-            Payload::Hidden { rows, cols, encoding, data } => {
+            Payload::Hidden { rows, cols, data } => {
                 let Some(values) = (rows as usize).checked_mul(cols as usize) else {
                     bail!("{rows}x{cols} is too large");
                 };
-                let data = codec::decode(&data, values, encoding)?;
+                let data = codec::decode(&data, values)?;
                 Ok(Activation::Hidden(Tensor { rows: rows as usize, cols: cols as usize, data }))
             }
         }

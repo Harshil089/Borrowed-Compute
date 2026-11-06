@@ -11,15 +11,14 @@ Take Llama 3.3 70B at 4 bits: 42.5 GB of weights, 80 layers of about 0.52 GB, a 
 | What moves | Size | When |
 |---|---|---|
 | Weights | 42.5 GB | Never over the mesh (see 3.4) |
-| Hidden state per token per hop (int8) | 8.7 KB | Every generated token |
-| Hidden state per token per hop (fp16) | 16 KB | (not used) |
-| A 4,000-token prompt per hop (int8) | 35 MB | Once per prompt |
+| Hidden state per token per hop (exact f32) | 32 KB | Every generated token |
+| A 4,000-token prompt per hop (exact f32) | 131 MB | Once per prompt |
 | KV cache per token, all layers | 320 KB | Never moves; stays on the stage that made it |
 
 Three conclusions:
 
-1. **Generating tokens is not bandwidth-bound.** 8.7 KB a token is 87 KB/s at 10 tokens a second, which any link carries, relay included. What costs time is **latency**: every token crosses every hop in turn.
-2. **Prompts are bandwidth-bound.** 35 MB through a relay at 2 MB/s is 17 seconds. This is the real throughput problem, and it shrinks with chunking, compression, direct paths and, above all, never resending what a stage already has (3.6).
+1. **Generating tokens is not bandwidth-bound.** 32 KB a token is 320 KB/s at 10 tokens a second, which any link carries, relay included. What costs time is **latency**: every token crosses every hop in turn.
+2. **Prompts are bandwidth-bound.** 131 MB through a relay at 2 MB/s is a minute; through a direct 100 Mbit/s path, 10 seconds, about what the stages need to compute it anyway. It shrinks with chunking, direct paths and, above all, never resending what a stage already has (3.6).
 3. **Weights must never travel at run time.** 42.5 GB at 50 Mbit/s is two hours. Each device gets its layers once, from the source, not from another device.
 
 ## 2. Why pipeline parallelism, and only that, crosses devices
@@ -72,9 +71,9 @@ Per-token latency through a 3-device ring over the internet is about two round t
 
 The planner already takes this into account (`--speculate`). This is the single biggest answer to "won't the relay make it slow": the relay's added round trip gets shared across several tokens.
 
-### 3.6 Prompts: chunked, compressed, sent once
+### 3.6 Prompts: chunked, exact, sent once
 
-- **Int8 on the wire, with a scale per group of 64 values** (`codec.rs`). This uses half the bytes of fp16. LLM hidden states have a few huge outlier channels, so one scale per row would flatten every other value to zero; per-group scales confine an outlier to its own group. Tests show under 1% error outside the outlier's group.
+- **Exact values on the wire** (`codec.rs`). Version 0.3.10 sent int8 with a scale per group of 64 values: a quarter of the bytes, but its small error entered the residual stream, and after a few dozen tokens it could flip a near tie, so the text drifted from what the model alone writes. Hidden states now cross as exact `f32`, and a split model writes bit for bit what the whole one does (checked on Llama 3.2 1B over three relayed stages: all 96 tokens identical). Lossless coding was measured and rejected: three of the four bytes of each float carry 7.8 to 8.0 bits of entropy, so no lossless coder could save more than 17%. The mesh protocol is `borrowed-compute/mesh/2` since this change.
 - **Chunked prefill.** A long prompt goes in chunks of a few hundred tokens. Stage 1 computes chunk 2 while chunk 1 crosses to stage 2, so transfer overlaps compute instead of adding to it.
 - **Nothing is sent twice.** Each stage keeps its KV cache for the conversation, in memory only. In a chat, each turn sends only the new message's tokens, not the whole history again.
 - **Direct paths where it matters.** The probe reports relay or direct per link. The planner puts boundaries on the fastest links. iroh keeps trying to punch through, and moves the connection off the relay mid-session when it can.
@@ -203,5 +202,5 @@ The planner's throughput split assigns each layer where the stage total stays sm
 ## 7. Limits and next steps
 
 - **CPU only.** Metal and CUDA kernels would multiply per-device speed; the mesh does not change.
-- **Int8 activations drift slightly.** On the wire and inside products, int8 can flip a near-tie token after a few dozen tokens compared with f32. Greedy text then differs slightly from an f32 run, but stays exact across any split.
+- **Nothing drifts across devices.** The wire is exact, so any split writes what the whole model writes on one device. The engine's own products quantize each input row to int8 per block of 32, as llama.cpp does; that is part of the model's numerics on every device alike, not something the network adds.
 - **Single conversation speed.** Adding devices fits larger models and serves more requests at once; one conversation is fastest on the fewest, fastest devices (3.2).

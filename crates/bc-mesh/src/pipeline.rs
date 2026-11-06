@@ -13,7 +13,6 @@ use bc_net::{recv_msg, send_msg, MESH_ALPN};
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::{Endpoint, EndpointAddr};
 
-use crate::codec::Encoding;
 use crate::msg::{Activation, Batch, MeshMsg, Meta, Payload, StageSetup};
 use crate::ticket::Ticket;
 
@@ -27,7 +26,6 @@ pub struct Target {
 /// The first stage's end: send batches, then `finish`.
 pub struct Input {
     send: SendStream,
-    encoding: Encoding,
     _controls: Vec<SendStream>,
     _conns: Vec<Connection>,
 }
@@ -40,7 +38,7 @@ pub struct Output {
 
 /// Sets every stage up, last first, so each one is waiting when the one before it
 /// connects.
-pub async fn open(endpoint: &Endpoint, model: &str, targets: &[Target], encoding: Encoding) -> Result<(Input, Output)> {
+pub async fn open(endpoint: &Endpoint, model: &str, targets: &[Target]) -> Result<(Input, Output)> {
     if targets.is_empty() {
         bail!("a pipeline needs at least one stage");
     }
@@ -64,7 +62,6 @@ pub async fn open(endpoint: &Endpoint, model: &str, targets: &[Target], encoding
             model: model.into(),
             layers: target.layers.clone(),
             next,
-            encoding,
         };
         send_msg(&mut send, &MeshMsg::Setup(setup)).await?;
         match recv_msg::<MeshMsg>(&mut recv).await? {
@@ -90,14 +87,14 @@ pub async fn open(endpoint: &Endpoint, model: &str, targets: &[Target], encoding
         }
     }
     Ok((
-        Input { send: first.unwrap(), encoding, _controls: controls, _conns: conns.clone() },
+        Input { send: first.unwrap(), _controls: controls, _conns: conns.clone() },
         Output { recv: last.unwrap(), _conns: conns },
     ))
 }
 
 impl Input {
     pub async fn send(&mut self, seq: u64, meta: Meta, activation: &Activation) -> Result<()> {
-        let payload = Payload::encode(activation, self.encoding);
+        let payload = Payload::encode(activation);
         send_msg(&mut self.send, &MeshMsg::Batch(Batch { seq, payload, meta })).await
     }
 
