@@ -126,6 +126,9 @@ pub struct Part {
     inv_freq: Vec<f32>,
     /// The first layers (and maybe the head) on this device's GPU, when it has one.
     gpu: Option<crate::gpu::Layers>,
+    /// Microseconds the last pass spent on the GPU's layers and on the CPU's, so a
+    /// lending device can show where its time goes.
+    split_us: [std::sync::atomic::AtomicU64; 2],
 }
 
 /// One conversation's keys and values for a part's layers.
@@ -185,7 +188,7 @@ impl Part {
             Some(g) => Self::on_gpu(g, &cfg, &blocks, head.as_ref(), &inv_freq)?,
             None => None,
         };
-        Ok(Part { cfg, layers, blocks, embed, head, inv_freq, gpu })
+        Ok(Part { cfg, layers, blocks, embed, head, inv_freq, gpu, split_us: Default::default() })
     }
 
     /// Layers the GPU's memory holds, leaving room for key/value caches: on unified memory
@@ -208,6 +211,12 @@ impl Part {
             })
             .collect();
         crate::gpu::Layers::new(g, cfg, &weights, head.map(|(n, o)| (n.as_slice(), o)), inv_freq, budget)
+    }
+
+    /// Milliseconds the last [`Part::forward`] spent on the GPU's layers and on the CPU's.
+    pub fn last_split_ms(&self) -> (f32, f32) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (self.split_us[0].load(Relaxed) as f32 / 1000.0, self.split_us[1].load(Relaxed) as f32 / 1000.0)
     }
 
     /// The same part on the CPU only (for checking the GPU against it).
@@ -260,6 +269,7 @@ impl Part {
             bail!("{} tokens are past the model's context of {}", pos + rows, c.context);
         }
         let kvd = c.kv_dim();
+        let started = std::time::Instant::now();
         let on_gpu = match (&self.gpu, kv.gpu.as_mut()) {
             (Some(g), Some(cache)) => {
                 g.forward(c, x, rows, pos, cache)?;
@@ -267,6 +277,7 @@ impl Part {
             }
             _ => 0,
         };
+        let gpu_done = std::time::Instant::now();
         for (b, (kc, vc)) in self.blocks.iter().zip(kv.k.iter_mut().zip(kv.v.iter_mut())).skip(on_gpu) {
             kc.truncate(pos * kvd);
             vc.truncate(pos * kvd);
@@ -296,6 +307,9 @@ impl Part {
             x.iter_mut().zip(&d).for_each(|(a, b)| *a += b);
         }
         kv.len = pos + rows;
+        use std::sync::atomic::Ordering::Relaxed;
+        self.split_us[0].store((gpu_done - started).as_micros() as u64, Relaxed);
+        self.split_us[1].store(gpu_done.elapsed().as_micros() as u64, Relaxed);
         Ok(())
     }
 

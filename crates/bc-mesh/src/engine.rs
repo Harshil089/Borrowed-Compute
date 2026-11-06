@@ -105,6 +105,10 @@ pub struct Hosted {
     /// Layers on this device's GPU, and its name.
     pub gpu_layers: usize,
     pub gpu: Option<String>,
+    /// Milliseconds a token on this device's GPU and on its CPU, averaged over one-token
+    /// batches: where the time goes when a device is slow.
+    pub gpu_ms: f32,
+    pub cpu_ms: f32,
     /// Batches computed so far, and when the last one was.
     pub batches: u64,
     #[serde(skip)]
@@ -163,6 +167,8 @@ async fn load(setup: StageSetup, loading: Loading) -> Result<LlmStage> {
             running: false,
             gpu_layers: 0,
             gpu: None,
+            gpu_ms: 0.0,
+            cpu_ms: 0.0,
             batches: 0,
             last: None,
             idle_secs: None,
@@ -284,6 +290,15 @@ impl Stage for LlmStage {
             bail!("stream {} is at {} tokens here, the batch starts at {pos}; replay it from the start", meta.stream, kv.len);
         }
         part.forward(&mut x, rows, pos, kv)?;
+        if rows == 1 {
+            let (g, c) = part.last_split_ms();
+            let avg = |old: f32, new: f32| if old == 0.0 { new } else { 0.8 * old + 0.2 * new };
+            if let Some(key) = self.hosted {
+                if let Some(h) = hosted().lock().unwrap().get_mut(&key) {
+                    (h.gpu_ms, h.cpu_ms) = (avg(h.gpu_ms, g), avg(h.cpu_ms, c));
+                }
+            }
+        }
         if !part.is_last() {
             return Ok(Activation::Hidden(Tensor { rows, cols: n_embd, data: x }));
         }
