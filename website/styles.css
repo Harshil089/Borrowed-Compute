@@ -155,7 +155,7 @@ kbd { font: 500 11px/1 var(--sans); color: var(--ink-3); padding: 3px 6px; borde
 .nav { position: relative; display: flex; gap: 2px; margin-right: auto; }
 .nav a { position: relative; z-index: 1; padding: 7px 12px; border-radius: 9px; font-size: 14px; color: var(--ink-2); transition: color 0.2s var(--ease); }
 .nav a:hover, .nav a[aria-current="page"] { color: var(--ink); }
-.nav-pill { position: absolute; top: 0; left: 0; height: 100%; width: 0; border-radius: 9px; background: var(--fill-2); opacity: 0; transition: transform 0.32s var(--e-move), width 0.32s var(--e-move), opacity 0.2s var(--ease); pointer-events: none; }
+.nav-pill { position: absolute; top: 0; left: 0; height: 100%; width: 0; border-radius: 9px; background: var(--fill-2); opacity: 0; transition: transform 0.32s var(--e-move), opacity 0.2s var(--ease); pointer-events: none; }
 .nav-pill.on { opacity: 1; }
 .nav-pill.jump { transition: opacity 0.2s var(--ease); }
 .bar-end { display: flex; align-items: center; gap: 6px; }
@@ -460,7 +460,7 @@ kbd { font: 500 11px/1 var(--sans); color: var(--ink-3); padding: 3px 6px; borde
 .segmented { position: relative; display: inline-flex; gap: 2px; padding: 3px; margin-top: 32px; border-radius: 11px; background: var(--fill-2); }
 .segmented button { position: relative; z-index: 1; height: 32px; padding: 0 16px; border-radius: 8px; font-size: 14px; font-weight: 500; color: var(--ink-2); transition: color 0.2s var(--ease); }
 .segmented button[aria-pressed="true"] { color: var(--ink); }
-.seg-pill { position: absolute; top: 3px; left: 0; height: 32px; width: 0; border-radius: 8px; background: var(--surface); box-shadow: var(--shadow-sm), var(--hl); transition: transform 0.32s var(--e-move), width 0.32s var(--e-move); }
+.seg-pill { position: absolute; top: 3px; left: 0; height: 32px; width: 0; border-radius: 8px; background: var(--surface); box-shadow: var(--shadow-sm), var(--hl); transition: transform 0.32s var(--e-move); }
 .seg-pill.jump { transition: none; }
 .timeline { list-style: none; margin: 0; padding: 0; max-width: 860px; position: relative; }
 .timeline::before { content: ""; position: absolute; left: 130px; top: 8px; bottom: 8px; width: 1px; background: var(--border); }
