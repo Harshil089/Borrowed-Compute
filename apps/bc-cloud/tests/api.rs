@@ -199,7 +199,7 @@ async fn single_owner_cloud_refuses_a_second_account() {
         env.login(1, "owner").await;
         env.github.next.lock().unwrap().push_back((2, "stranger".into()));
         let err = CloudClient::new(&env.cloud, None).login(|_| {}).await.unwrap_err();
-        assert!(format!("{err:#}").contains("belongs to another account"), "{err:#}");
+        assert!(format!("{err:#}").contains("belongs to someone else"), "{err:#}");
     }
 }
 

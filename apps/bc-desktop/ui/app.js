@@ -151,6 +151,7 @@ async function loadStatus() {
   window.lendUI?.refresh();
   const guest = !status.signed_in && status.shared.length > 0 && !wantSignIn;
   $("signin-view").classList.toggle("hidden", status.signed_in || guest);
+  renderSigninWhere();
   $("app-view").classList.toggle("hidden", !status.signed_in && !guest);
   $("signout").lastElementChild.textContent = guest ? "Sign in" : "Sign out";
   $("settings").classList.toggle("hidden", guest);
@@ -486,6 +487,23 @@ $("keep-here").addEventListener("click", async () => {
   }
 });
 
+// Where sign-in goes, with a way to choose again: a computer can be pointed at someone
+// else's account (which then refuses it), or at a computer that is gone.
+function renderSigninWhere() {
+  const code = codeOf(status.cloud_url || "");
+  const here = status.lend?.host?.hosting;
+  $("signin-where").classList.toggle("hidden", !status.cloud_url_set);
+  const n = nearby.find((x) => x.id === code);
+  $("signin-where-name").textContent = here ? "this computer" : n ? n.name : `the computer with code ${code.slice(0, 8)}…`;
+}
+$("signin-change").addEventListener("click", () => {
+  $("signin-error").classList.add("hidden");
+  $("signin-cloud").value = "";
+  $("signin-cloud-msg").className = "banner hidden";
+  $("mac-dialog").classList.remove("hidden");
+  macChoice = () => loadStatus();
+});
+
 async function chooseMac() {
   if (status.cloud_url_set) return true;
   if (nearby.length === 1) {
@@ -523,8 +541,12 @@ async function signIn(provider) {
     await invoke("login", { name: $("pc-name").value, provider });
     await loadStatus();
   } catch (e) {
-    $("signin-error").textContent = `Sign-in failed: ${e}`;
+    // The computer this one points at hosts another person's account.
+    $("signin-error").textContent = /belongs to (another account|someone else)/.test(String(e))
+      ? "That computer's account belongs to someone else, so it refused this sign-in. Press Change below and keep your own account on this computer (or on another computer of yours)."
+      : `Sign-in failed: ${e}`;
     $("signin-error").classList.remove("hidden");
+    await loadStatus().catch(() => {});
   } finally {
     $("signin-btn").disabled = false;
     $("signin-google").disabled = false;
