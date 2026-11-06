@@ -4,8 +4,7 @@
 //! ([`probe`]), decides which device runs which part of a model ([`plan`]), and streams
 //! work through them as a pipeline ([`pipeline`] on the coordinator, [`stage`] on each
 //! device). Activations move device to device on their own connections, authorized by
-//! tickets the coordinator signs ([`ticket`]), and are compressed on the wire
-//! ([`codec`]). See `docs/mesh.md` for the design and the reasoning behind it.
+//! tickets the coordinator signs ([`ticket`]), as exact values ([`codec`]). See `docs/mesh.md` for the design and the reasoning behind it.
 
 pub mod codec;
 pub mod engine;

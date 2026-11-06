@@ -167,7 +167,7 @@ impl Host {
                 Some((c, s)) => (s, Some(c)),
                 None => (control, None),
             };
-            pump(stage, input, out, setup.encoding).await?;
+            pump(stage, input, out).await?;
             drop((feed_conn, next_conn, conn));
             Ok(())
         }
@@ -200,7 +200,7 @@ async fn open_feed(endpoint: &Endpoint, addr: iroh::EndpointAddr, ticket: Ticket
 }
 
 /// Reads, computes and writes until `End`, which it passes on.
-async fn pump(mut stage: Box<dyn Stage>, mut input: RecvStream, mut out: SendStream, encoding: crate::codec::Encoding) -> Result<()> {
+async fn pump(mut stage: Box<dyn Stage>, mut input: RecvStream, mut out: SendStream) -> Result<()> {
     let (in_tx, mut in_rx) = mpsc::channel::<Batch>(QUEUE);
     let (out_tx, mut out_rx) = mpsc::channel::<MeshMsg>(QUEUE);
     let reader = tokio::spawn(async move {
@@ -240,7 +240,7 @@ async fn pump(mut stage: Box<dyn Stage>, mut input: RecvStream, mut out: SendStr
         stage = back;
         match result {
             Ok(a) => {
-                let msg = MeshMsg::Batch(Batch { seq, payload: Payload::encode(&a, encoding), meta });
+                let msg = MeshMsg::Batch(Batch { seq, payload: Payload::encode(&a), meta });
                 if out_tx.send(msg).await.is_err() {
                     break;
                 }

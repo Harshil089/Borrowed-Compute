@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bc_infer::{Local, Sampling, Source};
-use bc_mesh::codec::Encoding;
 use bc_mesh::llm::{Client, Llm};
 use bc_mesh::plan::{PipelinePlan, StagePlan};
 use bc_mesh::stage::Host;
@@ -127,7 +126,7 @@ async fn three_devices_write_what_one_computer_writes() {
     let addrs: Vec<_> = m.devices.iter().map(|d| d.addr()).collect();
     let header = Source::parse_remote(&url).unwrap().header().await.unwrap();
     let before = served.load(std::sync::atomic::Ordering::Relaxed);
-    let client = Client::open(&m.coordinator, &url, plan(&[(0, 0..2), (1, 2..5), (2, 5..6)]), &addrs, Encoding::F32).await.unwrap();
+    let client = Client::open(&m.coordinator, &url, plan(&[(0, 0..2), (1, 2..5), (2, 5..6)]), &addrs).await.unwrap();
     // Each device fetched only its own tensors (plus the header): the three together
     // read about one file's worth, not three.
     let fetched = served.load(std::sync::atomic::Ordering::Relaxed) - before;
@@ -164,10 +163,9 @@ async fn speculative_decoding_writes_the_same_text_in_fewer_passes() {
     let dir = tempfile_dir();
     std::fs::write(dir.join("d.gguf"), &file).unwrap();
     let same = Local::load(&Source::File(dir.join("d.gguf"))).await.unwrap();
-    let client = Client::open(&m.coordinator, &url, plan(&[(0, 0..2), (1, 2..4)]), &addrs, Encoding::Int8).await.unwrap();
+    let client = Client::open(&m.coordinator, &url, plan(&[(0, 0..2), (1, 2..4)]), &addrs).await.unwrap();
     let llm = Llm::new(&header, vec![client], Some(same)).unwrap();
     let (got, stats) = llm.generate(&prompt, 24, Sampling::default(), |_| {}).await.unwrap();
-    // Int8 on the wire can, rarely, flip a near tie; the tiny model has none here.
     assert_eq!(got, want);
     if got.len() > 5 {
         assert!(stats.passes * 3 <= got.len() + 3, "{} passes for {} tokens", stats.passes, got.len());
@@ -176,7 +174,7 @@ async fn speculative_decoding_writes_the_same_text_in_fewer_passes() {
     // A different, smaller draft: guesses are sometimes wrong, the text never is.
     std::fs::write(dir.join("d2.gguf"), bc_infer::fixtures::tiny_model(2, false)).unwrap();
     let other = Local::load(&Source::File(dir.join("d2.gguf"))).await.unwrap();
-    let client = Client::open(&m.coordinator, &url, plan(&[(1, 0..1), (0, 1..4)]), &addrs, Encoding::F32).await.unwrap();
+    let client = Client::open(&m.coordinator, &url, plan(&[(1, 0..1), (0, 1..4)]), &addrs).await.unwrap();
     let llm = Llm::new(&header, vec![client], Some(other)).unwrap();
     let (got, _) = llm.generate(&prompt, 24, Sampling::default(), |_| {}).await.unwrap();
     assert_eq!(got, want);
@@ -196,7 +194,7 @@ async fn real_model_over_three_devices() {
     let n = bc_infer::Config::from_header(&header).unwrap().n_layer as u32;
     let (a, b) = (n / 3, 2 * n / 3);
     let t = std::time::Instant::now();
-    let client = Client::open(&m.coordinator, &url, plan(&[(0, 0..a), (1, a..b), (2, b..n)]), &addrs, Encoding::Int8).await.unwrap();
+    let client = Client::open(&m.coordinator, &url, plan(&[(0, 0..a), (1, a..b), (2, b..n)]), &addrs).await.unwrap();
     println!("three stages loaded their layers in {:.1}s", t.elapsed().as_secs_f64());
     let draft = match std::env::var("BC_TEST_DRAFT") {
         Ok(d) => Some(Local::load(&Source::File(d.into())).await.unwrap()),
@@ -215,6 +213,6 @@ async fn real_model_over_three_devices() {
         llm.replicas()[0].stage_ms.lock().unwrap()
     );
     let want = local_text(&file, &prompt, ids.len()).await;
-    let same = want.iter().zip(&ids).take_while(|(a, b)| a == b).count();
-    println!("matches one computer for the first {same} of {} tokens (int8 on the wire may differ after a near tie)", ids.len());
+    assert_eq!(ids, want, "the split model writes exactly what the whole one does");
+    println!("matches one computer for all {} tokens", ids.len());
 }

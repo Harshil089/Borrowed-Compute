@@ -6,7 +6,6 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use bc_auth::CloudClient;
 use bc_infer::{Local, Source};
-use bc_mesh::codec::Encoding;
 use bc_mesh::llm::{Client, Llm};
 use bc_mesh::plan::{self, Device, Goal, Link, Links, Model, Options, Plan};
 use bc_mesh::probe::LinkReport;
@@ -163,7 +162,7 @@ async fn open_all(endpoint: &Endpoint, url: &str, plan: &Plan, usable: &[&MeshDe
     let addrs: Vec<EndpointAddr> = usable.iter().map(|d| d.addr.clone()).collect();
     let mut clients = Vec::new();
     for p in &plan.pipelines {
-        clients.push(Client::open(endpoint, url, p.clone(), &addrs, Encoding::Int8).await?);
+        clients.push(Client::open(endpoint, url, p.clone(), &addrs).await?);
     }
     Ok(clients)
 }

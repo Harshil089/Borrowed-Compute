@@ -148,7 +148,7 @@ pub enum Goal {
 #[derive(Debug, Clone, Copy)]
 pub struct Options {
     pub goal: Goal,
-    /// Wire bytes per hidden value (about 1.06 for [`crate::codec::Encoding::Int8`]).
+    /// Wire bytes per hidden value: 4, exact `f32` ([`crate::codec`]).
     pub bytes_per_value: f64,
     /// Tokens accepted per pipeline pass with speculative decoding (a draft model on the
     /// coordinator proposes tokens, one pass checks them all); 1.0 without it.
@@ -157,7 +157,7 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { goal: Goal::Latency, bytes_per_value: 1.0625, tokens_per_pass: 1.0 }
+        Options { goal: Goal::Latency, bytes_per_value: 4.0, tokens_per_pass: 1.0 }
     }
 }
 
@@ -468,7 +468,7 @@ mod tests {
         let stages = [StagePlan { device: 0, layers: 0..10 }, StagePlan { device: 1, layers: 10..30 }];
         let p = estimate(&model(30), &devices, &links, &Options::default(), &stages);
         // 1 GB a layer at an effective 100 GB/s: 10 ms a layer.
-        let hop_bytes = 8192.0 * 1.0625;
+        let hop_bytes = 8192.0 * 4.0;
         let transfer = hop_bytes / 10e6 * 1000.0;
         assert!((p.network_ms - (20.0 + 20.0 + 20.0 + transfer)).abs() < 1e-6, "{}", p.network_ms);
         assert!((p.token_ms - (300.0 + p.network_ms)).abs() < 1e-6);

@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use bc_mesh::codec::Encoding;
 use bc_mesh::msg::{Activation, Meta, StageSetup, Tensor};
 use bc_mesh::pipeline::{self, Target};
 use bc_mesh::probe::probe;
@@ -106,8 +105,8 @@ fn targets(m: &Mesh, splits: &[std::ops::Range<u32>]) -> Vec<Target> {
     m.devices.iter().zip(splits).map(|(d, l)| Target { addr: d.addr(), layers: l.clone() }).collect()
 }
 
-async fn run(m: &Mesh, splits: &[std::ops::Range<u32>], encoding: Encoding, batches: u64) -> Vec<(u64, Tensor)> {
-    let (mut tx, mut rx) = pipeline::open(&m.coordinator, "toy", &targets(m, splits), encoding).await.unwrap();
+async fn run(m: &Mesh, splits: &[std::ops::Range<u32>], batches: u64) -> Vec<(u64, Tensor)> {
+    let (mut tx, mut rx) = pipeline::open(&m.coordinator, "toy", &targets(m, splits)).await.unwrap();
     let sender = tokio::spawn(async move {
         for seq in 0..batches {
             tx.send(seq, Meta::default(), &Activation::Hidden(input(seq))).await.unwrap();
@@ -127,17 +126,10 @@ async fn run(m: &Mesh, splits: &[std::ops::Range<u32>], encoding: Encoding, batc
 async fn a_model_split_over_three_devices_matches_running_it_on_one() {
     let m = mesh(3, Duration::ZERO, true).await;
     let splits = [0..2, 2..5, 5..LAYERS];
-    let exact = run(&m, &splits, Encoding::F32, 4).await;
+    let exact = run(&m, &splits, 4).await;
     assert_eq!(exact.len(), 4);
     for (seq, t) in &exact {
         assert_eq!(t, &run_layers(0..LAYERS, &input(*seq)), "batch {seq} in order and bit for bit");
-    }
-    // Int8 on the wire: two lossy hops, still close.
-    let lossy = run(&m, &splits, Encoding::Int8, 4).await;
-    for (seq, t) in &lossy {
-        let want = run_layers(0..LAYERS, &input(*seq));
-        let err = t.data.iter().zip(&want.data).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
-        assert!(err < 0.03, "batch {seq}: max error {err}");
     }
 }
 
@@ -146,7 +138,7 @@ async fn stages_work_at_the_same_time() {
     let delay = Duration::from_millis(150);
     let m = mesh(3, delay, true).await;
     let start = Instant::now();
-    let out = run(&m, &[0..2, 2..4, 4..LAYERS], Encoding::Int8, 8).await;
+    let out = run(&m, &[0..2, 2..4, 4..LAYERS], 8).await;
     let took = start.elapsed();
     assert_eq!(out.len(), 8);
     // One after another: 8 batches × 3 stages × 150 ms = 3.6 s. Pipelined: about
@@ -187,7 +179,7 @@ async fn futures_join(m: &Mesh) -> Vec<Result<bc_mesh::probe::LinkReport>> {
 async fn devices_without_an_engine_refuse_stages() {
     let m = mesh(1, Duration::ZERO, false).await;
     let whole = vec![0..LAYERS; 1];
-    let err = match pipeline::open(&m.coordinator, "toy", &targets(&m, &whole), Encoding::F32).await {
+    let err = match pipeline::open(&m.coordinator, "toy", &targets(&m, &whole)).await {
         Ok(_) => panic!("a device without an engine accepted a stage"),
         Err(e) => e,
     };

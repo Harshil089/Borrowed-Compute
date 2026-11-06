@@ -35,7 +35,6 @@ async fn draft_run(d: (Arc<Part>, Kv), tokens: Vec<u32>, pos: usize) -> Result<(
     .await?
 }
 
-use crate::codec::Encoding;
 use crate::msg::{Activation, Meta};
 use crate::pipeline::{self, Input, Target};
 use crate::plan::{Model, PipelinePlan};
@@ -58,9 +57,9 @@ pub struct Client {
 }
 
 impl Client {
-    pub async fn open(endpoint: &Endpoint, model_url: &str, plan: PipelinePlan, addrs: &[EndpointAddr], encoding: Encoding) -> Result<Arc<Self>> {
+    pub async fn open(endpoint: &Endpoint, model_url: &str, plan: PipelinePlan, addrs: &[EndpointAddr]) -> Result<Arc<Self>> {
         let targets: Vec<Target> = plan.stages.iter().map(|s| Target { addr: addrs[s.device].clone(), layers: s.layers.clone() }).collect();
-        let (input, mut output) = pipeline::open(endpoint, model_url, &targets, encoding).await?;
+        let (input, mut output) = pipeline::open(endpoint, model_url, &targets).await?;
         let pending: Arc<StdMutex<VecDeque<Reply>>> = Arc::default();
         let alive = Arc::new(AtomicBool::new(true));
         let stage_ms = Arc::new(StdMutex::new(vec![0.0; plan.stages.len()]));

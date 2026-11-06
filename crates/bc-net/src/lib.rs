@@ -29,7 +29,7 @@ pub const GUEST_ALPN: &[u8] = b"borrowed-compute/guest/1";
 
 /// ALPN for several devices working as one (`bc-mesh`): link probes and pipeline stages.
 /// Kept apart from the job protocol so it versions on its own.
-pub const MESH_ALPN: &[u8] = b"borrowed-compute/mesh/1";
+pub const MESH_ALPN: &[u8] = b"borrowed-compute/mesh/2";
 
 /// ALPN for the job protocol. The version suffix tracks [`wire::PROTOCOL_VERSION`].
 pub const JOB_ALPN: &[u8] = b"borrowed-compute/job/2";
