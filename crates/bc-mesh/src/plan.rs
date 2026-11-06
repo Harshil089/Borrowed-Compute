@@ -9,9 +9,11 @@
 //!
 //! Two goals pull in different directions:
 //! - **Latency** (one conversation): a token visits every stage in turn, so the time per
-//!   token is the sum of every stage's work plus every hop. Spreading layers over more
-//!   devices never makes one conversation faster; it only adds hops. So the planner uses
-//!   the fewest, fastest devices whose memory holds the model.
+//!   token is the sum of every stage's work plus every hop. With a draft model, batches
+//!   of guesses follow each other through the pipeline, and while the guesses hold,
+//!   tokens come at the pace of the slowest stage instead ([`speculative_token_ms`]). So
+//!   the planner weighs fewer hops against more stages working at once, and GPUs and
+//!   fast memory against slow.
 //! - **Throughput** (many requests at once): with a request in flight on every stage, the
 //!   slowest stage sets the pace. The planner balances layers so each stage takes the
 //!   same time, and splits the devices into several independent pipelines (replicas) when
@@ -271,13 +273,50 @@ pub fn estimate(model: &Model, devices: &[Device], links: &Links, opts: &Options
     }
     let compute_ms: f64 = stage_ms.iter().sum();
     let pace_ms = stage_ms.iter().cloned().fold(slowest_transfer_ms, f64::max);
+    let pass_ms = compute_ms + network_ms;
+    let token_ms = speculative_token_ms(pass_ms, pace_ms, opts.tokens_per_pass);
     PipelinePlan {
         stages: stages.to_vec(),
-        token_ms: (compute_ms + network_ms) / opts.tokens_per_pass.max(1.0),
-        network_ms: network_ms / opts.tokens_per_pass.max(1.0),
+        token_ms,
+        network_ms: network_ms * token_ms / pass_ms.max(1e-9),
         tokens_per_s: 1000.0 / pace_ms.max(1e-9),
         prefill_net_ms_per_1k: slowest_transfer_ms * 1000.0,
     }
+}
+
+/// Tokens the coordinator's draft model guesses per batch (`llm::DRAFT_TOKENS`).
+const DRAFT: i32 = 4;
+
+/// Per-token chance α that the target agrees with the draft, given `t` tokens a pass on
+/// average with one batch at a time: t = (1 − α^(k+1)) / (1 − α) for k guesses a batch
+/// (Leviathan et al. 2023), solved by bisection.
+fn acceptance(t: f64) -> f64 {
+    let tokens = |a: f64| (1.0 - a.powi(DRAFT + 1)) / (1.0 - a);
+    let (mut lo, mut hi) = (0.0, 0.999_999);
+    for _ in 0..60 {
+        let mid = (lo + hi) / 2.0;
+        if tokens(mid) < t {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
+/// Milliseconds a token for one conversation. Without a draft (t = 1), one full pass.
+/// With one, batches of guesses follow each other through the pipeline every `pace_ms`
+/// (the slowest stage) until a guess is wrong: a run of C = α/(1 − α) right guesses on
+/// average, plus the target's own token at the miss, takes one full pass plus C/k more
+/// batch intervals. The coordinator sends one batch at a time when that is faster.
+fn speculative_token_ms(pass_ms: f64, pace_ms: f64, t: f64) -> f64 {
+    if t <= 1.0 {
+        return pass_ms;
+    }
+    let a = acceptance(t);
+    let run = a / (1.0 - a);
+    let pipelined = (pass_ms + run / DRAFT as f64 * pace_ms) / (run + 1.0);
+    pipelined.min(pass_ms / t)
 }
 
 fn stages_for(order: &[usize], counts: &[u32]) -> Vec<StagePlan> {
@@ -505,7 +544,20 @@ mod tests {
         assert!((p.token_ms - (300.0 + p.network_ms)).abs() < 1e-6);
         assert!((p.tokens_per_s - 1000.0 / 200.0).abs() < 1e-6, "paced by the 20-layer stage");
         let fast = estimate(&model(30), &devices, &links, &Options { tokens_per_pass: 3.0, ..Default::default() }, &stages);
-        assert!((fast.token_ms - p.token_ms / 3.0).abs() < 1e-6, "speculation spreads one pass over 3 tokens");
+        assert!(fast.token_ms <= p.token_ms / 3.0 + 1e-6, "speculation spreads one pass over at least 3 tokens");
+    }
+
+    #[test]
+    fn pipelined_guesses_pay_off_with_good_drafts_and_more_stages() {
+        assert!((acceptance(1.0 + 0.5 + 0.25 + 0.125 + 0.0625) - 0.5).abs() < 1e-9);
+        // Four equal stages: a pass is 4 paces. A weak draft gains nothing over one batch
+        // at a time; a strong one, run after run of right guesses, gains a lot.
+        let (pass, pace) = (400.0, 100.0);
+        assert!((speculative_token_ms(pass, pace, 1.5) - pass / 1.5).abs() < 1e-6);
+        let strong = speculative_token_ms(pass, pace, 4.5);
+        assert!(strong < pass / 4.5 * 0.6, "{strong}");
+        // One stage: nothing to overlap.
+        assert!((speculative_token_ms(100.0, 100.0, 4.5) - 100.0 / 4.5).abs() < 1e-6);
     }
 
     #[test]

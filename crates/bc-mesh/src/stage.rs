@@ -203,10 +203,21 @@ async fn open_feed(endpoint: &Endpoint, addr: iroh::EndpointAddr, ticket: Ticket
 async fn pump(mut stage: Box<dyn Stage>, mut input: RecvStream, mut out: SendStream) -> Result<()> {
     let (in_tx, mut in_rx) = mpsc::channel::<Batch>(QUEUE);
     let (out_tx, mut out_rx) = mpsc::channel::<MeshMsg>(QUEUE);
+    // The newest epoch read per stream, ahead of the compute loop (early cancellation).
+    let newest: Arc<Mutex<HashMap<u64, u64>>> = Arc::default();
+    let seen = newest.clone();
     let reader = tokio::spawn(async move {
         loop {
             match recv_msg::<MeshMsg>(&mut input).await? {
                 MeshMsg::Batch(b) => {
+                    {
+                        let mut seen = seen.lock().unwrap();
+                        if seen.len() > 4096 {
+                            seen.clear();
+                        }
+                        let e = seen.entry(b.meta.stream).or_insert(0);
+                        *e = (*e).max(b.meta.epoch);
+                    }
                     if in_tx.send(b).await.is_err() {
                         return Ok(());
                     }
@@ -230,6 +241,14 @@ async fn pump(mut stage: Box<dyn Stage>, mut input: RecvStream, mut out: SendStr
     while let Some(batch) = in_rx.recv().await {
         let seq = batch.seq;
         let mut meta = batch.meta;
+        let stale = newest.lock().unwrap().get(&meta.stream).is_some_and(|&e| e > meta.epoch);
+        if meta.skipped || stale {
+            meta.skipped = true;
+            if out_tx.send(MeshMsg::Batch(Batch { seq, payload: Payload::Tokens(Vec::new()), meta })).await.is_err() {
+                break;
+            }
+            continue;
+        }
         let (back, result, meta) = tokio::task::spawn_blocking(move || {
             let started = std::time::Instant::now();
             let r = batch.payload.decode().and_then(|a| stage.forward(&meta, a));

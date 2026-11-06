@@ -4,6 +4,9 @@ fn main() {
     match bc_infer::gpu::get() {
         Some(g) => {
             println!("copy {:.1} GB/s (read + write)", g.copy_bandwidth().unwrap() / 1e9);
+            for n in [1, 5, 8, 64] {
+                println!("product of {n} rows: {:.1} GB/s of weights", g.product_rate(n).unwrap() / 1e9);
+            }
             println!("{}: {:.1} GB/s, {:.1} GB for weights, unified {}", g.name, g.bandwidth().unwrap() / 1e9, g.memory() as f64 / 1e9, g.unified());
         }
         None => println!("no usable GPU"),

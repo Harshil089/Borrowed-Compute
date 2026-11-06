@@ -17,6 +17,16 @@ typedef unsigned long long ulong;
 
 struct float4 { float x, y, z, w; } __attribute__((aligned(16)));
 
+__device__ static inline float4 f4(float a, float b, float c, float d) {
+    float4 v;
+    v.x = a;
+    v.y = b;
+    v.z = c;
+    v.w = d;
+    return v;
+}
+#define F4(a, b, c, d) f4((a), (b), (c), (d))
+
 #define GLOBAL
 #define LOCAL
 #define PRIV

@@ -46,9 +46,8 @@ DEVFN void scale_min_k4(uint j, GLOBAL const uchar* q, PRIV float* sc, PRIV floa
     }
 }
 
-// Weight g*32 + lane of a stored row: the 32 lanes of a SIMD group read one group of 32
-// weights together, so their loads of the weights and of the input are side by side in
-// memory. Each format follows quant.rs's dequant_block.
+// Weight `lane` (0..32) of group g of a stored row, one at a time: for the formats
+// group4 has no wide path for. Each follows quant.rs's dequant_block.
 DEVFN float weight(GLOBAL const uchar* row, uint ty, uint g, uint lane) {
     uint j = lane & 15u, upper = lane >> 4;
     if (ty == T_F32) return BITS2F(u32at(row, (g * 32u + lane) * 4u));
@@ -93,108 +92,133 @@ DEVFN float weight(GLOBAL const uchar* row, uint ty, uint g, uint lane) {
     return 0.0f;
 }
 
-// Σ w·x over one group of 32 weights (g) against its 32 inputs, for the formats real
-// models use most, with wide loads: four inputs at a time, two weight bytes at a time.
-// Other formats go through weight() below (has_fast says which).
-DEVFN bool has_fast(uint ty) { return ty == T_Q4_0 || ty == T_Q8_0 || ty == T_Q5_0 || ty == T_Q4K || ty == T_Q5K || ty == T_Q6K; }
-// Σ of four weights (bytes of v, each masked to its value) against four inputs.
-DEVFN float dot4(float a, float b, float c, float d, float4 x) { return a * x.x + b * x.y + c * x.z + d * x.w; }
 DEVFN float4 x4(GLOBAL const float* xg, uint k) { return ((GLOBAL const float4*)xg)[k]; }
-DEVFN float fast32(GLOBAL const uchar* row, uint ty, uint g, GLOBAL const float* xg) {
-    if (ty == T_Q4_0) {
-        GLOBAL const uchar* b = row + g * 18u;
-        GLOBAL const ushort* q = (GLOBAL const ushort*)(b + 2);
-        float lo = 0.0f, hi = 0.0f;
-        for (uint k = 0; k < 4u; k++) {
-            uint a = q[2 * k], c = q[2 * k + 1];
-            float4 xl = x4(xg, k), xh = x4(xg, k + 4);
-            lo += ((float)(a & 15u) - 8.0f) * xl.x + ((float)((a >> 8) & 15u) - 8.0f) * xl.y + ((float)(c & 15u) - 8.0f) * xl.z + ((float)((c >> 8) & 15u) - 8.0f) * xl.w;
-            hi += ((float)((a >> 4) & 15u) - 8.0f) * xh.x + ((float)((a >> 12) & 15u) - 8.0f) * xh.y + ((float)((c >> 4) & 15u) - 8.0f) * xh.z + ((float)((c >> 12) & 15u) - 8.0f) * xh.w;
-        }
-        return f16at(b, 0) * (lo + hi);
+DEVFN float dot4(float4 a, float4 b) { return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w; }
+// The four weights in the bytes of v (each already masked to its value), minus off.
+DEVFN float4 bytes4(uint v, float off) {
+    return F4((float)(v & 255u) - off, (float)((v >> 8) & 255u) - off, (float)((v >> 16) & 255u) - off, (float)(v >> 24) - off);
+}
+DEVFN float4 scale4(float4 v, float s) { return F4(v.x * s, v.y * s, v.z * s, v.w * s); }
+
+// Weights 4k .. 4k+3 of group g of a stored row (k in 0..8). The formats real models use
+// most read two or four weight bytes per load; the rest go through weight(). Each
+// follows quant.rs's dequant_block.
+DEVFN float4 four(GLOBAL const uchar* row, uint ty, uint g, uint k) {
+    if (ty == T_Q4_0 || ty == T_Q5_0) {
+        // Bytes 4j .. 4j+3 hold weights 4j.. in their low nibbles and 16 + 4j.. in high.
+        uint j = k & 3u, hi = k >> 2;
+        uint at = ty == T_Q4_0 ? 2u : 6u;
+        GLOBAL const uchar* b = row + g * (ty == T_Q4_0 ? 18u : 22u);
+        GLOBAL const ushort* q = (GLOBAL const ushort*)(b + at);
+        uint v = ((q[2 * j] | ((uint)q[2 * j + 1] << 16)) >> (4u * hi)) & 0x0f0f0f0fu;
+        if (ty == T_Q4_0) return scale4(bytes4(v, 8.0f), f16at(b, 0));
+        // Bit t of these four bits goes to bit 4 of byte t.
+        uint h = (u32at(b, 2) >> (4u * j + 16u * hi)) & 15u;
+        v |= ((h & 1u) << 4) | ((h & 2u) << 11) | ((h & 4u) << 18) | ((h & 8u) << 25);
+        return scale4(bytes4(v, 16.0f), f16at(b, 0));
     }
     if (ty == T_Q8_0) {
         GLOBAL const uchar* b = row + g * 34u;
         GLOBAL const ushort* q = (GLOBAL const ushort*)(b + 2);
-        float s = 0.0f;
-        for (uint k = 0; k < 8u; k++) {
-            uint a = q[2 * k], c = q[2 * k + 1];
-            s += dot4((float)i8of(a & 255u), (float)i8of(a >> 8), (float)i8of(c & 255u), (float)i8of(c >> 8), x4(xg, k));
-        }
-        return f16at(b, 0) * s;
-    }
-    if (ty == T_Q5_0) {
-        GLOBAL const uchar* b = row + g * 22u;
-        GLOBAL const ushort* q = (GLOBAL const ushort*)(b + 6);
-        uint qh = u32at(b, 2);
-        float lo = 0.0f, hi = 0.0f;
-        for (uint k = 0; k < 4u; k++) {
-            uint a = q[2 * k], c = q[2 * k + 1], j = 4u * k;
-            uint h = qh >> j, H = qh >> (j + 16u);
-            lo += dot4((float)((a & 15u) | ((h & 1u) << 4)) - 16.0f, (float)(((a >> 8) & 15u) | ((h & 2u) << 3)) - 16.0f,
-                       (float)((c & 15u) | ((h & 4u) << 2)) - 16.0f, (float)(((c >> 8) & 15u) | ((h & 8u) << 1)) - 16.0f, x4(xg, k));
-            hi += dot4((float)(((a >> 4) & 15u) | ((H & 1u) << 4)) - 16.0f, (float)(((a >> 12) & 15u) | ((H & 2u) << 3)) - 16.0f,
-                       (float)(((c >> 4) & 15u) | ((H & 4u) << 2)) - 16.0f, (float)(((c >> 12) & 15u) | ((H & 8u) << 1)) - 16.0f, x4(xg, k + 4));
-        }
-        return f16at(b, 0) * (lo + hi);
+        uint a = q[2 * k], c = q[2 * k + 1];
+        float d = f16at(b, 0);
+        return F4((float)i8of(a & 255u) * d, (float)i8of(a >> 8) * d, (float)i8of(c & 255u) * d, (float)i8of(c >> 8) * d);
     }
     if (ty == T_Q4K || ty == T_Q5K) {
+        // 256 weights a block in 4 chunks of 64: low nibbles are group 2c, high 2c + 1.
         GLOBAL const uchar* b = row + (g / 8u) * (ty == T_Q4K ? 144u : 176u);
         uint sub = g % 8u, c = sub / 2u, hi = sub % 2u;
         float sc, mn;
         scale_min_k4(sub, b + 4, &sc, &mn);
-        GLOBAL const uint* q = (GLOBAL const uint*)(b + (ty == T_Q4K ? 16u : 48u) + 32u * c);
-        GLOBAL const uint* qh = (GLOBAL const uint*)(b + 16);
-        uint bit = hi + 2u * c;
-        float s = 0.0f, xs = 0.0f;
-        for (uint k = 0; k < 8u; k++) {
-            uint v = (q[k] >> (4u * hi)) & 0x0f0f0f0fu;
-            if (ty == T_Q5K) v |= ((qh[k] >> bit) & 0x01010101u) << 4;
-            float4 x = x4(xg, k);
-            s += dot4((float)(v & 255u), (float)((v >> 8) & 255u), (float)((v >> 16) & 255u), (float)(v >> 24), x);
-            xs += x.x + x.y + x.z + x.w;
-        }
-        return f16at(b, 0) * sc * s - f16at(b, 2) * mn * xs;
+        float ds = f16at(b, 0) * sc, dm = f16at(b, 2) * mn;
+        uint v = (((GLOBAL const uint*)(b + (ty == T_Q4K ? 16u : 48u) + 32u * c))[k] >> (4u * hi)) & 0x0f0f0f0fu;
+        if (ty == T_Q5K) v |= ((((GLOBAL const uint*)(b + 16))[k] >> (hi + 2u * c)) & 0x01010101u) << 4;
+        float4 f = bytes4(v, 0.0f);
+        return F4(ds * f.x - dm, ds * f.y - dm, ds * f.z - dm, ds * f.w - dm);
     }
     if (ty == T_Q6K) {
         GLOBAL const uchar* b = row + (g / 8u) * 210u;
         uint sub = g % 8u, hh = sub / 4u, qr = sub % 4u;
         GLOBAL const ushort* ql = (GLOBAL const ushort*)(b + 64u * hh + ((qr & 1u) != 0u ? 32u : 0u));
         GLOBAL const ushort* qh = (GLOBAL const ushort*)(b + 128u + 32u * hh);
-        uint shift = qr < 2u ? 0u : 4u;
-        float s0 = 0.0f, s1 = 0.0f;
-        for (uint k = 0; k < 8u; k++) {
-            uint lo = ql[2 * k] | (ql[2 * k + 1] << 16), h = qh[2 * k] | (qh[2 * k + 1] << 16);
-            uint v = ((lo >> shift) & 0x0f0f0f0fu) | (((h >> (2u * qr)) & 0x03030303u) << 4);
-            float d = dot4((float)(v & 255u) - 32.0f, (float)((v >> 8) & 255u) - 32.0f, (float)((v >> 16) & 255u) - 32.0f, (float)(v >> 24) - 32.0f, x4(xg, k));
-            if (k < 4u) s0 += d; else s1 += d;
-        }
-        GLOBAL const uchar* sc = b + 192u + 8u * hh + 2u * qr;
-        return f16at(b, 208) * ((float)i8of(sc[0]) * s0 + (float)i8of(sc[1]) * s1);
+        uint lo = ql[2 * k] | ((uint)ql[2 * k + 1] << 16), h = qh[2 * k] | ((uint)qh[2 * k + 1] << 16);
+        uint v = ((lo >> (qr < 2u ? 0u : 4u)) & 0x0f0f0f0fu) | (((h >> (2u * qr)) & 0x03030303u) << 4);
+        float d = f16at(b, 208) * (float)i8of(b[192u + 8u * hh + 2u * qr + (k < 4u ? 0u : 1u)]);
+        return scale4(bytes4(v, 32.0f), d);
     }
-    return 0.0f;
+    return F4(weight(row, ty, g, 4 * k), weight(row, ty, g, 4 * k + 1), weight(row, ty, g, 4 * k + 2), weight(row, ty, g, 4 * k + 3));
+}
+
+// One group of 32 weights (g), decoded once into w[k] = weights 4k .. 4k+3: each block's
+// scales are read once, its weight bytes two or four at a time.
+DEVFN void group4(GLOBAL const uchar* row, uint ty, uint g, PRIV float4* w) {
+    if (ty == T_Q4_0) {
+        GLOBAL const uchar* b = row + g * 18u;
+        GLOBAL const ushort* q = (GLOBAL const ushort*)(b + 2);
+        float d = f16at(b, 0);
+        for (uint k = 0; k < 4u; k++) {
+            uint v = q[2 * k] | ((uint)q[2 * k + 1] << 16);
+            w[k] = scale4(bytes4(v & 0x0f0f0f0fu, 8.0f), d);
+            w[k + 4] = scale4(bytes4((v >> 4) & 0x0f0f0f0fu, 8.0f), d);
+        }
+    } else if (ty == T_Q4K || ty == T_Q5K) {
+        GLOBAL const uchar* b = row + (g / 8u) * (ty == T_Q4K ? 144u : 176u);
+        uint sub = g % 8u, c = sub / 2u, hi = sub % 2u;
+        float sc, mn;
+        scale_min_k4(sub, b + 4, &sc, &mn);
+        float ds = f16at(b, 0) * sc, dm = f16at(b, 2) * mn;
+        GLOBAL const uint* q = (GLOBAL const uint*)(b + (ty == T_Q4K ? 16u : 48u) + 32u * c);
+        GLOBAL const uint* qh = (GLOBAL const uint*)(b + 16);
+        for (uint k = 0; k < 8u; k++) {
+            uint v = (q[k] >> (4u * hi)) & 0x0f0f0f0fu;
+            if (ty == T_Q5K) v |= ((qh[k] >> (hi + 2u * c)) & 0x01010101u) << 4;
+            float4 f = bytes4(v, 0.0f);
+            w[k] = F4(ds * f.x - dm, ds * f.y - dm, ds * f.z - dm, ds * f.w - dm);
+        }
+    } else if (ty == T_Q6K) {
+        GLOBAL const uchar* b = row + (g / 8u) * 210u;
+        uint sub = g % 8u, hh = sub / 4u, qr = sub % 4u;
+        GLOBAL const ushort* ql = (GLOBAL const ushort*)(b + 64u * hh + ((qr & 1u) != 0u ? 32u : 0u));
+        GLOBAL const ushort* qh = (GLOBAL const ushort*)(b + 128u + 32u * hh);
+        GLOBAL const uchar* sc = b + 192u + 8u * hh + 2u * qr;
+        float d = f16at(b, 208);
+        float d0 = d * (float)i8of(sc[0]), d1 = d * (float)i8of(sc[1]);
+        uint shift = qr < 2u ? 0u : 4u;
+        for (uint k = 0; k < 8u; k++) {
+            uint lo = ql[2 * k] | ((uint)ql[2 * k + 1] << 16), h = qh[2 * k] | ((uint)qh[2 * k + 1] << 16);
+            uint v = ((lo >> shift) & 0x0f0f0f0fu) | (((h >> (2u * qr)) & 0x03030303u) << 4);
+            w[k] = scale4(bytes4(v, 32.0f), k < 4u ? d0 : d1);
+        }
+    } else {
+        for (uint k = 0; k < 8u; k++) w[k] = four(row, ty, g, k);
+    }
 }
 
 // Weight rows per matrix-product thread group: one per SIMD group of 32.
 #define ROWS_PER_GROUP 4
 
-// out[i][r] = Σ_c W[r][c] · x[i][c], for input rows i0 .. i0 + NB of n.
+// out[i][r] = Σ_c W[r][c] · x[i][c], for input rows i0 .. i0 + NB of n. Lane l takes
+// groups l, l + 32, ... of row r; each group is decoded once and used for every input
+// row, so checking a batch of guesses reads the weights no more than one token does.
 DEVFN void matmul(GLOBAL const uchar* wt, GLOBAL const float* x, GLOBAL float* out, uint ty, uint rows, uint cols, uint n, uint row_bytes, uint r, uint i0, uint lane) {
     if (r >= rows) return;
     GLOBAL const uchar* row = wt + (ulong)r * row_bytes;
     uint groups = cols / 32u;
-    uint end = i0 + NB < n ? i0 + NB : n;
-    for (uint i = i0; i < end; i++) {
-        GLOBAL const float* xi = x + (ulong)i * cols;
-        float acc = 0.0f;
-        if (has_fast(ty)) {
-            for (uint g = lane; g < groups; g += 32u) acc += fast32(row, ty, g, xi + g * 32u);
-        } else {
-            for (uint g = 0; g < groups; g++) acc += weight(row, ty, g, lane) * xi[g * 32u + lane];
-        }
-        acc = WSUM(acc);
-        if (lane == 0u) out[(ulong)i * rows + r] = acc;
+    uint cnt = n - i0 < NB ? n - i0 : NB;
+    // Eight named accumulators, not an array: an array indexed in a loop the compiler
+    // does not unroll lives in slow per-thread memory.
+    float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f, a4 = 0.0f, a5 = 0.0f, a6 = 0.0f, a7 = 0.0f;
+    for (uint g = lane; g < groups; g += 32u) {
+        float4 w[8];
+        group4(row, ty, g, w);
+        GLOBAL const float* xg = x + (ulong)i0 * cols + g * 32u;
+#define ROW(i, a) if (i < cnt) { GLOBAL const float* xi = xg + (ulong)i * cols; float s = 0.0f; for (uint k = 0; k < 8u; k++) s += dot4(w[k], x4(xi, k)); a += s; }
+        ROW(0u, a0) ROW(1u, a1) ROW(2u, a2) ROW(3u, a3) ROW(4u, a4) ROW(5u, a5) ROW(6u, a6) ROW(7u, a7)
+#undef ROW
     }
+#define OUT(i, a) { float s = WSUM(a); if (lane == 0u && i < cnt) out[(ulong)(i0 + i) * rows + r] = s; }
+    OUT(0u, a0) OUT(1u, a1) OUT(2u, a2) OUT(3u, a3) OUT(4u, a4) OUT(5u, a5) OUT(6u, a6) OUT(7u, a7)
+#undef OUT
 }
 
 // One row of RMSNorm: x / √(mean(x²) + ε) ⊙ w.

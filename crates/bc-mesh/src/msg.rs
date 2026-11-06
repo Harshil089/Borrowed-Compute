@@ -104,6 +104,14 @@ pub struct Meta {
     /// Milliseconds each stage spent computing, appended stage by stage: what live
     /// balancing measures.
     pub stage_ms: Vec<f32>,
+    /// Which run of speculative guesses the batch belongs to. A newer epoch for the same
+    /// stream means the coordinator found a wrong guess, so every older batch still
+    /// queued at a stage is worthless and is passed on without computing.
+    #[serde(default)]
+    pub epoch: u64,
+    /// Passed on without computing (see `epoch`); the payload is empty.
+    #[serde(default)]
+    pub skipped: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

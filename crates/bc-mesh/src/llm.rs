@@ -9,8 +9,14 @@
 //! - **Speculative decoding** (greedy requests, with a draft model on this device): the
 //!   draft guesses [`DRAFT_TOKENS`] tokens, one pass through the pipeline checks them all
 //!   at once (each row returns the target's own choice there), and the longest agreeing
-//!   prefix is kept plus the target's next token. Every pass yields at least one token
-//!   and up to `DRAFT_TOKENS + 1`, and the text is exactly what the target alone writes.
+//!   prefix is kept plus the target's next token. The text is exactly what the target
+//!   alone writes.
+//! - **Pipelined speculation** (one conversation on a pipeline of several stages): instead
+//!   of one batch going round while every other stage waits, a new batch of guesses
+//!   follows each time the first stage is free, continuing where the last left off. Each
+//!   stage then works on some batch all the time, so one conversation goes as fast as
+//!   the slowest stage, not as slow as all of them in a row, for as long as the guesses
+//!   hold. More devices now speed one conversation up.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -43,6 +49,7 @@ pub const PREFILL_CHUNK: usize = 256;
 pub const DRAFT_TOKENS: usize = 4;
 
 type Reply = oneshot::Sender<Result<(Meta, Activation)>>;
+type Answer = oneshot::Receiver<Result<(Meta, Activation)>>;
 
 /// One pipeline, shared by any number of requests.
 pub struct Client {
@@ -54,6 +61,40 @@ pub struct Client {
     pub plan: PipelinePlan,
     /// Average compute milliseconds per stage for one-token batches, as measured.
     pub stage_ms: Arc<StdMutex<Vec<f32>>>,
+    /// Milliseconds a token, measured, with and without speculation on this pipeline.
+    pub speed: StdMutex<Speed>,
+}
+
+/// Which way of decoding is faster on a pipeline, as measured. Guessing pays when the
+/// stages check several tokens for about the price of one (CPU stages, and memory-bound
+/// GPUs) and the draft agrees often; it costs when checking is dear or guesses miss. So
+/// each pipeline keeps both times and decodes the faster way, trying the other every
+/// [`EXPLORE`] requests in case things changed.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Speed {
+    pub plain_ms: f64,
+    pub spec_ms: f64,
+    requests: u64,
+}
+
+const EXPLORE: u64 = 8;
+
+impl Speed {
+    fn speculate(&mut self) -> bool {
+        self.requests += 1;
+        let faster = self.spec_ms <= self.plain_ms;
+        match (self.spec_ms > 0.0, self.plain_ms > 0.0) {
+            (false, _) => true,
+            (true, false) => false,
+            _ if self.requests.is_multiple_of(EXPLORE) => !faster,
+            _ => faster,
+        }
+    }
+
+    fn record(&mut self, speculated: bool, ms_per_token: f64) {
+        let slot = if speculated { &mut self.spec_ms } else { &mut self.plain_ms };
+        *slot = if *slot == 0.0 { ms_per_token } else { 0.7 * *slot + 0.3 * ms_per_token };
+    }
 }
 
 impl Client {
@@ -69,7 +110,7 @@ impl Client {
                 match output.recv().await {
                     Ok(Some((_, meta, act))) => {
                         // Single tokens only: what decoding speed is made of.
-                        if meta.rows == 1 {
+                        if meta.rows == 1 && !meta.skipped {
                             let mut avg = ms.lock().unwrap();
                             for (a, m) in avg.iter_mut().zip(&meta.stage_ms) {
                                 *a = if *a == 0.0 { *m } else { 0.8 * *a + 0.2 * m };
@@ -88,7 +129,7 @@ impl Client {
                 let _ = reply.send(Err(anyhow!("{failure}")));
             }
         });
-        Ok(Arc::new(Client { input: Mutex::new((input, 0)), pending, alive, in_flight: AtomicUsize::new(0), plan, stage_ms }))
+        Ok(Arc::new(Client { input: Mutex::new((input, 0)), pending, alive, in_flight: AtomicUsize::new(0), plan, stage_ms, speed: StdMutex::default() }))
     }
 
     pub fn alive(&self) -> bool {
@@ -101,7 +142,7 @@ impl Client {
 
     /// Sends a batch; the reply arrives on the receiver. Batches sent one after another
     /// are answered in that order.
-    pub async fn submit(&self, mut meta: Meta, act: Activation) -> Result<oneshot::Receiver<Result<(Meta, Activation)>>> {
+    pub async fn submit(&self, mut meta: Meta, act: Activation) -> Result<Answer> {
         meta.rows = match &act {
             Activation::Tokens(t) => t.len() as u32,
             Activation::Hidden(t) => t.rows as u32,
@@ -260,69 +301,146 @@ impl Llm {
             return Ok((out, stats));
         }
 
-        let speculate = sampling.temperature <= 0.0 && self.draft.is_some();
-        let mut draft: Option<(Arc<Part>, Kv)> = match &self.draft {
-            Some(d) if speculate => Some((d.clone(), d.new_kv())),
-            _ => None,
+        // Decoding speed, for choosing how to decode next time; short answers say little.
+        let record = |speculated: bool, stats: &Stats| {
+            if stats.generated >= 8 {
+                let ms = (stats.total_ms - stats.first_token_ms) / (stats.generated - 1) as f64;
+                client.speed.lock().unwrap().record(speculated, ms);
+            }
         };
-        let mut draft_len = 0;
-        if let Some(d) = draft.take() {
-            draft = Some(draft_run(d, prompt.to_vec(), 0).await?.0);
-            draft_len = prompt.len();
-        }
-        while out.len() < max_tokens {
-            stats.passes += 1;
-            let Some(mut d) = draft.take() else {
-                // One token a pass.
+        let speculate = sampling.temperature <= 0.0 && self.draft.is_some() && client.speed.lock().unwrap().speculate();
+        let Some(draft) = self.draft.clone().filter(|_| speculate) else {
+            // No draft model, sampling, or guessing measured slower here: a token a pass.
+            while out.len() < max_tokens {
+                stats.passes += 1;
                 let ids = client.call(meta(target_len, false), Activation::Tokens(seq[target_len..].to_vec())).await?;
                 target_len = seq.len();
                 if !push(ids[0], &mut out, &mut seq) {
                     break;
                 }
-                continue;
-            };
-            // Draft: catch up on accepted tokens, then guess ahead.
-            let mut guesses = Vec::with_capacity(DRAFT_TOKENS);
-            let mut feed = seq[draft_len..].to_vec();
-            let mut pos = draft_len;
-            for _ in 0..DRAFT_TOKENS.min(max_tokens - out.len()) {
-                let n = feed.len();
-                let (back, scores) = draft_run(d, feed, pos).await?;
-                d = back;
-                let next = bc_infer::sample::argmax(&scores[(n - 1) * self.cfg.vocab..]);
-                pos += n;
-                guesses.push(next);
-                feed = vec![next];
             }
-            draft = Some(d);
-            // Target: the real tokens it has not seen plus the guesses, every row scored.
-            let base = seq.len() - target_len;
-            let mut rows = seq[target_len..].to_vec();
-            rows.extend(&guesses);
-            let checked = client.call(meta(target_len, true), Activation::Tokens(rows)).await?;
-            let mut accepted = 0;
-            while accepted < guesses.len() && guesses[accepted] == checked[base - 1 + accepted] {
-                accepted += 1;
+            stats.generated = out.len();
+            stats.total_ms = started.elapsed().as_secs_f64() * 1000.0;
+            if self.draft.is_some() && sampling.temperature <= 0.0 {
+                record(false, &stats);
             }
-            let old_len = seq.len();
-            let mut more = true;
-            for &g in &guesses[..accepted] {
-                if !push(g, &mut out, &mut seq) {
-                    more = false;
-                    break;
+            return Ok((out, stats));
+        };
+
+        // Pipelined speculation. The stream is `seq` (confirmed) then `guesses` (the
+        // draft's, unchecked); `sent` positions of it are in the target's pipeline. While
+        // this is the pipeline's only conversation, up to one batch per stage plus one is
+        // in flight, each continuing the draft's guesses where the last left off, so every
+        // stage works instead of waiting for one batch to go round. A wrong guess makes
+        // every later batch worthless: they are dropped by `epoch` as they return, and the
+        // next batch starts at the corrected position, where the stages cut their caches
+        // back. The text is exactly what the target alone writes.
+        client.in_flight.fetch_add(1, Ordering::Relaxed);
+        let vocab = self.cfg.vocab;
+        let spec = async {
+            let (mut d, _) = draft_run((draft.clone(), draft.new_kv()), prompt.to_vec(), 0).await?;
+            let mut draft_len = prompt.len();
+            let mut guesses: Vec<u32> = Vec::new();
+            let mut sent = target_len;
+            let mut epoch = 0u64;
+            // (epoch, first position, rows, answer) of each batch in the pipeline, oldest first.
+            let mut flight: VecDeque<(u64, usize, usize, Answer)> = VecDeque::new();
+            let depth = client.plan.stages.len() + 1;
+            loop {
+                // Returned batches first: drafting more only fills time spent waiting.
+                let ready = match flight.front_mut() {
+                    Some((_, _, _, rx)) => match rx.try_recv() {
+                        Ok(r) => Some(r),
+                        Err(oneshot::error::TryRecvError::Empty) => None,
+                        Err(oneshot::error::TryRecvError::Closed) => bail!("the pipeline went away"),
+                    },
+                    None => None,
+                };
+                let room = if client.load() <= 1 { depth } else { 1 };
+                if ready.is_none() && flight.len() < room {
+                    let want = DRAFT_TOKENS.min(max_tokens.saturating_sub(out.len() + guesses.len()));
+                    for _ in 0..want {
+                        let stream_len = seq.len() + guesses.len();
+                        let feed: Vec<u32> = seq.iter().chain(&guesses).skip(draft_len).copied().collect();
+                        let n = feed.len();
+                        let (back, scores) = draft_run(d, feed, draft_len).await?;
+                        d = back;
+                        draft_len = stream_len;
+                        guesses.push(bc_infer::sample::argmax(&scores[(n - 1) * vocab..]));
+                    }
+                    let rows: Vec<u32> = seq.iter().chain(&guesses).skip(sent).copied().collect();
+                    if !rows.is_empty() {
+                        let len = rows.len();
+                        flight.push_back((epoch, sent, len, client.submit(Meta { epoch, ..meta(sent, true) }, Activation::Tokens(rows)).await?));
+                        sent += len;
+                        stats.passes += 1;
+                        continue;
+                    }
+                }
+                let Some((e, pos, len, rx)) = flight.pop_front() else { break };
+                let (_, act) = match ready {
+                    Some(r) => r?,
+                    None => rx.await.context("the pipeline went away")??,
+                };
+                if e != epoch {
+                    continue;
+                }
+                let Activation::Tokens(checked) = act else { bail!("the last stage sent hidden states") };
+                // Row j scored the token after position pos + j.
+                for (j, &pred) in checked.iter().enumerate().take(len) {
+                    let next = pos + j + 1;
+                    if next < seq.len() {
+                        continue;
+                    }
+                    let right = guesses.first() == Some(&pred);
+                    let wrong = !right && !guesses.is_empty();
+                    if right {
+                        guesses.remove(0);
+                    } else {
+                        guesses.clear();
+                    }
+                    if !push(pred, &mut out, &mut seq) {
+                        return Ok(());
+                    }
+                    if wrong {
+                        epoch += 1;
+                        sent = next;
+                        draft_len = draft_len.min(next);
+                    }
+                    if !right {
+                        break;
+                    }
                 }
             }
-            if more {
-                more = push(checked[base - 1 + accepted], &mut out, &mut seq);
-            }
-            target_len = old_len + accepted;
-            draft_len = old_len + accepted.min(guesses.len().saturating_sub(1));
-            if !more {
-                break;
-            }
+            anyhow::Ok(())
         }
+        .await;
+        client.in_flight.fetch_sub(1, Ordering::Relaxed);
+        spec?;
         stats.generated = out.len();
         stats.total_ms = started.elapsed().as_secs_f64() * 1000.0;
+        record(true, &stats);
         Ok((out, stats))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Speed;
+
+    #[test]
+    fn decoding_takes_the_faster_way_and_rechecks_the_other() {
+        let mut s = Speed::default();
+        assert!(s.speculate(), "first, try guessing");
+        s.record(true, 30.0);
+        assert!(!s.speculate(), "then measure without");
+        s.record(false, 20.0);
+        let choices: Vec<bool> = (0..16).map(|_| s.speculate()).collect();
+        assert_eq!(choices.iter().filter(|&&c| c).count(), 2, "plain is faster: guess only to recheck, {choices:?}");
+        s.record(true, 5.0);
+        s.record(true, 5.0);
+        s.record(true, 5.0);
+        assert!(s.spec_ms < s.plain_ms);
+        assert!((0..7).filter(|_| s.speculate()).count() >= 6, "guessing got faster: use it");
     }
 }
