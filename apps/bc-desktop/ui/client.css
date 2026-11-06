@@ -76,7 +76,9 @@
 .add-option span { font-weight: 400; font-size: 12px; color: var(--ink-3); white-space: normal; }
 
 /* ---- Run ---- */
-.run { overflow: hidden; }
+/* Never squeezed below its content by the output card: the page scrolls instead,
+   so the Run button is never cut off in a short window. */
+.run { overflow: hidden; flex-shrink: 0; }
 .run-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; padding: 4px 20px 18px; }
 .command-input { font-family: var(--mono) !important; font-size: 13px !important; }
 #folder { font-family: var(--mono); font-size: 12.5px; }

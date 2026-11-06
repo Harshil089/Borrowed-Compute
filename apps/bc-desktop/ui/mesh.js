@@ -36,13 +36,14 @@ function renderDevices(devices) {
   }
   $("mesh-devices").innerHTML = devices.map((d) => {
     if (d.error) {
-      return `<div class="mesh-dev"><span class="dep-main"><span class="dep-cmd">${esc(d.name)}</span><span class="dep-sub">${esc(d.error)}</span></span><span class="pill bad">Unreachable</span></div>`;
+      return `<div class="mesh-dev"><span class="dep-main"><span class="dep-cmd">${esc(d.name)}</span><span class="dep-sub">${esc(d.error)}</span></span><span class="pill ${d.shared ? "warn" : "bad"}">${d.shared ? "Not allowed" : "Unreachable"}</span></div>`;
     }
     const pill = d.engine ? `<span class="pill ok">Ready</span>` : `<span class="pill warn">Update needed</span>`;
     return `
       <div class="mesh-dev">
         <span class="dep-main">
-          <span class="dep-cmd">${esc(d.name)}</span>
+          <span class="dep-cmd">${esc(d.name)}${d.shared ? ` <span class="pill">Shared</span>` : ""}</span>
+          ${d.shared ? `<span class="dep-sub">Someone else's computer: it sees the conversations that pass through it.</span>` : ""}
           <span class="dep-sub">
             ${d.local ? `<span class="kv"><b>Role</b> coordinates, and holds the first layers</span>` : `<span class="kv"><b>Path</b> ${d.relay ? "relay" : "direct"}</span>
             <span class="kv"><b>Round trip</b> <span class="num">${fmt(d.rtt_ms, 1)}<i>ms</i></span></span>

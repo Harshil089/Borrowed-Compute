@@ -32,6 +32,11 @@ const CODE_ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Saved {
     sharing: bool,
+    /// Guests may also use this computer as part of their Mesh (a model split across
+    /// devices). Off by default: what moves between stages reveals the guest's prompts to
+    /// this computer, which the guest accepts by using it, and the owner by allowing it.
+    #[serde(default)]
+    mesh: bool,
     invites: Vec<SavedInvite>,
     guests: Vec<Guest>,
 }
@@ -78,6 +83,7 @@ struct Inner {
 #[derive(Debug, Clone, Serialize)]
 pub struct GuestsView {
     pub sharing: bool,
+    pub mesh: bool,
     pub invites: Vec<InviteView>,
     pub guests: Vec<Guest>,
     pub requests: Vec<RequestView>,
@@ -171,6 +177,19 @@ impl Guests {
     pub fn allows(&self, device: &EndpointId) -> bool {
         let inner = self.inner.lock().unwrap();
         inner.saved.sharing && self.is_guest_in(&inner, device)
+    }
+
+    /// True if `device` may use this computer in its Mesh right now: sharing and the
+    /// owner's Mesh switch on, and `device` an approved guest.
+    pub fn allows_mesh(&self, device: &EndpointId) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner.saved.sharing && inner.saved.mesh && self.is_guest_in(&inner, device)
+    }
+
+    pub fn set_mesh(&self, on: bool) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.saved.mesh = on;
+        self.save(&inner.saved);
     }
 
     pub fn is_guest(&self, device: &EndpointId) -> bool {
@@ -322,6 +341,7 @@ impl Guests {
         requests.sort_by_key(|r| r.id);
         GuestsView {
             sharing: inner.saved.sharing,
+            mesh: inner.saved.mesh,
             invites: inner
                 .saved
                 .invites
@@ -367,8 +387,13 @@ mod tests {
         assert!(guests.allows(&device(1)));
         assert_eq!(guests.view().guests[0].name, "Sam");
 
+        assert!(!guests.allows_mesh(&device(1)), "Mesh is off for guests until the owner turns it on");
+        guests.set_mesh(true);
+        assert!(guests.allows_mesh(&device(1)));
+        assert!(!guests.allows_mesh(&device(9)), "only approved guests");
         guests.set_sharing(false);
         assert!(!guests.allows(&device(1)), "sharing off refuses guests");
+        assert!(!guests.allows_mesh(&device(1)), "and their Mesh too");
         assert!(guests.is_guest(&device(1)), "but remembers them");
         guests.set_sharing(true);
         assert!(guests.remove_guest(&device(1).to_string()));

@@ -1147,6 +1147,7 @@ fn main() {
             lend::stop_service,
             lend::guests,
             lend::set_sharing,
+            lend::set_guest_mesh,
             lend::create_invite,
             lend::delete_invite,
             lend::approve_guest,
