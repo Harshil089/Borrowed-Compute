@@ -58,7 +58,13 @@ impl Stage for ToyStage {
 }
 
 fn factory(delay: Duration) -> StageFactory {
-    Arc::new(move |s: StageSetup, _| Box::pin(async move { Ok(Box::new(ToyStage { layers: s.layers.clone(), delay }) as Box<dyn Stage>) }))
+    // Loading takes `delay` too, like a device downloading its layers.
+    Arc::new(move |s: StageSetup, _| {
+        Box::pin(async move {
+            tokio::time::sleep(delay).await;
+            Ok(Box::new(ToyStage { layers: s.layers.clone(), delay }) as Box<dyn Stage>)
+        })
+    })
 }
 
 struct Mesh {
@@ -144,6 +150,21 @@ async fn stages_work_at_the_same_time() {
     // One after another: 8 batches × 3 stages × 150 ms = 3.6 s. Pipelined: about
     // (8 + 2) × 150 ms = 1.5 s plus the network.
     assert!(took < Duration::from_millis(2900), "took {took:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_device_loads_its_layers_at_the_same_time() {
+    // Three stages that each take 600 ms to load: one after another would be 1.8 s.
+    let m = mesh(3, Duration::from_millis(600), true).await;
+    let start = Instant::now();
+    let (mut tx, mut rx) = pipeline::open(&m.coordinator, "toy", &targets(&m, &[0..2, 2..4, 4..LAYERS]), &|_, _, _| {}).await.unwrap();
+    let opened = start.elapsed();
+    assert!(opened < Duration::from_millis(1500), "set up in {opened:?}");
+    // And the pipeline works: the middle stage's feed arrived while it was still loading.
+    tx.send(0, Meta::default(), &Activation::Hidden(input(0))).await.unwrap();
+    tx.finish().await.unwrap();
+    let (_, _, a) = rx.recv().await.unwrap().unwrap();
+    assert_eq!(a, Activation::Hidden(run_layers(0..LAYERS, &input(0))));
 }
 
 #[tokio::test(flavor = "multi_thread")]

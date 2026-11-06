@@ -109,22 +109,31 @@ impl Client {
         if plan.stages.iter().skip(1).any(is_local) {
             bail!("this computer's stage must come first in the pipeline");
         }
-        let local = match plan.stages.first().filter(|s| is_local(s)) {
-            Some(s) => Some(Arc::new(StdMutex::new(local_stage(endpoint, model_url, s.layers.clone(), on_loading).await?))),
-            None => None,
-        };
-        let skip = local.is_some() as usize;
+        let mine = plan.stages.first().filter(|s| is_local(s));
+        let skip = mine.is_some() as usize;
         let targets: Vec<Target> = plan.stages.iter().skip(skip).map(|s| Target { addr: addrs[s.device].clone(), layers: s.layers.clone() }).collect();
         let pending: Arc<StdMutex<VecDeque<Reply>>> = Arc::default();
         let alive = Arc::new(AtomicBool::new(true));
         let stage_ms = Arc::new(StdMutex::new(vec![0.0; plan.stages.len()]));
-        let input = if targets.is_empty() {
-            None
-        } else {
-            let (input, output) = pipeline::open(endpoint, model_url, &targets, &|i, done, total| on_loading(i + skip, done, total)).await?;
-            Self::read_replies(output, pending.clone(), alive.clone(), stage_ms.clone());
-            Some(input)
+        // This computer downloads its layers while the other devices download theirs.
+        let local = async {
+            match mine {
+                Some(s) => Ok(Some(Arc::new(StdMutex::new(local_stage(endpoint, model_url, s.layers.clone(), on_loading).await?)))),
+                None => anyhow::Ok(None),
+            }
         };
+        let remote = async {
+            if targets.is_empty() {
+                return anyhow::Ok(None);
+            }
+            Ok(Some(pipeline::open(endpoint, model_url, &targets, &|i, done, total| on_loading(i + skip, done, total)).await?))
+        };
+        let (local, remote) = tokio::join!(local, remote);
+        let (local, remote) = (local?, remote?);
+        let input = remote.map(|(input, output)| {
+            Self::read_replies(output, pending.clone(), alive.clone(), stage_ms.clone());
+            input
+        });
         Ok(Arc::new(Client { input: Mutex::new((input, 0)), local, pending, alive, in_flight: AtomicUsize::new(0), plan, stage_ms, speed: StdMutex::default() }))
     }
 

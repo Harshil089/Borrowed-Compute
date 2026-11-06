@@ -26,7 +26,9 @@ const FIRST_FRAME: usize = 1 << 20;
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long a stage waits for the previous one to start feeding it.
-const FEED_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a stage keeps trying to reach the next one that has not registered yet: all
+/// stages are set up at once, so the next one's setup may arrive a moment later.
+const NEXT_STAGE_WAIT: Duration = Duration::from_secs(60);
 /// Batches queued between a stage's reader, compute and writer.
 const QUEUE: usize = 4;
 
@@ -142,6 +144,17 @@ impl Host {
     }
 
     async fn run_stage(&self, conn: Connection, mut control: SendStream, setup_recv: RecvStream, coordinator: EndpointId, setup: StageSetup) -> Result<()> {
+        // Registered before loading: every stage downloads at the same time, and the one
+        // before this may finish first and connect while this one still loads.
+        let feed = (setup.index > 0).then(|| {
+            let (tx, rx) = oneshot::channel();
+            self.waiting.lock().unwrap().insert(setup.session, Waiting { coordinator, feed: tx });
+            rx
+        });
+        let session = setup.session;
+        let unregister = || {
+            self.waiting.lock().unwrap().remove(&session);
+        };
         let built = match &self.factory {
             None => Err(anyhow::anyhow!("this device has no inference engine")),
             Some(factory) => {
@@ -165,7 +178,10 @@ impl Host {
                             break built;
                         }
                         // The coordinator gave up (or was stopped): stop downloading.
-                        _ = conn.closed() => bail!("the device that set this stage up went away"),
+                        _ = conn.closed() => {
+                            unregister();
+                            bail!("the device that set this stage up went away");
+                        }
                         Ok(()) = rx.changed() => {
                             let (done, total) = *rx.borrow_and_update();
                             if sent.elapsed() >= PROGRESS_EVERY || done == total {
@@ -180,15 +196,11 @@ impl Host {
         };
         let stage = match built {
             Ok(s) => s,
-            Err(e) => return refuse(&conn, control, format!("{e:#}")).await,
+            Err(e) => {
+                unregister();
+                return refuse(&conn, control, format!("{e:#}")).await;
+            }
         };
-        // Registered before Ready, so the previous stage, set up after this one, can feed it.
-        let feed = (setup.index > 0).then(|| {
-            let (tx, rx) = oneshot::channel();
-            self.waiting.lock().unwrap().insert(setup.session, Waiting { coordinator, feed: tx });
-            rx
-        });
-        let session = setup.session;
         let result = async {
             let next = match &setup.next {
                 Some((addr, ticket)) => Some(open_feed(&self.endpoint, addr.clone(), ticket.clone()).await?),
@@ -196,13 +208,15 @@ impl Host {
             };
             send_msg(&mut control, &MeshMsg::Ready).await?;
             let (input, feed_conn) = match feed {
-                Some(rx) => {
-                    let (c, r) = tokio::time::timeout(FEED_TIMEOUT, rx)
-                        .await
-                        .context("the previous stage never connected")?
-                        .context("the previous stage never connected")?;
-                    (r, Some(c))
-                }
+                // The previous stage may still be downloading: wait for as long as the
+                // coordinator keeps this stage.
+                Some(rx) => tokio::select! {
+                    fed = rx => {
+                        let (c, r) = fed.context("the previous stage never connected")?;
+                        (r, Some(c))
+                    }
+                    _ = conn.closed() => bail!("the device that set this stage up went away"),
+                },
                 None => (setup_recv, None),
             };
             // The last stage answers the coordinator on the stream it was set up on.
@@ -229,6 +243,18 @@ async fn refuse(conn: &Connection, mut send: SendStream, reason: String) -> Resu
 
 /// Connects to the next stage and presents the ticket.
 async fn open_feed(endpoint: &Endpoint, addr: iroh::EndpointAddr, ticket: Ticket) -> Result<(Connection, SendStream)> {
+    let started = std::time::Instant::now();
+    loop {
+        match try_feed(endpoint, addr.clone(), ticket.clone()).await {
+            Err(e) if format!("{e:#}").contains("no stage is waiting") && started.elapsed() < NEXT_STAGE_WAIT => {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+            other => return other,
+        }
+    }
+}
+
+async fn try_feed(endpoint: &Endpoint, addr: iroh::EndpointAddr, ticket: Ticket) -> Result<(Connection, SendStream)> {
     let conn = tokio::time::timeout(CONNECT_TIMEOUT, endpoint.connect(addr, MESH_ALPN))
         .await
         .context("the next stage did not answer")?
