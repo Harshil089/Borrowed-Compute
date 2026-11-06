@@ -169,6 +169,7 @@ div.setting { cursor: default; }
 .mesh-dev, .mesh-stage { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 14px; align-items: center; padding: 11px 16px; border-top: 1px solid var(--border); }
 .mesh-dev:first-child, .mesh-stage:first-child, .board-head + .mesh-dev, .board-head + .mesh-stage { border-top: none; }
 .mesh-stage { grid-template-columns: 28px minmax(0, 1fr) auto; }
+.mesh-hosted-row { grid-template-columns: minmax(0, 1fr) auto; }
 .mesh-step { font: 500 12px/1 var(--mono); color: var(--ink-3); }
 .mesh-layers { position: relative; height: 4px; border-radius: 2px; background: var(--fill); margin-top: 6px; overflow: hidden; }
 .mesh-layers span { position: absolute; top: 0; bottom: 0; background: var(--accent); border-radius: 2px; }

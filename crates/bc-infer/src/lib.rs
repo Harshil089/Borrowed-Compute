@@ -30,11 +30,16 @@ pub struct Local {
 
 impl Local {
     pub async fn load(source: &Source) -> Result<Self> {
+        Self::load_with(source, |_, _| {}).await
+    }
+
+    /// [`Local::load`], reporting bytes fetched and bytes in all as it goes.
+    pub async fn load_with(source: &Source, progress: impl Fn(u64, u64) + Send + Sync) -> Result<Self> {
         let header = source.header().await?;
         let cfg = Config::from_header(&header)?;
         let layers = 0..cfg.n_layer as u32;
         let wanted = model::needed(&header, &layers, true, true);
-        let tensors = source.tensors(&wanted, |_, _| {}).await?;
+        let tensors = source.tensors(&wanted, progress).await?;
         let part = Part::new(cfg, layers, true, true, &tensors)?;
         let kv = part.new_kv();
         Ok(Local { part, kv, tokenizer: Tokenizer::from_header(&header)? })

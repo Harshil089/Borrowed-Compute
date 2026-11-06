@@ -527,8 +527,10 @@ async fn mesh_run(cloud: &CloudClient, key_path: &std::path::Path, action: MeshA
     };
     let goal = if throughput { Goal::Throughput } else { Goal::Latency };
     let session = std::sync::Arc::new(
-        bc_cli::mesh::Session::start(endpoint.clone(), targets, &model, goal, draft.as_deref(), |s| eprintln!("bc: {s}")).await?,
+        // One line that updates in place, so download progress does not scroll.
+        bc_cli::mesh::Session::start(endpoint.clone(), targets, &model, goal, draft.as_deref(), |s| eprint!("\r\x1b[Kbc: {s}")).await?,
     );
+    eprintln!();
     for (i, p) in session.layout().await.iter().enumerate() {
         let stages: Vec<String> = p.iter().map(|(n, l)| format!("{n} {}..{}", l.start, l.end)).collect();
         eprintln!("bc: pipeline {}: {}", i + 1, stages.join(" → "));

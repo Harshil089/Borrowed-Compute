@@ -36,9 +36,12 @@ pub struct Output {
     _conns: Vec<Connection>,
 }
 
+/// Called while stages load: stage index, bytes fetched, bytes in all.
+pub type OnLoading<'a> = &'a (dyn Fn(usize, u64, u64) + Send + Sync);
+
 /// Sets every stage up, last first, so each one is waiting when the one before it
 /// connects.
-pub async fn open(endpoint: &Endpoint, model: &str, targets: &[Target]) -> Result<(Input, Output)> {
+pub async fn open(endpoint: &Endpoint, model: &str, targets: &[Target], on_loading: OnLoading<'_>) -> Result<(Input, Output)> {
     if targets.is_empty() {
         bail!("a pipeline needs at least one stage");
     }
@@ -64,10 +67,13 @@ pub async fn open(endpoint: &Endpoint, model: &str, targets: &[Target]) -> Resul
             next,
         };
         send_msg(&mut send, &MeshMsg::Setup(setup)).await?;
-        match recv_msg::<MeshMsg>(&mut recv).await? {
-            MeshMsg::Ready => {}
-            MeshMsg::Error { reason } => bail!("stage {i}: {reason}"),
-            other => bail!("stage {i}: unexpected reply {other:?}"),
+        loop {
+            match recv_msg::<MeshMsg>(&mut recv).await? {
+                MeshMsg::Ready => break,
+                MeshMsg::Loading { done, total } => on_loading(i, done, total),
+                MeshMsg::Error { reason } => bail!("stage {i}: {reason}"),
+                other => bail!("stage {i}: unexpected reply {other:?}"),
+            }
         }
         opened.push((conn, send, recv));
     }

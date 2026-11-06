@@ -267,3 +267,18 @@ pub async fn mesh_chat(app: AppHandle, mesh: State<'_, MeshState>, prompt: Strin
     let decode_s = (s.total_ms - s.first_token_ms).max(1.0) / 1000.0;
     Ok(ChatStats { prompt_tokens: s.prompt_tokens, generated: s.generated, passes: s.passes, first_token_ms: s.first_token_ms, tokens_per_s: s.generated.saturating_sub(1) as f64 / decode_s })
 }
+
+/// What this device runs for other devices' meshes, loading or running, for its Overview
+/// and Mesh pages.
+#[derive(Serialize)]
+pub struct HostedView {
+    stages: Vec<bc_mesh::engine::Hosted>,
+    /// Bytes of model weights in memory now, including ones kept a short while after a
+    /// stage ends.
+    held_bytes: u64,
+}
+
+#[tauri::command]
+pub fn mesh_hosted() -> HostedView {
+    HostedView { stages: bc_mesh::engine::hosted_now(), held_bytes: bc_mesh::engine::held_bytes() }
+}

@@ -13,6 +13,8 @@ const esc = (s) =>
 let status = null;
 let account = null;
 let pairings = [];
+// Model parts this device runs for other devices' meshes (`mesh_hosted`).
+let hosted = { stages: [], held_bytes: 0 };
 let jobs = [];
 let services = [];
 // Sharing with people on other accounts: the switch, open invites, guests and requests.
@@ -177,7 +179,7 @@ sizeCores(navigator.hardwareConcurrency || 8);
 $("cores-title").textContent = /Mac/.test(navigator.platform || navigator.userAgent) ? "Cores on this Mac" : "Cores on this PC";
 setInterval(async () => {
   if (document.visibilityState !== "visible" || !status?.signed_in) return;
-  const busy = status.lending && (jobs.some((j) => !j.rejected && !j.end) || services.length > 0);
+  const busy = status.lending && (jobs.some((j) => !j.rejected && !j.end) || services.length > 0 || hosted.stages.length > 0);
   if (!busy) {
     if (!coresIdle) { paintCores(new Array($("cores").children.length).fill(0)); coresIdle = true; }
     return;
@@ -236,6 +238,45 @@ function uptime(startedAt) {
   if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
   return `${Math.floor(s / 86400)}d`;
 }
+
+const size = (b) => (b >= 1 << 30 ? `${(b / (1 << 30)).toFixed(1)} GB` : `${Math.round(b / (1 << 20))} MB`);
+
+// The same rows on Overview and on the Mesh page: lending to a mesh is never invisible.
+function renderHosted() {
+  const rows = hosted.stages.map((h) => {
+    const where = h.gpu_layers > 0
+      ? `${esc(h.gpu)}${h.gpu_layers < h.layers.end - h.layers.start ? `, ${h.gpu_layers} of ${h.layers.end - h.layers.start} layers` : ""}`
+      : "the CPU";
+    const state = h.running
+      ? `<span class="pill ok">${h.idle_secs != null && h.idle_secs < 10 ? "Working" : "Ready"}</span>`
+      : `<span class="pill warn">Downloading ${h.total ? Math.floor((h.loaded / h.total) * 100) : 0}%</span>`;
+    const sub = h.running
+      ? `<span class="kv"><b>On</b> ${where}</span><span class="kv"><b>Memory</b> <span class="num">${size(h.total)}</span></span><span class="kv"><b>Batches</b> <span class="num">${h.batches}</span></span>`
+      : `<span class="kv"><b>Fetching</b> <span class="num">${size(h.loaded)}<i>of ${size(h.total)}</i></span></span>`;
+    return `
+      <div class="mesh-stage mesh-hosted-row">
+        <span class="dep-main">
+          <span class="dep-cmd">${esc(h.model)}, layers ${h.layers.start}–${h.layers.end - 1} of ${h.of}</span>
+          <span class="dep-sub"><span class="kv"><b>For</b> ${esc(clientName(h.coordinator))}</span>${sub}</span>
+          <span class="mesh-layers"><span style="left:${(h.layers.start / h.of) * 100}%;width:${((h.layers.end - h.layers.start) / h.of) * 100}%"></span></span>
+        </span>
+        ${state}
+      </div>`;
+  }).join("");
+  for (const id of ["lend-mesh", "mesh-hosted"]) {
+    $(`${id}-block`).classList.toggle("hidden", !rows);
+    setHtml(id, rows);
+  }
+}
+
+// Downloads and batches move fast; follow them closely while there are any.
+setInterval(async () => {
+  if (document.visibilityState !== "visible" || !hosted.stages.length && !status?.lending) return;
+  try {
+    hosted = await invoke("mesh_hosted");
+    renderHosted();
+  } catch { /* the next tick tries again */ }
+}, 1500);
 
 function clientName(id) {
   const p = pairings.find((p) => p.client_id === id);
@@ -330,6 +371,7 @@ function render() {
 
   renderGuests();
   renderArrivals();
+  renderHosted();
 
   $("lend-services-block").classList.toggle("hidden", !services.length);
   setHtml("lend-services", services.map((s) => `
@@ -413,6 +455,7 @@ async function refresh() {
       jobs = await invoke("recent_jobs");
       services = await invoke("list_services");
       guestsView = await invoke("guests").catch(() => guestsView);
+      hosted = await invoke("mesh_hosted").catch(() => hosted);
       showError(status.start_error ? `The agent could not start: ${status.start_error}` : "");
     }
   } catch (e) {

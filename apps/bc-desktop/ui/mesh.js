@@ -99,7 +99,7 @@ async function measure() {
     const r = await invoke("mesh_probe", { model: $("mesh-model").value, throughput: goal === "throughput" });
     renderDevices(r.devices);
     renderPlan(r.pipelines, r.unused);
-    if (!r.pipelines.length && r.devices.some((d) => d.engine)) message(`${$("mesh-model").value} does not fit in the free memory of your devices together.`, "warn");
+    if (!r.pipelines.length && r.devices.some((d) => d.engine)) message(`${$("mesh-model").value} does not fit in the free memory of your other devices together. This computer coordinates but holds no layers; pick a smaller model or free memory on them.`, "warn");
   } catch (e) {
     message(String(e));
   } finally {

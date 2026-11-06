@@ -17,7 +17,7 @@ use bc_infer::quant::QTensor;
 use bc_infer::{model, sample, Config, Kv, Part, Source};
 
 use crate::msg::{Activation, Meta, StageSetup, Tensor};
-use crate::stage::{Stage, StageFactory};
+use crate::stage::{Loading, Stage, StageFactory};
 
 /// How long unused weights stay in memory after the last stage using them ends.
 const GRACE: Duration = Duration::from_secs(120);
@@ -67,7 +67,59 @@ pub fn held_bytes() -> u64 {
 
 /// The factory the agent serves stages with.
 pub fn factory() -> StageFactory {
-    Arc::new(|setup: StageSetup| Box::pin(async move { load(setup).await.map(|s| Box::new(s) as Box<dyn Stage>) }))
+    Arc::new(|setup: StageSetup, loading: Loading| {
+        Box::pin(async move {
+            let key = (setup.session, setup.layers.start);
+            let stage = load(setup, loading).await;
+            if stage.is_err() {
+                hosted().lock().unwrap().remove(&key);
+            }
+            stage.map(|s| Box::new(s) as Box<dyn Stage>)
+        })
+    })
+}
+
+/// A part of a model this device runs for another, for the app to show: lending a device
+/// to a mesh should never be invisible on it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Hosted {
+    pub session: u64,
+    /// The model's file name.
+    pub model: String,
+    pub layers: std::ops::Range<u32>,
+    /// Layers of the model in all.
+    pub of: u32,
+    /// The device that set the stage up and sends it work.
+    pub coordinator: String,
+    /// Bytes of weights fetched, of `total`; equal once loaded.
+    pub loaded: u64,
+    pub total: u64,
+    pub running: bool,
+    /// Layers on this device's GPU, and its name.
+    pub gpu_layers: usize,
+    pub gpu: Option<String>,
+    /// Batches computed so far, and when the last one was.
+    pub batches: u64,
+    #[serde(skip)]
+    pub last: Option<Instant>,
+    /// Seconds since the last batch, for the app.
+    pub idle_secs: Option<u64>,
+}
+
+/// Keyed by session and first layer: one device may run two parts of one pipeline.
+fn hosted() -> &'static Mutex<HashMap<(u64, u32), Hosted>> {
+    static H: OnceLock<Mutex<HashMap<(u64, u32), Hosted>>> = OnceLock::new();
+    H.get_or_init(Mutex::default)
+}
+
+/// The stages this device runs now, loading or running, oldest first.
+pub fn hosted_now() -> Vec<Hosted> {
+    let mut list: Vec<Hosted> = hosted().lock().unwrap().values().cloned().collect();
+    for h in &mut list {
+        h.idle_secs = h.last.map(|t| t.elapsed().as_secs());
+    }
+    list.sort_by_key(|h| (h.session, h.layers.start));
+    list
 }
 
 async fn header(url: &str, source: &Source) -> Result<Arc<Header>> {
@@ -79,7 +131,7 @@ async fn header(url: &str, source: &Source) -> Result<Arc<Header>> {
     Ok(h)
 }
 
-async fn load(setup: StageSetup) -> Result<LlmStage> {
+async fn load(setup: StageSetup, loading: Loading) -> Result<LlmStage> {
     let url = setup.model.clone();
     let source = Source::parse_remote(&url)?;
     let h = header(&url, &source).await?;
@@ -87,6 +139,32 @@ async fn load(setup: StageSetup) -> Result<LlmStage> {
     let first = setup.index == 0;
     let last = setup.index + 1 == setup.count;
     let wanted = model::needed(&h, &setup.layers, first, last);
+    let total: u64 = wanted.iter().map(|t| t.range.end - t.range.start).sum();
+    let key = (setup.session, setup.layers.start);
+    hosted().lock().unwrap().insert(
+        key,
+        Hosted {
+            session: setup.session,
+            model: url.rsplit('/').next().unwrap_or(&url).trim_end_matches(".gguf").to_string(),
+            layers: setup.layers.clone(),
+            of: cfg.n_layer as u32,
+            coordinator: loading.coordinator.to_string(),
+            loaded: 0,
+            total,
+            running: false,
+            gpu_layers: 0,
+            gpu: None,
+            batches: 0,
+            last: None,
+            idle_secs: None,
+        },
+    );
+    let report = |done: u64| {
+        if let Some(h) = hosted().lock().unwrap().get_mut(&key) {
+            h.loaded = done;
+        }
+        (loading.progress)(done, total);
+    };
     let mut have = HashMap::new();
     let mut missing = Vec::new();
     {
@@ -112,7 +190,10 @@ async fn load(setup: StageSetup) -> Result<LlmStage> {
             free as f64 / 1e9
         );
     }
-    let fetched = source.tensors(&missing, |_, _| {}).await?;
+    // Weights already in memory count as loaded.
+    let cached = total - need;
+    report(cached);
+    let fetched = source.tensors(&missing, |done, _| report(cached + done)).await?;
     {
         let mut w = weights().lock().unwrap();
         for (name, t) in fetched {
@@ -120,25 +201,37 @@ async fn load(setup: StageSetup) -> Result<LlmStage> {
             have.insert(name, t);
         }
     }
-    let part = Part::new(cfg, setup.layers.clone(), first, last, &have)?;
-    Ok(LlmStage { part, url, streams: HashMap::new() })
+    let layers = setup.layers.clone();
+    let part = tokio::task::spawn_blocking(move || Part::new(cfg, layers, first, last, &have)).await??;
+    report(total);
+    if let Some(h) = hosted().lock().unwrap().get_mut(&key) {
+        h.running = true;
+        h.gpu_layers = part.gpu_layers().0;
+        h.gpu = bc_infer::gpu::get().filter(|_| h.gpu_layers > 0).map(|g| g.name.clone());
+    }
+    Ok(LlmStage { part, url, streams: HashMap::new(), hosted: Some(key) })
 }
 
 pub struct LlmStage {
     part: Part,
     url: String,
     streams: HashMap<u64, (Kv, Instant)>,
+    /// Its entry in [`hosted_now`], when another device set it up.
+    hosted: Option<(u64, u32)>,
 }
 
 impl LlmStage {
     /// A stage from weights already in memory (the coordinator's own, and tests).
     pub fn new(part: Part) -> Self {
-        LlmStage { part, url: String::new(), streams: HashMap::new() }
+        LlmStage { part, url: String::new(), streams: HashMap::new(), hosted: None }
     }
 }
 
 impl Drop for LlmStage {
     fn drop(&mut self) {
+        if let Some(k) = self.hosted {
+            hosted().lock().unwrap().remove(&k);
+        }
         // The weights' grace period starts now.
         if let Ok(mut w) = weights().try_lock() {
             for ((u, _), c) in w.tensors.iter_mut() {
@@ -152,6 +245,12 @@ impl Drop for LlmStage {
 
 impl Stage for LlmStage {
     fn forward(&mut self, meta: &Meta, input: Activation) -> Result<Activation> {
+        if let Some(k) = self.hosted {
+            if let Some(h) = hosted().lock().unwrap().get_mut(&k) {
+                h.batches += 1;
+                h.last = Some(Instant::now());
+            }
+        }
         let n_embd = self.part.cfg.n_embd;
         let (mut x, rows) = match input {
             Activation::Tokens(t) => (self.part.embed(&t)?, t.len()),
