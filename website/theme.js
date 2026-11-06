@@ -1,2 +1,7 @@
-// Runs before the stylesheet paints, so a saved daylight choice never flashes dark first.
-try { document.documentElement.dataset.theme = localStorage.getItem("bc-theme") === "light" ? "light" : "dark"; } catch (_) { document.documentElement.dataset.theme = "dark"; }
+// Runs before the stylesheet paints: a saved choice wins, otherwise the system's light or dark.
+(() => {
+  let t = null;
+  try { t = localStorage.getItem("bc-theme"); } catch (_) {}
+  if (t !== "light" && t !== "dark") t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  document.documentElement.dataset.theme = t;
+})();

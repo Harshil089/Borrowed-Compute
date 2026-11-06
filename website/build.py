@@ -15,22 +15,22 @@ for src in sorted((HERE / "src").glob("*.html")):
     url = SITE + ("/" if slug == "index" else f"/{slug}")
     header = part("header.html").replace(f'data-nav="{meta["nav"]}"', 'aria-current="page"')
     page = f"""<!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{meta["title"]}</title>
   <meta name="description" content="{meta["description"]}">
   <link rel="canonical" href="{url}">
-  <meta name="theme-color" content="#07080a">
+  <meta name="theme-color" content="#f4f4f2" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0d0e11" media="(prefers-color-scheme: dark)">
   <meta property="og:type" content="website">
   <meta property="og:title" content="{meta["title"]}">
   <meta property="og:description" content="{meta["description"]}">
   <meta property="og:url" content="{url}">
-  <meta property="og:image" content="{SITE}/og.png">
-  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:card" content="summary">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="preload" href="/fonts/archivo-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
   <script src="/theme.js"></script>
   <link rel="stylesheet" href="/styles.css">
   <script src="/site.js" defer></script>

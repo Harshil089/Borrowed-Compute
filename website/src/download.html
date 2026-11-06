@@ -4,62 +4,61 @@ description: Download Borrowed Compute for Apple Silicon Macs and for Windows. O
 nav: download
 -->
 <main id="main">
-  <section class="page-head">
+  <section class="page-head center">
     <div class="wrap">
-      <h1 class="display reveal">Download</h1>
-      <p class="lede reveal d1">One app, on every computer you own. Borrowed Compute runs your code on your other computers and lends this one to them: Mac or PC, either way. Both links always give the newest release, and the app keeps itself up to date.</p>
+      <p class="eyebrow reveal">Download</p>
+      <h1 class="display reveal d1">One app, on every<br>computer you own.</h1>
+      <p class="lede reveal d2">It runs your code on your other computers and lends this one to them, Mac or PC, either way. Both links always give the newest release, and the app keeps itself up to date.</p>
     </div>
   </section>
 
   <section class="section tight">
     <div class="wrap dl">
-      <div class="pkg dl-card reveal">
+      <article class="dl-card reveal" data-os="mac">
         <div class="dl-top">
-          <div><span class="marking">For your Mac</span><h2 class="h2">Borrowed Compute</h2></div>
-          <div class="dl-ver"><span class="marking">Version</span><span class="fig" data-version="agent">latest</span><span class="marking" data-released></span></div>
+          <span class="os big"><svg class="icon" aria-hidden="true"><use href="#i-apple"/></svg></span>
+          <div><h2>For your Mac</h2><p>Apple Silicon · BorrowedComputeAgent.dmg</p></div>
+          <div class="ver"><span data-version="agent">latest</span><small data-released></small></div>
         </div>
-        <div class="dl-body">
-          <dl class="req"><dt class="marking">Needs</dt><dd>A Mac with Apple Silicon</dd><dt class="marking">File</dt><dd>BorrowedComputeAgent.dmg</dd></dl>
-          <ol>
-            <li>Open the disk image and drag the app to Applications.</li>
-            <li>The first time, macOS blocks it because it is not notarized yet: open System Settings, Privacy &amp; Security, and click <strong>Open Anyway</strong>.</li>
-            <li>Sign in. On your first computer, choose <strong>Keep the account on this computer</strong>; on the others, pick it from your network. A Mac lends itself from the start.</li>
-          </ol>
-        </div>
+        <ol class="numbered">
+          <li><span>Open the disk image and drag the app to Applications.</span></li>
+          <li><span>The first time, macOS blocks it because it is not notarized yet: open System Settings, Privacy &amp; Security, and click <strong>Open Anyway</strong>.</span></li>
+          <li><span>Sign in. On your first computer, choose <strong>Keep the account on this computer</strong>; on the others, pick it from your network. A Mac lends itself from the start.</span></li>
+        </ol>
         <div class="dl-foot">
-          <a class="btn gold big" href="/download/mac"><svg class="icon" aria-hidden="true"><use href="#i-apple"/></svg>Download for Mac</a>
-          <a class="inline-link" href="/how-it-works#troubleshooting">macOS won't open it?</a>
+          <a class="btn primary big" href="/download/mac"><svg class="icon" aria-hidden="true"><use href="#i-apple"/></svg>Download for Mac</a>
+          <a class="arrow-link" href="/how-it-works#troubleshooting">macOS won't open it?</a>
         </div>
-      </div>
+      </article>
 
-      <div class="pkg dl-card reveal d1">
+      <article class="dl-card reveal d1" data-os="windows">
         <div class="dl-top">
-          <div><span class="marking">For your PC</span><h2 class="h2">Borrowed Compute</h2></div>
-          <div class="dl-ver"><span class="marking">Version</span><span class="fig" data-version="client">latest</span><span class="marking" data-released></span></div>
+          <span class="os big"><svg class="icon" aria-hidden="true"><use href="#i-windows"/></svg></span>
+          <div><h2>For your PC</h2><p>Windows 10 or 11, 64-bit · BorrowedCompute-setup.exe</p></div>
+          <div class="ver"><span data-version="client">latest</span><small data-released></small></div>
         </div>
-        <div class="dl-body">
-          <dl class="req"><dt class="marking">Needs</dt><dd>Windows 10 or 11, 64-bit</dd><dt class="marking">File</dt><dd>BorrowedCompute-setup.exe</dd></dl>
-          <ol>
-            <li>Run the installer. If SmartScreen warns, choose More info, then Run anyway.</li>
-            <li>Sign in. Pick the computer your account lives on from your network, paste its code, or keep the account on this PC.</li>
-            <li>To run code elsewhere, click Pair next to a computer and type the code on it. To lend this PC, turn on <strong>Lend this device</strong> under Overview.</li>
-          </ol>
-        </div>
+        <ol class="numbered">
+          <li><span>Run the installer. If SmartScreen warns, choose More info, then Run anyway.</span></li>
+          <li><span>Sign in. Pick the computer your account lives on from your network, paste its code, or keep the account on this PC.</span></li>
+          <li><span>To run code elsewhere, click Pair next to a computer and type the code on it. To lend this PC, turn on <strong>Lend this device</strong> under Overview.</span></li>
+        </ol>
         <div class="dl-foot">
-          <a class="btn gold big" href="/download/windows"><svg class="icon" aria-hidden="true"><use href="#i-windows"/></svg>Download for Windows</a>
-          <span class="dl-file">Includes the bc command line</span>
+          <a class="btn primary big" href="/download/windows"><svg class="icon" aria-hidden="true"><use href="#i-windows"/></svg>Download for Windows</a>
+          <span class="muted">Includes the <code>bc</code> command line</span>
         </div>
-      </div>
+      </article>
     </div>
   </section>
 
   <section class="section tight">
     <div class="wrap">
-      <div class="section-head split">
-        <h2 class="h2 reveal">Already installed?</h2>
-        <p class="lede reveal d1">Nothing to do. Borrowed Compute Agent on a Mac and Borrowed Compute on a PC update themselves into this one app, keeping your sign-in and paired devices. It installs a newer release when it starts, and Check for updates does it on demand. Every update is verified against the project's signing key first.</p>
+      <div class="callout reveal">
+        <div>
+          <h2 class="h3">Already installed?</h2>
+          <p>Nothing to do. The app installs a newer release when it starts, keeping your sign-in and paired devices, and Check for updates does it on demand. Every update is verified against the project's signing key first.</p>
+        </div>
+        <a class="arrow-link" href="/changelog">What's new in each release <svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a>
       </div>
-      <a class="arrow-link reveal" href="/changelog">What's new in each release <svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a>
     </div>
   </section>
 </main>
