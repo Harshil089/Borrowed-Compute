@@ -100,15 +100,18 @@ pub async fn request_access(
     device_name: &str,
     on_code: impl FnOnce(&str),
 ) -> Result<String> {
+    // Not reaching it at all almost always means the other computer is off, asleep, or
+    // has Borrowed Compute closed; say so instead of iroh's "timed out: timed out".
+    const UNREACHABLE: &str = "could not reach the shared computer: check that it is on, awake and online, with Borrowed Compute open, then try again";
     let conn = tokio::time::timeout(CONNECT_TIMEOUT, endpoint.connect(mac, GUEST_ALPN))
         .await
-        .map_err(|_| anyhow::anyhow!("the Mac did not answer within {}s; is it on and is its app open?", CONNECT_TIMEOUT.as_secs()))?
-        .context("connecting to the Mac")?;
+        .map_err(|_| anyhow::anyhow!(UNREACHABLE))?
+        .map_err(|e| anyhow::anyhow!("{UNREACHABLE} ({e:#})"))?;
     let (mut send, mut recv) = conn.open_bi().await?;
     send_msg(&mut send, &GuestMsg::Request { token: token.to_string(), device_name: device_name.to_string() }).await?;
     let mut on_code = Some(on_code);
     let mac_name = loop {
-        match recv_msg::<GuestReply>(&mut recv).await.context("the Mac closed the request")? {
+        match recv_msg::<GuestReply>(&mut recv).await.context("the shared computer closed the request: on it, Share this device and Lend this device must both be on")? {
             GuestReply::Pending { code } => {
                 if let Some(f) = on_code.take() {
                     f(&code);
