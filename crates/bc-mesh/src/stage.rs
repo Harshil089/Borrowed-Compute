@@ -37,7 +37,18 @@ pub trait Stage: Send {
 
 /// Builds the stage a setup asks for (loading weights can take a while), or says why
 /// this device cannot.
-pub type StageFactory = Arc<dyn Fn(StageSetup) -> BoxFuture<Result<Box<dyn Stage>>> + Send + Sync>;
+pub type StageFactory = Arc<dyn Fn(StageSetup, Loading) -> BoxFuture<Result<Box<dyn Stage>>> + Send + Sync>;
+
+/// What a factory gets besides the setup: who asked, and where to report its download
+/// (bytes so far, bytes in all), which the coordinator shows while it waits.
+#[derive(Clone)]
+pub struct Loading {
+    pub coordinator: EndpointId,
+    pub progress: Arc<dyn Fn(u64, u64) + Send + Sync>,
+}
+
+/// Progress frames at most this often, plus the last one.
+const PROGRESS_EVERY: Duration = Duration::from_millis(400);
 pub type BoxFuture<T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send>>;
 /// Whether a device may probe this one or set a stage up on it: the agent's paired list.
 pub type Trust = Arc<dyn Fn(&EndpointId) -> bool + Send + Sync>;
@@ -133,7 +144,27 @@ impl Host {
     async fn run_stage(&self, conn: Connection, mut control: SendStream, setup_recv: RecvStream, coordinator: EndpointId, setup: StageSetup) -> Result<()> {
         let built = match &self.factory {
             None => Err(anyhow::anyhow!("this device has no inference engine")),
-            Some(factory) => factory(setup.clone()).await,
+            Some(factory) => {
+                let (tx, mut rx) = tokio::sync::watch::channel((0u64, 0u64));
+                let loading = Loading { coordinator, progress: Arc::new(move |done, total| {
+                    let _ = tx.send((done, total));
+                }) };
+                let build = factory(setup.clone(), loading);
+                tokio::pin!(build);
+                let mut sent = std::time::Instant::now() - PROGRESS_EVERY;
+                loop {
+                    tokio::select! {
+                        built = &mut build => break built,
+                        Ok(()) = rx.changed() => {
+                            let (done, total) = *rx.borrow_and_update();
+                            if sent.elapsed() >= PROGRESS_EVERY || done == total {
+                                sent = std::time::Instant::now();
+                                send_msg(&mut control, &MeshMsg::Loading { done, total }).await?;
+                            }
+                        }
+                    }
+                }
+            }
         };
         let stage = match built {
             Ok(s) => s,

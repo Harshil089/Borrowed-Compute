@@ -33,6 +33,9 @@ pub enum MeshMsg {
     Setup(StageSetup),
     /// From the previous stage, on its own connection.
     Feed { ticket: Ticket },
+    /// A stage's weights so far while it loads, bytes fetched of all it needs: sent to
+    /// the coordinator before `Ready`, so a long download shows as progress, not a hang.
+    Loading { done: u64, total: u64 },
     Ready,
     Batch(Batch),
     /// No more batches; passes down the pipeline once everything before it is done.

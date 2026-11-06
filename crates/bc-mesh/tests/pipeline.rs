@@ -58,7 +58,7 @@ impl Stage for ToyStage {
 }
 
 fn factory(delay: Duration) -> StageFactory {
-    Arc::new(move |s: StageSetup| Box::pin(async move { Ok(Box::new(ToyStage { layers: s.layers.clone(), delay }) as Box<dyn Stage>) }))
+    Arc::new(move |s: StageSetup, _| Box::pin(async move { Ok(Box::new(ToyStage { layers: s.layers.clone(), delay }) as Box<dyn Stage>) }))
 }
 
 struct Mesh {
@@ -106,7 +106,7 @@ fn targets(m: &Mesh, splits: &[std::ops::Range<u32>]) -> Vec<Target> {
 }
 
 async fn run(m: &Mesh, splits: &[std::ops::Range<u32>], batches: u64) -> Vec<(u64, Tensor)> {
-    let (mut tx, mut rx) = pipeline::open(&m.coordinator, "toy", &targets(m, splits)).await.unwrap();
+    let (mut tx, mut rx) = pipeline::open(&m.coordinator, "toy", &targets(m, splits), &|_, _, _| {}).await.unwrap();
     let sender = tokio::spawn(async move {
         for seq in 0..batches {
             tx.send(seq, Meta::default(), &Activation::Hidden(input(seq))).await.unwrap();
@@ -179,7 +179,7 @@ async fn futures_join(m: &Mesh) -> Vec<Result<bc_mesh::probe::LinkReport>> {
 async fn devices_without_an_engine_refuse_stages() {
     let m = mesh(1, Duration::ZERO, false).await;
     let whole = vec![0..LAYERS; 1];
-    let err = match pipeline::open(&m.coordinator, "toy", &targets(&m, &whole)).await {
+    let err = match pipeline::open(&m.coordinator, "toy", &targets(&m, &whole), &|_, _, _| {}).await {
         Ok(_) => panic!("a device without an engine accepted a stage"),
         Err(e) => e,
     };

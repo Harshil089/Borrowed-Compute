@@ -163,19 +163,30 @@ fn stage_devices(devices: &[MeshDevice]) -> Vec<&MeshDevice> {
     devices.iter().filter(|d| d.report.as_ref().is_ok_and(|r| r.device.engine)).collect()
 }
 
-async fn open_all(endpoint: &Endpoint, url: &str, plan: &Plan, usable: &[&MeshDevice]) -> Result<Vec<Arc<Client>>> {
+/// Opens every pipeline of `plan`; `on_loading` hears each device's download as it goes
+/// (device name, bytes fetched, bytes in all).
+async fn open_all(endpoint: &Endpoint, url: &str, plan: &Plan, usable: &[&MeshDevice], on_loading: &(dyn Fn(&str, u64, u64) + Send + Sync)) -> Result<Vec<Arc<Client>>> {
     let addrs: Vec<EndpointAddr> = usable.iter().map(|d| d.addr.clone()).collect();
     let mut clients = Vec::new();
     for p in &plan.pipelines {
-        clients.push(Client::open(endpoint, url, p.clone(), &addrs).await?);
+        let stage_loading = |i: usize, done: u64, total: u64| on_loading(&usable[p.stages[i].device].name, done, total);
+        clients.push(Client::open(endpoint, url, p.clone(), &addrs, &stage_loading).await?);
     }
     Ok(clients)
+}
+
+fn gb(bytes: u64) -> String {
+    if bytes < 1 << 30 {
+        format!("{} MB", bytes >> 20)
+    } else {
+        format!("{:.1} GB", bytes as f64 / (1u64 << 30) as f64)
+    }
 }
 
 impl Session {
     /// Probes the paired devices, plans the model over those that can run stages, and
     /// starts the pipelines. `draft` is a model on this computer for speculative decoding.
-    pub async fn start(endpoint: Endpoint, targets: Vec<(String, EndpointAddr)>, model: &str, goal: Goal, draft: Option<&str>, status: impl Fn(&str)) -> Result<Self> {
+    pub async fn start(endpoint: Endpoint, targets: Vec<(String, EndpointAddr)>, model: &str, goal: Goal, draft: Option<&str>, status: impl Fn(&str) + Send + Sync) -> Result<Self> {
         let (name, url, suggested) = resolve_model(model)?;
         status(&format!("Reading {name}…"));
         let header = Source::parse_remote(&url)?.header().await?;
@@ -184,12 +195,12 @@ impl Session {
         let devices = probe_all(&endpoint, targets).await;
         let draft = match draft.or(suggested.as_deref()) {
             Some(d) if d != "none" => {
-                status(&format!("Loading the draft model {d} on this computer…"));
+                status(&format!("Downloading the draft model {d} to this computer's memory…"));
                 let src = match resolve_model(d) {
                     Ok((_, u, _)) => Source::parse_remote(&u)?,
                     Err(_) => Source::parse_local(d)?,
                 };
-                Some(Local::load(&src).await?)
+                Some(Local::load_with(&src, |done, total| status(&format!("Downloading the draft model {d} to this computer's memory: {} of {}", gb(done), gb(total)))).await?)
             }
             _ => None,
         };
@@ -199,11 +210,20 @@ impl Session {
         let pairs = probe_pairs(&endpoint, &owned).await;
         let plan = plan_with(&spec, &owned, &pairs, goal, tokens_per_pass).0;
         if plan.pipelines.is_empty() {
-            bail!("{name} does not fit in the free memory of the reachable devices together");
+            let need = spec.layer_bytes * spec.layers as u64 + spec.extra_bytes;
+            let free: u64 = owned.iter().filter_map(|d| d.report.as_ref().ok()).map(|r| (r.device.mem_available as f64 * MEMORY_SHARE) as u64).sum();
+            bail!(
+                "{name} needs {} of memory and the devices it can use have {} free together (this computer coordinates and runs the draft model, but holds no layers). Close apps on them, add a device, or pick a smaller model.",
+                gb(need),
+                gb(free)
+            );
         }
         let usable = stage_devices(&devices);
-        status(&format!("Starting {} pipeline(s); each device fetches its own layers…", plan.pipelines.len()));
-        let clients = open_all(&endpoint, &url, &plan, &usable).await?;
+        status("Each device is downloading its own layers…");
+        let clients = open_all(&endpoint, &url, &plan, &usable, &|device, done, total| {
+            status(&format!("{device} is downloading its layers: {} of {}", gb(done), gb(total)));
+        })
+        .await?;
         let llm = Arc::new(Llm::new(&header, clients, draft)?);
         Ok(Session { llm, name, url, spec, goal, endpoint, state: tokio::sync::Mutex::new(SessionState { devices, pairs, plan }) })
     }
@@ -248,7 +268,7 @@ impl Session {
         let moved = next.pipelines.iter().map(|p| &p.stages).ne(s.plan.pipelines.iter().map(|p| &p.stages));
         if moved {
             let refs: Vec<&MeshDevice> = usable.iter().collect();
-            let clients = open_all(&self.endpoint, &self.url, &next, &refs).await?;
+            let clients = open_all(&self.endpoint, &self.url, &next, &refs, &|_, _, _| {}).await?;
             self.llm.set_replicas(clients);
         }
         s.plan = next;
@@ -266,7 +286,7 @@ impl Session {
         if plan.pipelines.is_empty() {
             bail!("the devices still reachable cannot hold {}", self.name);
         }
-        let clients = open_all(&self.endpoint, &self.url, &plan, &usable).await?;
+        let clients = open_all(&self.endpoint, &self.url, &plan, &usable, &|_, _, _| {}).await?;
         self.llm.set_replicas(clients);
         *self.state.lock().await = SessionState { devices, pairs, plan };
         Ok(())

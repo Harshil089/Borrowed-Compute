@@ -1137,6 +1137,7 @@ fn main() {
             mesh::mesh_start,
             mesh::mesh_stop,
             mesh::mesh_chat,
+            mesh::mesh_hosted,
             lend::keep_account_here,
             lend::set_lending,
             lend::list_pairings,

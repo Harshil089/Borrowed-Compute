@@ -98,9 +98,9 @@ impl Speed {
 }
 
 impl Client {
-    pub async fn open(endpoint: &Endpoint, model_url: &str, plan: PipelinePlan, addrs: &[EndpointAddr]) -> Result<Arc<Self>> {
+    pub async fn open(endpoint: &Endpoint, model_url: &str, plan: PipelinePlan, addrs: &[EndpointAddr], on_loading: pipeline::OnLoading<'_>) -> Result<Arc<Self>> {
         let targets: Vec<Target> = plan.stages.iter().map(|s| Target { addr: addrs[s.device].clone(), layers: s.layers.clone() }).collect();
-        let (input, mut output) = pipeline::open(endpoint, model_url, &targets).await?;
+        let (input, mut output) = pipeline::open(endpoint, model_url, &targets, on_loading).await?;
         let pending: Arc<StdMutex<VecDeque<Reply>>> = Arc::default();
         let alive = Arc::new(AtomicBool::new(true));
         let stage_ms = Arc::new(StdMutex::new(vec![0.0; plan.stages.len()]));

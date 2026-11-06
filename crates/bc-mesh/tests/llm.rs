@@ -78,9 +78,9 @@ async fn mesh_slow(n: usize, delay: Duration) -> Mesh {
         let ep = bind(SecretKey::generate(), config.clone()).await.unwrap();
         tokio::time::timeout(Duration::from_secs(10), ep.online()).await.unwrap();
         let engine = bc_mesh::engine::factory();
-        let factory: bc_mesh::stage::StageFactory = Arc::new(move |setup| {
+        let factory: bc_mesh::stage::StageFactory = Arc::new(move |setup, loading| {
             let engine = engine.clone();
-            Box::pin(async move { Ok(Box::new(Slow(engine(setup).await?, delay)) as Box<dyn bc_mesh::stage::Stage>) })
+            Box::pin(async move { Ok(Box::new(Slow(engine(setup, loading).await?, delay)) as Box<dyn bc_mesh::stage::Stage>) })
         });
         let host = Host::new(ep.clone(), Arc::new(move |id: &EndpointId| *id == cid), Some(factory));
         let accept = ep.clone();
@@ -147,7 +147,15 @@ async fn three_devices_write_what_one_computer_writes() {
     let addrs: Vec<_> = m.devices.iter().map(|d| d.addr()).collect();
     let header = Source::parse_remote(&url).unwrap().header().await.unwrap();
     let before = served.load(std::sync::atomic::Ordering::Relaxed);
-    let client = Client::open(&m.coordinator, &url, plan(&[(0, 0..2), (1, 2..5), (2, 5..6)]), &addrs).await.unwrap();
+    // Each stage reports its download; the last report says it has everything.
+    let progress = std::sync::Mutex::new(std::collections::HashMap::new());
+    let on_loading = |stage: usize, done: u64, total: u64| {
+        progress.lock().unwrap().insert(stage, (done, total));
+    };
+    let client = Client::open(&m.coordinator, &url, plan(&[(0, 0..2), (1, 2..5), (2, 5..6)]), &addrs, &on_loading).await.unwrap();
+    let progress = progress.into_inner().unwrap();
+    assert_eq!(progress.len(), 3, "{progress:?}");
+    assert!(progress.values().all(|(done, total)| done == total && *total > 0), "{progress:?}");
     // Each device fetched only its own tensors (plus the header): the three together
     // read about one file's worth, not three.
     let fetched = served.load(std::sync::atomic::Ordering::Relaxed) - before;
@@ -161,6 +169,9 @@ async fn three_devices_write_what_one_computer_writes() {
     assert_eq!(got, want, "split over three devices, greedy, f32 on the wire");
     assert_eq!(stats.passes + 1, stats.generated.max(1).max(stats.passes + 1).min(stats.generated + 1));
     assert_eq!(text, llm.tokenizer.decode(&got));
+    // Each lender lists the part it runs, so its app can show it.
+    let mine: Vec<_> = bc_mesh::engine::hosted_now().into_iter().filter(|h| h.coordinator == m.coordinator.id().to_string() && h.of == 6).collect();
+    assert!(mine.len() >= 3 && mine.iter().all(|h| h.running && h.batches > 0 && h.loaded == h.total), "{mine:?}");
 
     // A second conversation and a long prompt in chunks, at the same time.
     let long: Vec<u32> = (0..300).map(|i| 3 + (i * 7 % 90) as u32).collect();
@@ -184,7 +195,7 @@ async fn speculative_decoding_writes_the_same_text_in_fewer_passes() {
     let dir = tempfile_dir();
     std::fs::write(dir.join("d.gguf"), &file).unwrap();
     let same = Local::load(&Source::File(dir.join("d.gguf"))).await.unwrap();
-    let client = Client::open(&m.coordinator, &url, plan(&[(0, 0..2), (1, 2..4)]), &addrs).await.unwrap();
+    let client = Client::open(&m.coordinator, &url, plan(&[(0, 0..2), (1, 2..4)]), &addrs, &|_, _, _| {}).await.unwrap();
     let llm = Llm::new(&header, vec![client], Some(same)).unwrap();
     let (got, stats) = llm.generate(&prompt, 24, Sampling::default(), |_| {}).await.unwrap();
     assert_eq!(got, want);
@@ -196,7 +207,7 @@ async fn speculative_decoding_writes_the_same_text_in_fewer_passes() {
     std::fs::write(dir.join("d2.gguf"), bc_infer::fixtures::tiny_model(2, false)).unwrap();
     let other = Local::load(&Source::File(dir.join("d2.gguf"))).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
-    let client = Client::open(&m.coordinator, &url, plan(&[(1, 0..1), (0, 1..4)]), &addrs).await.unwrap();
+    let client = Client::open(&m.coordinator, &url, plan(&[(1, 0..1), (0, 1..4)]), &addrs, &|_, _, _| {}).await.unwrap();
     let llm = Llm::new(&header, vec![client], Some(other)).unwrap();
     let (got, _) = llm.generate(&prompt, 24, Sampling::default(), |_| {}).await.unwrap();
     assert_eq!(got, want);
@@ -216,7 +227,7 @@ async fn one_conversation_keeps_every_stage_busy() {
     std::fs::write(dir.join("d.gguf"), &file).unwrap();
     let same = Local::load(&Source::File(dir.join("d.gguf"))).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
-    let client = Client::open(&m.coordinator, &url, plan(&[(0, 0..1), (1, 1..2), (2, 2..3)]), &addrs).await.unwrap();
+    let client = Client::open(&m.coordinator, &url, plan(&[(0, 0..1), (1, 1..2), (2, 2..3)]), &addrs, &|_, _, _| {}).await.unwrap();
     let llm = Llm::new(&header, vec![client], Some(same)).unwrap();
     let prompt: Vec<u32> = vec![1, 60, 61, 62];
     let want = local_text(&file, &prompt, 40).await;
@@ -245,7 +256,7 @@ async fn real_model_over_three_devices() {
     let n = bc_infer::Config::from_header(&header).unwrap().n_layer as u32;
     let (a, b) = (n / 3, 2 * n / 3);
     let t = std::time::Instant::now();
-    let client = Client::open(&m.coordinator, &url, plan(&[(0, 0..a), (1, a..b), (2, b..n)]), &addrs).await.unwrap();
+    let client = Client::open(&m.coordinator, &url, plan(&[(0, 0..a), (1, a..b), (2, b..n)]), &addrs, &|_, _, _| {}).await.unwrap();
     println!("three stages loaded their layers in {:.1}s", t.elapsed().as_secs_f64());
     let draft = match std::env::var("BC_TEST_DRAFT") {
         Ok(d) => Some(Local::load(&Source::File(d.into())).await.unwrap()),
