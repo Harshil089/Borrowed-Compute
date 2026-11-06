@@ -1,191 +1,225 @@
-# Borrowed Compute
+<p align="center">
+  <img src="design/icon-client.svg" width="96" alt="">
+</p>
 
-**Run your code on your Mac's Apple Silicon from your Windows PC.**
+<h1 align="center">Borrowed Compute</h1>
 
-Pick a project folder on the PC, type a command, and it runs on your Mac: builds, tests,
-scripts, dev servers. Output streams back live, and dev servers open in the PC's browser at
-`localhost`. Nothing to install on the PC beyond the app, no VPN, no server to rent, and
-nothing from your project stays on the Mac once the job ends.
+<p align="center">
+  <b>Use your other computers as if they were this one.</b><br>
+  Run code on any of your Macs and PCs, and run AI models across all of them at once.<br>
+  No cloud, no VPN, no server to rent.
+</p>
+
+<p align="center">
+  <a href="https://github.com/Harshil089/Borrowed-Compute-releases/releases/latest"><img src="https://img.shields.io/github/v/release/Harshil089/Borrowed-Compute-releases?label=release&color=111111" alt="Latest release"></a>
+  <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-111111" alt="macOS">
+  <img src="https://img.shields.io/badge/Windows-10%20%7C%2011-111111" alt="Windows">
+  <img src="https://img.shields.io/badge/Rust-1.91-111111" alt="Rust 1.91">
+</p>
+
+<p align="center">
+  <a href="https://github.com/Harshil089/Borrowed-Compute-releases/releases/latest/download/BorrowedComputeAgent.dmg"><b>Download for Mac</b></a>
+  &nbsp;·&nbsp;
+  <a href="https://github.com/Harshil089/Borrowed-Compute-releases/releases/latest/download/BorrowedCompute-setup.exe"><b>Download for Windows</b></a>
+  &nbsp;·&nbsp;
+  <a href="https://borrowed-compute.vercel.app">Website</a>
+</p>
+
+---
 
 ```
-  Windows PC                                       Mac
-  ┌────────────────────┐   encrypted, direct    ┌─────────────────────────┐
-  │ Borrowed Compute   │ ─────────────────────▶ │ Borrowed Compute Agent  │
-  │  project folder    │   (relay as fallback)  │  sandboxed job          │
-  │  live output       │ ◀───────────────────── │  your toolchains        │
-  │  localhost:5173    │                        │  built-in cloud         │
-  └────────────────────┘                        └─────────────────────────┘
+   This computer                                         Your other computer
+  ┌──────────────────────┐   encrypted, direct      ┌──────────────────────────┐
+  │  project folder      │ ───────────────────────▶ │  sandboxed job           │
+  │  live output         │   (relay as fallback)    │  its own toolchains      │
+  │  localhost:5173      │ ◀─────────────────────── │  its CPU, GPU and RAM    │
+  └──────────────────────┘                          └──────────────────────────┘
 ```
 
-## What it does
+Pick a project folder, type a command, and it runs on another of your computers: builds,
+tests, scripts, dev servers. Output streams back live, and dev servers open in this
+computer's browser at `localhost`. It works in any direction (Windows to Mac, Mac to
+Windows, Mac to Mac, PC to PC), on any network, and nothing from your project stays on the
+other computer once the job ends.
 
-- **Runs any command on the Mac.** `cargo test`, `npm run build`, `python train.py`, a
-  shell script. The project is packed, sent, run in a fresh workspace, and deleted after.
-- **Streams output live**, with timings (connect, upload, first output, total, direct or
-  relay) and what the Mac used (CPU time, cores, peak memory).
-- **Knows your project.** It recognizes Node, Python, Rust, Go, plain HTML and more, and
-  suggests the right commands. A `bc.toml` in the folder always wins.
-- **Fixes the usual first-run failures.** `node_modules`, `.venv` and build output are not
-  uploaded, so it installs dependencies and builds first when a command needs them, and
-  after a failure (a missing module, command or build file) it fixes the cause and runs
-  once more.
-- **Keeps servers running.** Tick *Keep running* (it ticks itself for `dev`, `start` and
-  `serve` scripts) and the server stays up on the Mac, which stays awake, even after the PC
-  disconnects, until you press Stop.
-- **Forwards their ports.** A server on the Mac's port 5173 opens at
-  `http://localhost:5173` on the PC. Ports reconnect quietly over flaky networks.
-- **Fixes files from Windows.** Scripts get their executable bit and LF line endings back
-  while packing; binaries and other text files are sent unchanged.
-- **Keeps a log on both sides.** Each run's output is saved on the PC, and the Mac keeps
-  the command, result, usage and the last 1 MB of output per job.
-- **Updates itself.** Each app moves to the latest release when it starts, whichever
-  installer put it there, and Check for updates does the same on demand. Releases are
-  signed and verified, and dropped downloads are retried.
+## Contents
+
+- [Features](#features)
+- [Get started](#get-started)
+- [Run AI models across your devices](#run-ai-models-across-your-devices)
+- [Share a computer with someone](#share-a-computer-with-someone)
+- [Security](#security)
+- [Command line](#command-line)
+- [Develop](#develop)
+
+## Features
+
+| | |
+|---|---|
+| **Run any command** | `cargo test`, `npm run build`, `python train.py`, a shell script. The project is packed, sent, run in a fresh workspace and deleted after. Projects up to 20 GB. |
+| **Live output and timings** | Connect, upload, first output and total time, direct or relay, plus what the job used: CPU time, cores, peak memory. |
+| **Knows your project** | Recognizes Node, Python, Rust, Go, plain HTML and more, and suggests the right commands for the other computer's system. A `bc.toml` in the folder always wins. |
+| **Fixes first-run failures** | `node_modules`, `.venv` and build output are not uploaded, so it installs and builds first when a command needs it. After a failure (a missing module, command or build file) it fixes the cause and runs once more. |
+| **Servers that keep running** | Tick *Keep running* (it ticks itself for `dev`, `start` and `serve` scripts) and the server stays up, with the computer kept awake, until you press Stop. |
+| **Port forwarding** | A server on the other computer's port 5173 opens at `http://localhost:5173` here, and reconnects quietly over flaky networks. |
+| **AI models across devices** | One language model split over several of your computers, served at an OpenAI-compatible address. GPUs used automatically. [More below.](#run-ai-models-across-your-devices) |
+| **One app, both roles** | The same app uses other computers and lends this one. Lending is one switch. |
+| **Updates itself** | Moves to the latest signed release when it starts; dropped downloads are retried. |
 
 ## Get started
 
-1. **On the Mac**, download
-   [`BorrowedComputeAgent.dmg`](https://github.com/Harshil089/Borrowed-Compute-releases/releases/latest/download/BorrowedComputeAgent.dmg),
-   drag the app to Applications and open it. It is not notarized yet, so the first time
-   macOS blocks it: open System Settings › Privacy & Security and click **Open Anyway**.
-2. **Sign in** on the Mac with GitHub (or Google). The Mac now hosts your account.
-3. Under **Route**, copy this Mac's **code**.
-4. **On the PC**, install
-   [`BorrowedCompute-setup.exe`](https://github.com/Harshil089/Borrowed-Compute-releases/releases/latest/download/BorrowedCompute-setup.exe). Windows
-   SmartScreen may warn; choose More info › Run anyway.
-5. Paste the code under **Your Mac's code**, click **Test**, then sign in with the **same
-   account** as on the Mac.
-6. Click **Pair** next to your Mac. The PC shows a code; approve the request on the Mac
-   when the codes match.
-7. Choose a project folder, pick or type a command, and press **Run**.
+1. **Install the app** on each computer:
+   [Mac](https://github.com/Harshil089/Borrowed-Compute-releases/releases/latest/download/BorrowedComputeAgent.dmg) ·
+   [Windows](https://github.com/Harshil089/Borrowed-Compute-releases/releases/latest/download/BorrowedCompute-setup.exe).
+   > The Mac app is not notarized yet: the first time, open **System Settings › Privacy & Security** and click **Open Anyway**. On Windows, SmartScreen may warn; choose **More info › Run anyway**.
+2. **On your first computer**, sign in with GitHub or Google and choose **Keep the account on this computer**.
+3. **On each other computer**, the app asks *Where does your account live?* Pick your first computer from the network list, or paste its code (shown under **Paired devices**), and sign in with the same account.
+4. **Pair once.** Click **Pair** next to the computer you want to use. It shows a code; type that code into the request on the other computer.
+5. **Run.** Choose a project folder, pick or type a command, and press **Run**.
 
-### Share your Mac with someone
+Computers find each other by code alone. They connect directly when the network allows and
+through a relay when it does not (a VPN, a strict Wi-Fi), end-to-end encrypted either way.
 
-People on other accounts can use your Mac only if you invite them; nobody can find it
+## Run AI models across your devices
+
+The **Mesh** page (or `bc mesh`) runs one language model on several of your paired
+computers at once, with no cloud. Each computer holds only its share of the model.
+
+```
+   coordinator ──tokens──▶ ┌─────────┐ ──hidden state──▶ ┌─────────┐ ──▶ ┌─────────┐
+   (this computer)         │ layers  │                   │ layers  │     │ layers  │
+        ▲                  │  0–9    │                   │ 10–25   │     │ 26–31   │
+        └──── next token ──┤  GPU    │                   │  CPU    │     │  GPU    │
+                           └─────────┘                   └─────────┘     └─────────┘
+```
+
+- **Your models, your hardware.** Llama and Qwen families in GGUF, from Qwen2.5 0.5B up to
+  405B-class models split across files, run by Borrowed Compute's own engine.
+- **GPUs first.** Metal on a Mac, CUDA on an NVIDIA card, used automatically and checked
+  against the CPU at startup. A card takes the layers that fit; RAM takes the rest.
+- **Exact.** Data between devices crosses as exact values, so a split model writes exactly
+  what the whole model writes.
+- **Weights in memory only.** Each computer downloads only its own layers, straight into
+  RAM, never to disk, and drops them two minutes after the model stops.
+- **Balanced live.** The planner measures every device and link, puts layers where they
+  cost least, and moves them when a device gets busy.
+- **Faster with more devices.** A small draft model guesses ahead, and batches of guesses
+  keep every device busy at once; the coordinator measures whether guessing pays and turns
+  it off where it does not.
+
+```bash
+bc mesh probe                          # measure your devices
+bc mesh plan llama-3.1-8b              # see where each layer would run
+bc mesh run  llama-3.1-8b "Hello"      # answer one prompt
+bc mesh serve llama-3.1-8b             # OpenAI-compatible API at http://127.0.0.1:8484/v1
+```
+
+The design, the math and the research behind it are in [`docs/mesh.md`](docs/mesh.md).
+
+## Share a computer with someone
+
+People on other accounts can use your computer only if you invite them; nobody can find it
 otherwise.
 
-1. On the Mac, under **Guests**, turn on **Share this Mac**, type the person's name and
-   click **Invite**. Copy the message it shows and send it to them by chat or email. The
-   invite works once, within 7 days.
-2. They install the PC app, choose **Use a shared Mac** and paste the invite. They need no
-   account. Their PC shows a code.
-3. They read you the code; type it into the request that appears on your Mac.
+1. Under **Sharing**, turn on **Share this device**, type the person's name and click
+   **Invite**. Send them the message it shows. The invite works once, within 7 days.
+2. They choose **Use a shared device** and paste the invite. They need no account. Their
+   computer shows a code.
+3. They read you the code; you type it into the request on your computer.
 
-Your Mac then appears in their list as a shared Mac. Turning sharing off, or removing them
-under Guests, stops their jobs and servers. From the command line, a guest joins with
-`bc join <invite>`.
-
-The PC finds the Mac by its code alone. It connects directly when the network allows and
-through a relay when it does not (a VPN, a strict Wi-Fi). Either way the connection is
-end-to-end encrypted.
+Turning sharing off, or removing them, stops their jobs and servers. Guests never join AI
+model pipelines. From the command line a guest joins with `bc join <invite>`.
 
 ## Security
 
-Jobs are code from your PC plus every package they install, so the Mac treats them as
-untrusted:
+Jobs are code from another computer plus every package they install, so the lender treats
+them as untrusted.
 
-- **Sandboxed jobs.** Each job runs in a macOS Seatbelt sandbox. It can read and write its
-  own workspace and read system folders and your toolchains (Homebrew, rustup, nvm, pyenv,
-  Xcode). It cannot read the rest of your home folder (`~/Documents`, `~/.ssh`, `~/.aws`),
-  the clipboard, the keychain or other apps' settings, cannot open apps, and cannot reach
-  your ssh agent or well-known local services such as PostgreSQL, Redis, Docker or Ollama.
-  It can download dependencies and run its own servers on localhost.
-- **Nothing stays.** The workspace, including every downloaded dependency, is deleted when
-  the job ends. Each run starts from empty caches.
-- **Pairing.** Only devices signed in to the Mac's own account can ask to pair, and only
-  after you approve a code shown on both screens. Codes expire after 10 minutes and three
-  wrong tries delete the request. Removing a device stops its new jobs within 15 seconds.
-- **One owner.** The Mac's built-in cloud accepts only its owner's account. Anyone else who
-  learns the Mac's code is refused at sign-in. Sign-ins in progress and cloud connections
-  are capped, refused devices are logged at most every 10 minutes, and one paired device
-  can run at most 4 jobs and 8 servers at once.
-- **Guests only by invite.** Each invite is single use, expires in 7 days and still needs
-  the code approved on the Mac. Only a hash of it is stored. Guests run in the same
-  sandbox, cannot reach the Mac's cloud, and only see their own servers.
-- **Encrypted transport.** Devices talk over iroh QUIC with their own keys. Relays forward
-  traffic they cannot read. The cloud never sees job contents.
-- **Secrets.** Sign-in sessions and device keys live in the system keychain. GitHub and
-  Google tokens are used once at sign-in and dropped.
-- **Signed updates.** Each app installs only packages signed with the project's update key.
+| | |
+|---|---|
+| **Sandboxed jobs** | A Seatbelt sandbox on macOS, an AppContainer inside a Job Object on Windows. A job reads and writes only its own workspace and reads your toolchains; it cannot read the rest of your home folder (`~/Documents`, `~/.ssh`, `~/.aws`), the keychain or other apps' data. |
+| **Nothing stays** | The workspace, including every downloaded dependency, is deleted when the job ends. Each run starts from empty caches. |
+| **Pairing** | Only devices on your own account can ask, and only with a code you type on the other computer. Three wrong codes delete the request. |
+| **One owner** | The built-in cloud accepts only its owner's account; anyone else with the code is refused at sign-in. |
+| **Guests by invite only** | Single use, 7 days, still needs your approval. Only a hash of it is stored. |
+| **Encrypted transport** | iroh QUIC with per-device keys. Relays forward traffic they cannot read. |
+| **Secrets** | Sessions and device keys live in the system keychain. GitHub and Google tokens are used once at sign-in and dropped. |
+| **Signed updates** | Each app installs only packages signed with the project's update key. |
 
-Known limits: jobs still run as your own macOS user (a separate job user is planned), the
-Mac app is ad-hoc signed and not notarized, and the Windows installer is not code-signed.
+**Known limits:** jobs run as your own user (a separate job user is planned), the Mac app
+is ad-hoc signed and not notarized, and the Windows installer is not code-signed.
 
 ## Command line
 
-The `bc` command does what the PC app does, and shares its device identity:
+`bc` does what the app does and shares its device identity.
 
 ```bash
-bc cloud <mac code>        # where your Mac is
-bc login                   # --google for Google
-bc pair studio             # shows a code; approve it on the Mac
-bc use studio              # default Mac for bc run
-bc join <invite>           # use a Mac someone shared with you; no sign-in needed
-bc shared                  # Macs shared with this device; bc leave <name> forgets one
+bc login                          # --google for Google
+bc pair studio                    # shows a code; type it on the other computer
+bc use studio                     # default computer for bc run
+bc join <invite>                  # use a computer someone shared with you
 
-bc run -- cargo test       # run a command; --timings, --relay-only
+bc run -- cargo test              # run a command; --timings, --relay-only
 bc run --service -- npm run dev   # keep a server running and forward its ports
-bc services                # servers this device started
-bc attach <id>             # watch one; Ctrl+C stops watching only
-bc forward                 # forward their ports to localhost
+bc services                       # servers this device started
+bc attach <id>                    # watch one; Ctrl+C stops watching only
+bc forward                        # forward their ports to localhost
 bc stop <id>
-```
 
-On the Mac, `bc-agent` runs the agent without the app: `bc-agent login`, `bc-agent serve`,
-`bc-agent pairings`, `bc-agent approve <code>`, `bc-agent unpair <device>`.
+bc mesh probe | plan | run | serve
+```
 
 ## Develop
 
 | Path | What it is |
 |---|---|
 | `crates/bc-proto` | Job spec (`bc.toml`), device-to-device wire messages, cloud API bodies |
-| `crates/bc-net` | iroh endpoints, device keys, framed messages, the cloud over iroh |
+| `crates/bc-net` | iroh endpoints, device keys, framed messages, nearby devices, the cloud over iroh |
 | `crates/bc-auth` | Cloud API client and session storage |
 | `crates/bc-secrets` | Keychain storage for keys and sessions |
-| `apps/bc-agent` | Mac agent: job runner, sandbox, services, port forwarding, cloud sync |
-| `apps/bc-cli` | `bc`: packing, running, project detection, auto-fix, forwarding |
+| `crates/bc-infer` | The inference engine: GGUF, quantized kernels, Llama/Qwen, tokenizers, Metal and CUDA |
+| `crates/bc-mesh` | Several devices as one: probing, planning, pipelines, speculative decoding |
+| `apps/bc-agent` | Lending: job runner, sandboxes, services, port forwarding, guests |
+| `apps/bc-cli` | `bc`: packing, running, detection, auto-fix, forwarding, mesh, OpenAI endpoint |
 | `apps/bc-cloud` | Cloud API: sign-in, devices, pairing, presence (axum; SQLite or Postgres) |
-| `apps/bc-desktop` | PC app "Borrowed Compute" (Tauri 2, plain HTML/CSS/JS UI) |
-| `apps/bc-desktop-agent` | Mac app "Borrowed Compute Agent" (Tauri 2), hosts the cloud |
-
-Rust 1.91 is pinned in `rust-toolchain.toml`.
+| `apps/bc-desktop` | The app "Borrowed Compute" for Mac and Windows (Tauri 2, plain HTML/CSS/JS) |
 
 ```bash
 cargo test --workspace
-```
-
-- The cloud tests use a fake GitHub and Google and run against SQLite. Set
-  `BC_TEST_DATABASE_URL=postgres://…/postgres` to run them against Postgres too.
-- `cargo run -p bc-agent --example sandbox_check` runs real Rust, Python, Node, Go and
-  Homebrew projects inside the job sandbox (needs network).
-- `cargo test -p bc-net --test cloud -- --ignored` finds a Mac by its code through public
-  discovery (needs network).
-- The Windows build must run on Windows (`ring` needs the Windows SDK). The `windows`
-  workflow builds and tests it on every pull request.
-
-Build the apps with the Tauri CLI:
-
-```bash
+cargo clippy --workspace --all-targets
 cd apps/bc-desktop && npx @tauri-apps/cli@2.12.4 build
 ```
 
-```bash
-cd apps/bc-desktop-agent && npx @tauri-apps/cli@2.12.4 build
-```
+<details>
+<summary><b>More: tests, releases, a cloud on a server</b></summary>
+
+- Rust 1.91 is pinned in `rust-toolchain.toml` (iroh needs it).
+- Cloud tests run against SQLite with a fake GitHub and Google; set
+  `BC_TEST_DATABASE_URL=postgres://…/postgres` to run them against Postgres too.
+- `cargo run -p bc-agent --example sandbox_check` runs real projects inside the job
+  sandbox (needs network).
+- `BC_TEST_MODEL=<model.gguf> cargo test -p bc-mesh --release --test llm real_model -- --ignored --nocapture`
+  runs a real model over three stages and checks it against the unsplit model.
+- After editing the GPU kernels, run `crates/bc-infer/src/gpu/build-ptx.sh` (needs
+  Homebrew's `llvm`); a test fails until you do.
+- The Windows build must run on Windows (`ring` needs the Windows SDK); the `windows`
+  workflow builds and tests it on every pull request.
 
 **Releases.** Every merge to `main` runs the `release` workflow, which releases only the
-apps whose files changed. The Mac app (`agent-v…`) and the PC app (`client-v…`) have their
-own versions and are published, signed, to
+builds whose files changed. The Mac build (`agent-v…`) and the Windows build (`client-v…`)
+are versioned separately and published, signed, to
 [Borrowed-Compute-releases](https://github.com/Harshil089/Borrowed-Compute-releases).
 
-**A cloud on a server** instead of on the Mac (needs a GitHub OAuth app with Device Flow
-enabled; only the client id is used):
+**A cloud on a server** instead of on one of your computers (a GitHub OAuth app with Device
+Flow enabled; only the client id is used):
 
 ```bash
 BC_DATABASE_URL=postgres://user@host/db BC_GITHUB_CLIENT_ID=<client id> cargo run -p bc-cloud
 ```
 
-Devices then use its web address instead of a Mac code. `BC_SINGLE_OWNER=1` locks it to
-one account, and `BC_RELAY_URL` advertises a relay of your own.
+Devices then use its web address instead of a computer's code. `BC_SINGLE_OWNER=1` locks
+it to one account, and `BC_RELAY_URL` advertises a relay of your own.
 
-`CLAUDE.md` holds the design rules and decisions behind all of this.
+</details>
+
+<p align="center"><sub><code>CLAUDE.md</code> holds the design rules and decisions behind all of this.</sub></p>
