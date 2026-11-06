@@ -251,7 +251,7 @@ function renderHosted() {
       ? `<span class="pill ok">${h.idle_secs != null && h.idle_secs < 10 ? "Working" : "Ready"}</span>`
       : `<span class="pill warn">Downloading ${h.total ? Math.floor((h.loaded / h.total) * 100) : 0}%</span>`;
     const sub = h.running
-      ? `<span class="kv"><b>On</b> ${where}</span><span class="kv"><b>Memory</b> <span class="num">${size(h.total)}</span></span><span class="kv"><b>Batches</b> <span class="num">${h.batches}</span></span>`
+      ? `<span class="kv"><b>On</b> ${where}</span><span class="kv"><b>Memory</b> <span class="num">${size(h.total)}</span></span><span class="kv"><b>Batches</b> <span class="num">${h.batches}</span></span>${h.gpu_ms || h.cpu_ms ? `<span class="kv"><b>Per token</b> <span class="num">${h.gpu_layers ? `${h.gpu_ms.toFixed(0)}<i>ms GPU</i> ` : ""}${h.gpu_layers < h.layers.end - h.layers.start ? `${h.cpu_ms.toFixed(0)}<i>ms CPU</i>` : ""}</span></span>` : ""}`
       : `<span class="kv"><b>Fetching</b> <span class="num">${size(h.loaded)}<i>of ${size(h.total)}</i></span></span>`;
     return `
       <div class="mesh-stage mesh-hosted-row">

@@ -231,6 +231,22 @@ pub struct Layers {
     layers: Vec<Layer>,
     head: Option<(Buf, W)>,
     inv_freq: Buf,
+    /// Working buffers for a pass, kept between passes: allocating eight buffers on the
+    /// card for every token costs time a token cannot spare. Grows to the largest batch.
+    scratch: std::sync::Mutex<Option<Scratch>>,
+}
+
+/// Room for `rows` rows of every intermediate result of a layer.
+struct Scratch {
+    rows: usize,
+    n: Buf,
+    q: Buf,
+    k: Buf,
+    v: Buf,
+    att: Buf,
+    o: Buf,
+    gate: Buf,
+    up: Buf,
 }
 
 /// One conversation's keys and values on the GPU, per layer, with room for `cap` tokens.
@@ -300,7 +316,7 @@ impl Layers {
             Some((norm, out)) if on.len() == layers.len() && (out.data.len() as u64) <= left => Some((b.upload(norm)?, gpu.weights(out)?)),
             _ => None,
         };
-        Ok(Some(Layers { gpu, layers: on, head, inv_freq: b.upload(inv_freq)? }))
+        Ok(Some(Layers { gpu, layers: on, head, inv_freq: b.upload(inv_freq)?, scratch: std::sync::Mutex::new(None) }))
     }
 
     /// Layers on the GPU, from the start of the part.
@@ -351,22 +367,28 @@ impl Layers {
         let (qd, kvd) = (nh * hd, nkv * hd);
         let ff = self.layers[0].gate.rows as usize;
         let bx = b.upload(x)?;
-        let (bn, bq, bk, bv, ba, bo) = (b.zeros(rows * e)?, b.zeros(rows * qd)?, b.zeros(rows * kvd)?, b.zeros(rows * kvd)?, b.zeros(rows * qd)?, b.zeros(rows * e)?);
-        let (bg, bu) = (b.zeros(rows * ff)?, b.zeros(rows * ff)?);
+        // Every kernel writes all of its output, so reused buffers need no clearing.
+        let mut held = self.scratch.lock().unwrap();
+        if held.as_ref().is_none_or(|s| s.rows < rows) {
+            let r = rows.max(held.as_ref().map_or(0, |s| s.rows));
+            *held = Some(Scratch { rows: r, n: b.zeros(r * e)?, q: b.zeros(r * qd)?, k: b.zeros(r * kvd)?, v: b.zeros(r * kvd)?, att: b.zeros(r * qd)?, o: b.zeros(r * e)?, gate: b.zeros(r * ff)?, up: b.zeros(r * ff)? });
+        }
+        let s = held.as_ref().unwrap();
+        let (bn, bq, bk, bv, ba, bo, bg, bu) = (&s.n, &s.q, &s.k, &s.v, &s.att, &s.o, &s.gate, &s.up);
         let ew = |n: usize| ((n as u32).div_ceil(256), 1);
         let u = |v: usize| Arg::U(v as u32);
         let mut cmds = Vec::new();
         for (l, (kc, vc)) in self.layers.iter().zip(cache.k.iter().zip(&cache.v)) {
-            cmds.push(Cmd { k: K::RmsNorm, grid: (rows as u32, 1), threads: 32, args: vec![Arg::B(&bx), Arg::B(&l.attn_norm), Arg::B(&bn), u(e), Arg::F(cfg.eps)] });
-            cmds.push(self.gpu.matmul(&l.wq, &bn, &bq, rows));
-            cmds.push(self.gpu.matmul(&l.wk, &bn, &bk, rows));
-            cmds.push(self.gpu.matmul(&l.wv, &bn, &bv, rows));
-            for ((bias, out), dim) in l.bias.iter().zip([&bq, &bk, &bv]).zip([qd, kvd, kvd]) {
+            cmds.push(Cmd { k: K::RmsNorm, grid: (rows as u32, 1), threads: 32, args: vec![Arg::B(&bx), Arg::B(&l.attn_norm), Arg::B(bn), u(e), Arg::F(cfg.eps)] });
+            cmds.push(self.gpu.matmul(&l.wq, bn, bq, rows));
+            cmds.push(self.gpu.matmul(&l.wk, bn, bk, rows));
+            cmds.push(self.gpu.matmul(&l.wv, bn, bv, rows));
+            for ((bias, out), dim) in l.bias.iter().zip([bq, bk, bv]).zip([qd, kvd, kvd]) {
                 if let Some(bias) = bias {
                     cmds.push(Cmd { k: K::BiasAdd, grid: ew(rows * dim), threads: 256, args: vec![Arg::B(out), Arg::B(bias), u(rows * dim), u(dim)] });
                 }
             }
-            for (t, heads) in [(&bq, nh), (&bk, nkv)] {
+            for (t, heads) in [(bq, nh), (bk, nkv)] {
                 let n = rows * heads * (cfg.rope_dim / 2);
                 cmds.push(Cmd {
                     k: K::Rope,
@@ -375,23 +397,23 @@ impl Layers {
                     args: vec![Arg::B(t), Arg::B(&self.inv_freq), u(heads), u(hd), u(cfg.rope_dim), u(pos), u(cfg.rope_neox as usize), u(n)],
                 });
             }
-            for (src, dst) in [(&bk, kc), (&bv, vc)] {
+            for (src, dst) in [(bk, kc), (bv, vc)] {
                 cmds.push(Cmd { k: K::Copy, grid: ew(rows * kvd), threads: 256, args: vec![Arg::B(src), Arg::B(dst), u(pos * kvd), u(rows * kvd)] });
             }
             cmds.push(Cmd {
                 k: K::Attention,
                 grid: (nh as u32, rows as u32),
                 threads: 32,
-                args: vec![Arg::B(&bq), Arg::B(kc), Arg::B(vc), Arg::B(&ba), u(nh), u(nkv), u(hd), u(pos), Arg::F(1.0 / (hd as f32).sqrt())],
+                args: vec![Arg::B(bq), Arg::B(kc), Arg::B(vc), Arg::B(ba), u(nh), u(nkv), u(hd), u(pos), Arg::F(1.0 / (hd as f32).sqrt())],
             });
-            cmds.push(self.gpu.matmul(&l.wo, &ba, &bo, rows));
-            cmds.push(Cmd { k: K::Add, grid: ew(rows * e), threads: 256, args: vec![Arg::B(&bx), Arg::B(&bo), u(rows * e)] });
-            cmds.push(Cmd { k: K::RmsNorm, grid: (rows as u32, 1), threads: 32, args: vec![Arg::B(&bx), Arg::B(&l.ffn_norm), Arg::B(&bn), u(e), Arg::F(cfg.eps)] });
-            cmds.push(self.gpu.matmul(&l.gate, &bn, &bg, rows));
-            cmds.push(self.gpu.matmul(&l.up, &bn, &bu, rows));
-            cmds.push(Cmd { k: K::SiluMul, grid: ew(rows * ff), threads: 256, args: vec![Arg::B(&bg), Arg::B(&bu), u(rows * ff)] });
-            cmds.push(self.gpu.matmul(&l.down, &bg, &bo, rows));
-            cmds.push(Cmd { k: K::Add, grid: ew(rows * e), threads: 256, args: vec![Arg::B(&bx), Arg::B(&bo), u(rows * e)] });
+            cmds.push(self.gpu.matmul(&l.wo, ba, bo, rows));
+            cmds.push(Cmd { k: K::Add, grid: ew(rows * e), threads: 256, args: vec![Arg::B(&bx), Arg::B(bo), u(rows * e)] });
+            cmds.push(Cmd { k: K::RmsNorm, grid: (rows as u32, 1), threads: 32, args: vec![Arg::B(&bx), Arg::B(&l.ffn_norm), Arg::B(bn), u(e), Arg::F(cfg.eps)] });
+            cmds.push(self.gpu.matmul(&l.gate, bn, bg, rows));
+            cmds.push(self.gpu.matmul(&l.up, bn, bu, rows));
+            cmds.push(Cmd { k: K::SiluMul, grid: ew(rows * ff), threads: 256, args: vec![Arg::B(bg), Arg::B(bu), u(rows * ff)] });
+            cmds.push(self.gpu.matmul(&l.down, bg, bo, rows));
+            cmds.push(Cmd { k: K::Add, grid: ew(rows * e), threads: 256, args: vec![Arg::B(&bx), Arg::B(bo), u(rows * e)] });
         }
         self.gpu.run(&cmds)?;
         x.copy_from_slice(&b.read(&bx, rows * e)?);

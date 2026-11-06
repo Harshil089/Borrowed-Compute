@@ -172,6 +172,7 @@ async fn three_devices_write_what_one_computer_writes() {
     // Each lender lists the part it runs, so its app can show it.
     let mine: Vec<_> = bc_mesh::engine::hosted_now().into_iter().filter(|h| h.coordinator == m.coordinator.id().to_string() && h.of == 6).collect();
     assert!(mine.len() >= 3 && mine.iter().all(|h| h.running && h.batches > 0 && h.loaded == h.total), "{mine:?}");
+    assert!(mine.iter().all(|h| h.gpu_ms + h.cpu_ms > 0.0), "each part says where its time goes: {mine:?}");
 
     // A second conversation and a long prompt in chunks, at the same time.
     let long: Vec<u32> = (0..300).map(|i| 3 + (i * 7 % 90) as u32).collect();
