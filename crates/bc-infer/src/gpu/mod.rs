@@ -182,14 +182,20 @@ impl Gpu {
 
     /// Bytes a second the GPU reads weights at in a decoding product (for the planner).
     pub fn bandwidth(&self) -> Result<f64> {
+        self.product_rate(1)
+    }
+
+    #[doc(hidden)]
+    /// Bytes of weights a second in a product with `n` input rows.
+    pub fn product_rate(&self, n: usize) -> Result<f64> {
         let (rows, cols) = (8192, 8192);
         let t = Arc::new(crate::fixtures::random_tensor(crate::quant::GgmlType::Q4_0, rows, cols, 1));
         let w = self.weights(&t)?;
-        let (bx, out) = (self.backend.upload(&vec![0.5; cols])?, self.backend.zeros(rows)?);
-        self.run(&[self.matmul(&w, &bx, &out, 1)])?;
+        let (bx, out) = (self.backend.upload(&vec![0.5; cols * n])?, self.backend.zeros(rows * n)?);
+        self.run(&[self.matmul(&w, &bx, &out, n)])?;
         let reps = 8;
         let start = std::time::Instant::now();
-        let cmds: Vec<Cmd> = (0..reps).map(|_| self.matmul(&w, &bx, &out, 1)).collect();
+        let cmds: Vec<Cmd> = (0..reps).map(|_| self.matmul(&w, &bx, &out, n)).collect();
         self.run(&cmds)?;
         Ok(t.data.len() as f64 * reps as f64 / start.elapsed().as_secs_f64())
     }

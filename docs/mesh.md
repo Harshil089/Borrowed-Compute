@@ -44,7 +44,7 @@ Measured inputs per device: free memory, memory bandwidth, and its GPU if it has
 
 Decoding one token reads every weight once, so a layer's time on a device is its bytes divided by the speed it reads them at. A device has up to two tiers (`stage_secs`): the layers its GPU holds run at the GPU's measured speed, the rest at 70% of its RAM's copy bandwidth. On Apple's unified memory the GPU reaches every layer in RAM; a discrete card holds what fits in 85% of its free memory, and the engine puts a stage's first layers there and the rest on the CPU. Each layer's cost only grows as a stage grows, so filling layer by layer where the next one costs least is optimal: GPU memory anywhere first, then the fastest RAM. That gives two different optimal placements (`plan.rs`):
 
-- **One conversation (latency).** The token visits every stage in turn, so time per token = the sum of all stages' work + all hops. Adding devices never makes one conversation faster; it only adds hops. The planner fills the fastest devices first and uses only as many as memory requires. **Many devices exist to fit bigger models, not to speed one up.**
+- **One conversation (latency).** Without a draft model, the token visits every stage in turn, so time per token = the sum of all stages' work + all hops, and the planner fills the fastest devices (GPUs first) and uses only as many as memory requires. With a draft, pipelined speculation (3.5) lets more stages work at once, and the planner's estimate weighs that against the extra hops.
 - **Many requests (throughput).** With a request in flight on every stage, the slowest stage sets the pace. The planner balances layers so each stage takes equal time (assigning each layer where the stage total stays lowest, which is optimal for the slowest stage). When devices can hold the whole model, or a small group can, it makes several independent pipelines (replicas) instead of one long one, choosing the pipeline with the most tokens a second per device used. Two 2-device replicas serve as much as one 4-device pipeline with half the hops.
 
 The planner also chooses the ring order, trying every subset and order of up to eight devices, so a far-away device sits in the middle of the ring instead of next to the coordinator.
@@ -70,6 +70,24 @@ Per-token latency through a 3-device ring over the internet is about two round t
 - Typical chat acceptance is 2.5–3.5 tokens per pass, so network time per token drops by that factor.
 
 The planner already takes this into account (`--speculate`). This is the single biggest answer to "won't the relay make it slow": the relay's added round trip gets shared across several tokens.
+
+**Pipelined speculation: more devices make one conversation faster.** With one batch at a time, a 4-stage pipeline has three stages idle at any moment. So the coordinator keeps a batch per stage (plus one) in flight while a conversation is the pipeline's only one, each continuing the draft's guesses where the previous batch's left off (the idea of PipeInfer, Butler et al. 2024). While guesses hold, tokens arrive at the pace of the slowest stage, not the sum of all stages and hops. A wrong guess makes every later batch worthless: they are dropped by an epoch number as they come back, and the next batch starts at the corrected position, where every stage cuts its cache back (each batch carries its position). The text stays exactly what the target alone writes.
+
+How much it gains depends on the draft. With per-token agreement α, a run of α/(1 − α) right guesses costs one full pass plus a batch interval per k guesses (`speculative_token_ms`):
+
+| Draft agreement α | Tokens a pass, one batch at a time | 4 equal stages: time a token, one at a time | Pipelined |
+|---|---|---|---|
+| 0.5 | 1.9 | 0.52 passes | 0.52 passes (no gain) |
+| 0.8 | 3.4 | 0.30 passes | 0.25 passes |
+| 0.9 | 4.1 | 0.24 passes | 0.16 passes (1.5×) |
+| 0.95 | 4.5 | 0.22 passes | 0.10 passes (2.2×) |
+
+Measured with three stages taking 60 ms each and a draft that is always right: 40 tokens in 0.88 s, against 1.8 s one batch at a time. Code, structured output and long quotations from the context are where drafts agree most.
+
+Two more things keep guessing from ever costing time:
+
+- **Early cancellation.** Each batch carries its epoch. A stage reads ahead of what it computes, and when it has seen a newer epoch for a conversation, older batches still queued there are passed on empty, uncomputed. Replies are handled before any more drafting, so after a miss the corrected batch goes out at once.
+- **Measured, not assumed** (`llm::Speed`). Guessing pays only when a stage checks several tokens for about the price of one and the draft agrees often. On CPU stages a 5-row check costs about one token (the integer products unpack each weight once for every row); on the M2's GPU it costs about three. So each pipeline keeps its measured milliseconds a token with and without guessing, decodes the faster way, and tries the other every eighth request in case the devices or the conversation changed.
 
 ### 3.6 Prompts: chunked, exact, sent once
 
@@ -203,6 +221,7 @@ The desktop app has a **Mesh** page under Use. It picks the model and the goal, 
 | Leviathan, Kalman and Matias, *Fast Inference from Transformers via Speculative Decoding* (2023); Chen et al., *Accelerating LLM Decoding with Speculative Sampling* (2023) | Speculative decoding |
 | Agrawal et al., *Sarathi* (2023) | Chunked prefill |
 | Yu et al., *Orca* (2022) | Iteration-level scheduling |
+| Butler et al., *PipeInfer: Accelerating LLM Inference using Asynchronous Pipelined Speculation* (SC 2024) | Batches of guesses in flight on every stage at once, dropped on a miss |
 | Dettmers et al., *LLM.int8()* (2022) | Outlier channels, hence per-group activation scales |
 | Su et al., *RoFormer* (2021) | RoPE |
 | Ainslie et al., *GQA* (2023) | Grouped-query attention |
@@ -213,6 +232,8 @@ The planner's throughput split assigns each layer where the stage total stays sm
 ## 7. Limits and next steps
 
 - **CUDA is untested on a card.** The CUDA backend compiles, its kernels are the ones Metal runs, and its PTX is generated and checked for staleness, but no NVIDIA GPU has run it yet; the startup check keeps a broken one on the CPU. AMD and Intel GPUs run on the CPU.
-- **GPU products reach about 40% of the M2's bandwidth.** llama.cpp's hand-tuned Metal kernels reach more; several rows per SIMD group and simdgroup matrix instructions for prompts are the next steps.
+- **GPU products reach about 40% of the M2's bandwidth, and checking several guesses costs about 3× one token there.** The kernels are instruction-bound, not memory-bound. llama.cpp's hand-tuned kernels do better; simdgroup matrix instructions (and tensor cores on NVIDIA) for several rows are the next step. Until then the coordinator simply measures and does not guess where guessing is slower.
+- **Pipelined speculation needs separate hardware.** On one computer every stage shares the same cores or GPU, so batches in flight wait for each other; the gain shows only across devices (measured here with simulated stage times).
 - **Nothing drifts across devices.** The wire is exact, so any split writes what the whole model writes on one device. The engine's own products quantize each input row to int8 per block of 32, as llama.cpp does; that is part of the model's numerics on every device alike, not something the network adds.
-- **Single conversation speed.** Adding devices fits larger models and serves more requests at once; one conversation is fastest on the fewest, fastest devices (3.2).
+- **Single conversation speed.** One conversation gets faster from a device with a GPU (several times), from more stages working at once with a good draft (pipelined speculation, up to about the number of stages), and from long prompts split across stages. Without a draft, or with one that rarely agrees, it is still fastest on the fewest, fastest devices. Tensor parallelism, the other way to speed one token up, needs a round trip per layer and is not worth it outside one machine (section 2).
+- **Speculation is greedy only.** Sampling with a temperature runs one token a pass; speculative sampling (Leviathan et al.'s rejection rule) would extend it.

@@ -28,6 +28,7 @@ using namespace metal;
 #define DEVFN static inline
 #define BITS2F(b) as_type<float>((uint)(b))
 #define H2F(h) ((float)as_type<half>((ushort)(h)))
+#define F4(a, b, c, d) float4((a), (b), (c), (d))
 #define WSUM(v) simd_sum(v)
 #define WMAX(v) simd_max(v)
 #define BARRIER() threadgroup_barrier(mem_flags::mem_threadgroup)

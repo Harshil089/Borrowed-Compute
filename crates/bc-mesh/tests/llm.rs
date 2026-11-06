@@ -55,6 +55,20 @@ struct Mesh {
 }
 
 async fn mesh(n: usize) -> Mesh {
+    mesh_slow(n, Duration::ZERO).await
+}
+
+/// Stages that take `delay` longer per batch, like a slower device or link.
+struct Slow(Box<dyn bc_mesh::stage::Stage>, Duration);
+
+impl bc_mesh::stage::Stage for Slow {
+    fn forward(&mut self, meta: &bc_mesh::msg::Meta, input: bc_mesh::msg::Activation) -> anyhow::Result<bc_mesh::msg::Activation> {
+        std::thread::sleep(self.1);
+        self.0.forward(meta, input)
+    }
+}
+
+async fn mesh_slow(n: usize, delay: Duration) -> Mesh {
     let (relay_map, _url, relay) = iroh::test_utils::run_relay_server().await.unwrap();
     let config = NetConfig { relays: Some(relay_map), relay_only: true, insecure_relay_tls: true };
     let coordinator = bind(SecretKey::generate(), config.clone()).await.unwrap();
@@ -63,7 +77,12 @@ async fn mesh(n: usize) -> Mesh {
     for _ in 0..n {
         let ep = bind(SecretKey::generate(), config.clone()).await.unwrap();
         tokio::time::timeout(Duration::from_secs(10), ep.online()).await.unwrap();
-        let host = Host::new(ep.clone(), Arc::new(move |id: &EndpointId| *id == cid), Some(bc_mesh::engine::factory()));
+        let engine = bc_mesh::engine::factory();
+        let factory: bc_mesh::stage::StageFactory = Arc::new(move |setup| {
+            let engine = engine.clone();
+            Box::pin(async move { Ok(Box::new(Slow(engine(setup).await?, delay)) as Box<dyn bc_mesh::stage::Stage>) })
+        });
+        let host = Host::new(ep.clone(), Arc::new(move |id: &EndpointId| *id == cid), Some(factory));
         let accept = ep.clone();
         tokio::spawn(async move {
             while let Some(incoming) = accept.accept().await {
@@ -96,6 +115,7 @@ async fn local_text(file: &[u8], prompt: &[u32], n: usize) -> Vec<u32> {
     let path = dir.join("whole.gguf");
     std::fs::write(&path, file).unwrap();
     let mut m = Local::load(&Source::File(path)).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
     let mut out = Vec::new();
     let mut feed = prompt.to_vec();
     let mut pos = 0;
@@ -112,6 +132,7 @@ async fn local_text(file: &[u8], prompt: &[u32], n: usize) -> Vec<u32> {
     out
 }
 
+/// A fresh folder for model copies; each test deletes it once the model is in memory.
 fn tempfile_dir() -> std::path::PathBuf {
     let d = std::env::temp_dir().join(format!("bc-mesh-llm-{}-{}", std::process::id(), rand::random::<u32>()));
     std::fs::create_dir_all(&d).unwrap();
@@ -174,10 +195,40 @@ async fn speculative_decoding_writes_the_same_text_in_fewer_passes() {
     // A different, smaller draft: guesses are sometimes wrong, the text never is.
     std::fs::write(dir.join("d2.gguf"), bc_infer::fixtures::tiny_model(2, false)).unwrap();
     let other = Local::load(&Source::File(dir.join("d2.gguf"))).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
     let client = Client::open(&m.coordinator, &url, plan(&[(1, 0..1), (0, 1..4)]), &addrs).await.unwrap();
     let llm = Llm::new(&header, vec![client], Some(other)).unwrap();
     let (got, _) = llm.generate(&prompt, 24, Sampling::default(), |_| {}).await.unwrap();
     assert_eq!(got, want);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn one_conversation_keeps_every_stage_busy() {
+    // Three stages of 60 ms each and a perfect draft: one batch at a time would take
+    // 180 ms a pass; with a batch per stage in flight, one comes back every 60 ms.
+    let delay = Duration::from_millis(60);
+    let file = bc_infer::fixtures::tiny_model(3, false);
+    let (url, _) = serve(file.clone()).await;
+    let m = mesh_slow(3, delay).await;
+    let addrs: Vec<_> = m.devices.iter().map(|d| d.addr()).collect();
+    let header = Source::parse_remote(&url).unwrap().header().await.unwrap();
+    let dir = tempfile_dir();
+    std::fs::write(dir.join("d.gguf"), &file).unwrap();
+    let same = Local::load(&Source::File(dir.join("d.gguf"))).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    let client = Client::open(&m.coordinator, &url, plan(&[(0, 0..1), (1, 1..2), (2, 2..3)]), &addrs).await.unwrap();
+    let llm = Llm::new(&header, vec![client], Some(same)).unwrap();
+    let prompt: Vec<u32> = vec![1, 60, 61, 62];
+    let want = local_text(&file, &prompt, 40).await;
+    let (got, stats) = llm.generate(&prompt, 40, Sampling::default(), |_| {}).await.unwrap();
+    assert_eq!(got, want);
+    if got.len() < 20 {
+        return; // the tiny model stopped early; nothing to time
+    }
+    let decode = Duration::from_secs_f64((stats.total_ms - stats.first_token_ms) / 1000.0);
+    let one_at_a_time = delay * 3 * stats.passes as u32;
+    println!("{} tokens in {} batches: {decode:?}, against {one_at_a_time:?} one batch at a time", got.len(), stats.passes);
+    assert!(decode < one_at_a_time * 7 / 10, "{} batches took {decode:?}; one at a time would take {one_at_a_time:?}", stats.passes);
 }
 
 /// A real model over three devices: `BC_TEST_MODEL=<model.gguf> [BC_TEST_DRAFT=<draft.gguf>]
