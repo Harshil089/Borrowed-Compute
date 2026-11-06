@@ -12,6 +12,12 @@ serde.workspace = true
 reqwest.workspace = true
 tokio = { workspace = true, features = ["rt", "fs"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Memory", "Win32_System_Threading"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 metal = "0.33.0"
 

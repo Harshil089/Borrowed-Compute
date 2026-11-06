@@ -152,15 +152,25 @@ impl Host {
                 let build = factory(setup.clone(), loading);
                 tokio::pin!(build);
                 let mut sent = std::time::Instant::now() - PROGRESS_EVERY;
+                let mut last = (0u64, 0u64);
                 loop {
                     tokio::select! {
-                        built = &mut build => break built,
+                        built = &mut build => {
+                            // The build can finish before its last report was read: send
+                            // it, so the coordinator never shows a stage stuck short.
+                            let (done, total) = *rx.borrow();
+                            if built.is_ok() && (done, total) != last {
+                                send_msg(&mut control, &MeshMsg::Loading { done, total }).await?;
+                            }
+                            break built;
+                        }
                         // The coordinator gave up (or was stopped): stop downloading.
                         _ = conn.closed() => bail!("the device that set this stage up went away"),
                         Ok(()) = rx.changed() => {
                             let (done, total) = *rx.borrow_and_update();
                             if sent.elapsed() >= PROGRESS_EVERY || done == total {
                                 sent = std::time::Instant::now();
+                                last = (done, total);
                                 send_msg(&mut control, &MeshMsg::Loading { done, total }).await?;
                             }
                         }

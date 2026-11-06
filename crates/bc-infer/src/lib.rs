@@ -7,6 +7,7 @@ pub mod fixtures;
 pub mod gguf;
 pub mod gpu;
 pub mod model;
+pub mod pin;
 pub mod pool;
 pub mod quant;
 pub mod sample;
