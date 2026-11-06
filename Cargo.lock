@@ -632,11 +632,13 @@ dependencies = [
  "anyhow",
  "cudarc",
  "hex",
+ "libc",
  "metal",
  "reqwest 0.12.28",
  "serde",
  "sha2 0.10.9",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -260,6 +260,8 @@ const PAGE: usize = 16384;
 pub struct Bytes {
     ptr: std::ptr::NonNull<u8>,
     len: usize,
+    /// Kept in RAM (`pin`), never swapped to disk.
+    locked: bool,
 }
 
 // SAFETY: Bytes owns its allocation and only hands out shared or exclusive borrows of it.
@@ -279,7 +281,13 @@ impl Bytes {
         let ptr = std::ptr::NonNull::new(ptr).unwrap_or_else(|| std::alloc::handle_alloc_error(layout));
         // SAFETY: both regions are valid for b.len() bytes and do not overlap.
         unsafe { std::ptr::copy_nonoverlapping(b.as_ptr(), ptr.as_ptr(), b.len()) };
-        Bytes { ptr, len: b.len() }
+        let locked = crate::pin::lock(ptr.as_ptr(), Self::layout(b.len()).size());
+        Bytes { ptr, len: b.len(), locked }
+    }
+
+    /// Whether these bytes are locked in RAM.
+    pub fn locked(&self) -> bool {
+        self.locked
     }
 
     /// The allocation's length, whole pages.
@@ -298,6 +306,9 @@ impl std::ops::Deref for Bytes {
 
 impl Drop for Bytes {
     fn drop(&mut self) {
+        if self.locked {
+            crate::pin::unlock(self.ptr.as_ptr(), Self::layout(self.len).size());
+        }
         // SAFETY: allocated in from_slice with this same layout.
         unsafe { std::alloc::dealloc(self.ptr.as_ptr(), Self::layout(self.len)) }
     }
