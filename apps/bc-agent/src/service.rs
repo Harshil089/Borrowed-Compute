@@ -62,10 +62,10 @@ impl Agent {
         let mut config = AgentConfig::new(RunnerConfig::default(), paths.paired());
         config.events = events;
         config.guests = paths.guests();
-        // Paired devices only: a guest may run jobs but not measure or use this device as
-        // part of a pipeline.
-        let paired = config.paired.clone();
-        let mesh = bc_mesh::stage::Host::new(endpoint.clone(), std::sync::Arc::new(move |id| paired.contains(id)), Some(bc_mesh::engine::factory()));
+        // Paired devices, and guests only when the owner lets them use this computer in
+        // their Mesh (Sharing page): stages see the prompts that pass through them.
+        let (paired, guests) = (config.paired.clone(), config.guests.clone());
+        let mesh = bc_mesh::stage::Host::new(endpoint.clone(), std::sync::Arc::new(move |id| paired.contains(id) || guests.allows_mesh(id)), Some(bc_mesh::engine::factory()));
         Ok(Agent { endpoint, config, lending: Default::default(), mesh })
     }
 
@@ -138,6 +138,11 @@ impl Agent {
                 self.stop_services_of(&guest.device);
             }
         }
+    }
+
+    /// Lets guests use this computer in their Mesh, or stops letting them.
+    pub fn set_guest_mesh(&self, on: bool) {
+        self.config.guests.set_mesh(on);
     }
 
     /// Forgets a guest and stops their services.

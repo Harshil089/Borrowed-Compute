@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use bc_cli::mesh::{paired_devices, plan_with, probe_all, probe_pairs, this_computer, MeshDevice, Session};
+use bc_cli::mesh::{mesh_targets, plan_with, probe_all, probe_pairs, this_computer, MeshDevice, Session};
 use bc_mesh::plan::Goal;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
@@ -60,6 +60,8 @@ pub struct DeviceRow {
     engine: bool,
     gpu: Option<String>,
     local: bool,
+    /// Shared with this device by someone else: its owner's computer sees the conversation.
+    shared: bool,
 }
 
 #[derive(Serialize)]
@@ -85,8 +87,10 @@ pub struct Probe {
     unused: Vec<String>,
 }
 
-fn rows(devices: &[MeshDevice]) -> Vec<DeviceRow> {
+fn rows(devices: &[MeshDevice], home: &std::path::Path) -> Vec<DeviceRow> {
     let gb = |b: u64| b as f64 / (1u64 << 30) as f64;
+    let shared: Vec<String> = bc_cli::shared::list(home).into_iter().map(|s| s.id).collect();
+    let is_shared = |d: &MeshDevice| shared.contains(&d.addr.id.to_string());
     devices
         .iter()
         .map(|d| match &d.report {
@@ -103,8 +107,17 @@ fn rows(devices: &[MeshDevice]) -> Vec<DeviceRow> {
                 engine: r.device.engine,
                 gpu: r.device.gpu.as_ref().map(|g| format!("{} · {:.0} GB/s", g.name, g.bw / 1e9)),
                 local: d.local,
+                shared: is_shared(d),
             },
-            Err(e) => DeviceRow { name: d.name.clone(), error: Some(e.clone()), relay: false, rtt_ms: 0.0, up_mbps: 0.0, free_gb: 0.0, total_gb: 0.0, mem_gbs: 0.0, os: String::new(), engine: false, gpu: None, local: d.local },
+            Err(e) => {
+                // A shared computer whose owner has not let guests use it in Mesh refuses as unpaired.
+                let error = if is_shared(d) && e.contains("not paired") {
+                    "Shared with you, but its owner has not turned on \"Let guests use this device in their Mesh\" (Sharing page on that computer).".to_string()
+                } else {
+                    e.clone()
+                };
+                DeviceRow { name: d.name.clone(), error: Some(error), relay: false, rtt_ms: 0.0, up_mbps: 0.0, free_gb: 0.0, total_gb: 0.0, mem_gbs: 0.0, os: String::new(), engine: false, gpu: None, local: d.local, shared: is_shared(d) }
+            }
         })
         .collect()
 }
@@ -112,7 +125,7 @@ fn rows(devices: &[MeshDevice]) -> Vec<DeviceRow> {
 async fn targets(state: &AppState) -> CmdResult<Vec<(String, iroh::EndpointAddr)>> {
     let me = crate::device_id(&state.home)?;
     let cloud = state.cloud();
-    paired_devices(&cloud, &me).await.map_err(err_chain)
+    mesh_targets(&cloud, &me, &state.home).await.map_err(err_chain)
 }
 
 async fn endpoint(state: &AppState) -> CmdResult<iroh::Endpoint> {
@@ -127,7 +140,7 @@ pub async fn mesh_probe(state: State<'_, AppState>, model: Option<String>, throu
     let ep = endpoint(&state).await?;
     let mut devices = probe_all(&ep, targets).await;
     devices.push(this_computer(&ep).await);
-    let mut out = Probe { devices: rows(&devices), pipelines: Vec::new(), unused: Vec::new() };
+    let mut out = Probe { devices: rows(&devices, &state.home), pipelines: Vec::new(), unused: Vec::new() };
     let usable: Vec<MeshDevice> = devices.into_iter().filter(|d| d.report.as_ref().is_ok_and(|r| r.device.engine)).collect();
     let pairs = probe_pairs(&ep, &usable).await;
     bc_net::release(ep).await;
@@ -217,7 +230,7 @@ pub async fn mesh_start(app: AppHandle, state: State<'_, AppState>, mesh: State<
             Box::pin(async move {
                 let me = bc_net::load_or_create_key(&bc_cli::flows::key_path(&home))?.public().to_string();
                 let cloud = bc_auth::CloudClient::from_home(bc_auth::cloud_url_for(&home), &home);
-                paired_devices(&cloud, &me).await
+                mesh_targets(&cloud, &me, &home).await
             })
         }),
     });

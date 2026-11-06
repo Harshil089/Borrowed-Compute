@@ -414,9 +414,9 @@ async fn mesh(cloud: &CloudClient, key_path: &std::path::Path, action: MeshActio
     };
     let key = load_or_create_key(key_path)?;
     let me = key.public().to_string();
-    let targets = bc_cli::mesh::paired_devices(signed_in(cloud)?, &me).await?;
+    let targets = bc_cli::mesh::mesh_targets(cloud, &me, &bc_cli::flows::client_home()?).await?;
     if targets.is_empty() {
-        bail!("this device is not paired with any device yet; pair with `bc pair <device>`");
+        bail!("this device is not paired with any device yet; pair with `bc pair <device>`, or join a shared one with `bc join`");
     }
     let endpoint = bc_net::bind(key, mac_net(cloud, false).await).await?;
     println!("Measuring {} devices at once…", targets.len());
@@ -515,10 +515,10 @@ async fn mesh_run(cloud: &CloudClient, key_path: &std::path::Path, action: MeshA
     use bc_mesh::plan::Goal;
     let key = load_or_create_key(key_path)?;
     let me = key.public().to_string();
-    let signed = signed_in(cloud)?.clone();
-    let targets = bc_cli::mesh::paired_devices(&signed, &me).await?;
+    let signed = cloud.clone();
+    let targets = bc_cli::mesh::mesh_targets(&signed, &me, &bc_cli::flows::client_home()?).await?;
     if targets.is_empty() {
-        bail!("this device is not paired with any device yet; pair with `bc pair <device>`");
+        bail!("this device is not paired with any device yet; pair with `bc pair <device>`, or join a shared one with `bc join`");
     }
     let endpoint = bc_net::bind(key, mac_net(cloud, false).await).await?;
     let (model, draft, throughput) = match &action {
@@ -559,7 +559,7 @@ async fn mesh_run(cloud: &CloudClient, key_path: &std::path::Path, action: MeshA
                 session: session.clone(),
                 targets: std::sync::Arc::new(move || {
                     let (c, m) = (cloud_c.clone(), me_c.clone());
-                    Box::pin(async move { bc_cli::mesh::paired_devices(&c, &m).await })
+                    Box::pin(async move { bc_cli::mesh::mesh_targets(&c, &m, &bc_cli::flows::client_home()?).await })
                 }),
             });
             let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.with_context(|| format!("port {port} is taken"))?;

@@ -42,6 +42,10 @@ Stages that never paired with each other still have to talk. The coordinator sig
 
 The coordinator is a device too. It measures its own memory and GPU (`bc_cli::mesh::this_computer`) and the planner may give it layers, always the first ones: tokens start on this computer, so its stage costs no hop, and its links are the coordinator's own (`plan::estimate` treats them as free). It runs the same engine and fetches its layers the same way as a lending device, into memory only. When it holds the whole model, nothing crosses the network at all. Two computers with 5 GB free each now run a model neither could hold alone.
 
+### 3.1b Shared computers
+
+A computer someone shared with you (as a guest, through an invite) can be part of your Mesh too, but only if its owner turns on "Let guests use this device in their Mesh" on its Sharing page. It is off by default: hidden states passing through a stage reveal the conversation, so the owner's computer sees it, which the guest accepts by using it (the app marks it as someone else's) and the owner by allowing it. Without the switch the shared computer turns the probe away as unpaired, and the Mesh page says the owner has not allowed it.
+
 ### 3.2 Latency or throughput: the planner's two goals
 
 Measured inputs per device: free memory, memory bandwidth, and its GPU if it has one (name, memory for weights, and the speed a real decoding product reaches on it). Per link: round-trip time and upload rate. The probe measures all of them (`probe.rs`), for every paired device at once.

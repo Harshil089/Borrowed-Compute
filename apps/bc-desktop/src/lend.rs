@@ -408,6 +408,13 @@ pub fn guests(state: State<'_, LendState>) -> CmdResult<bc_agent::guests::Guests
 }
 
 #[tauri::command]
+pub fn set_guest_mesh(state: State<'_, LendState>, on: bool) -> CmdResult<()> {
+    running_agent(&state)?.set_guest_mesh(on);
+    log(format_args!("guests in Mesh turned {}", if on { "on" } else { "off" }));
+    Ok(())
+}
+
+#[tauri::command]
 pub fn set_sharing(state: State<'_, LendState>, on: bool) -> CmdResult<()> {
     running_agent(&state)?.set_sharing(on);
     log(format_args!("sharing turned {}", if on { "on" } else { "off" }));

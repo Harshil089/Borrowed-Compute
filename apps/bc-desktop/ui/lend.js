@@ -579,6 +579,8 @@ function renderGuests() {
   const g = guestsView;
   if (document.activeElement !== $("sharing")) $("sharing").checked = g.sharing;
   $("guests-body").classList.toggle("hidden", !g.sharing);
+  $("guest-mesh-row").classList.toggle("hidden", !g.sharing);
+  if (document.activeElement !== $("guest-mesh")) $("guest-mesh").checked = !!g.mesh;
   const day = (secs) => new Date(secs * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" });
   setHtml("guests",
     g.guests.map((x) => `
@@ -615,6 +617,16 @@ $("sharing").addEventListener("change", async (event) => {
     showError(String(e));
   }
   if (!on) $("invite-new").classList.add("hidden");
+  await refresh();
+});
+
+$("guest-mesh").addEventListener("change", async (event) => {
+  try {
+    await invoke("set_guest_mesh", { on: event.target.checked });
+  } catch (e) {
+    event.target.checked = !event.target.checked;
+    showError(String(e));
+  }
   await refresh();
 });
 

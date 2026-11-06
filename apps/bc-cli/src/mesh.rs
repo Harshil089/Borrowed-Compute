@@ -60,6 +60,27 @@ pub async fn paired_devices(cloud: &CloudClient, me: &str) -> Result<Vec<(String
     Ok(out)
 }
 
+/// Devices a Mesh may use: those paired on this account, and computers shared with this
+/// device as a guest. A shared computer takes part only if its owner lets guests use it
+/// in their Mesh; otherwise it turns the probe away and is left out. Signed out, only
+/// shared computers.
+pub async fn mesh_targets(cloud: &CloudClient, me: &str, home: &std::path::Path) -> Result<Vec<(String, EndpointAddr)>> {
+    let shared = crate::shared::list(home);
+    let mut out = match paired_devices(cloud, me).await {
+        Ok(p) => p,
+        Err(_) if !shared.is_empty() => Vec::new(),
+        Err(e) => return Err(e),
+    };
+    for s in shared {
+        if let Ok(id) = s.id.parse::<EndpointId>() {
+            if !out.iter().any(|(_, a)| a.id == id) {
+                out.push((s.name, id.into()));
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Probes every device at the same time over one endpoint.
 pub async fn probe_all(endpoint: &Endpoint, devices: Vec<(String, EndpointAddr)>) -> Vec<MeshDevice> {
     let tasks: Vec<_> = devices
