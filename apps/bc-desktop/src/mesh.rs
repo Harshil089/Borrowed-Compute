@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use bc_cli::mesh::{paired_devices, plan_with, probe_all, probe_pairs, MeshDevice, Session};
+use bc_cli::mesh::{paired_devices, plan_with, probe_all, probe_pairs, this_computer, MeshDevice, Session};
 use bc_mesh::plan::Goal;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
@@ -59,6 +59,7 @@ pub struct DeviceRow {
     os: String,
     engine: bool,
     gpu: Option<String>,
+    local: bool,
 }
 
 #[derive(Serialize)]
@@ -101,8 +102,9 @@ fn rows(devices: &[MeshDevice]) -> Vec<DeviceRow> {
                 os: r.device.os.clone(),
                 engine: r.device.engine,
                 gpu: r.device.gpu.as_ref().map(|g| format!("{} · {:.0} GB/s", g.name, g.bw / 1e9)),
+                local: d.local,
             },
-            Err(e) => DeviceRow { name: d.name.clone(), error: Some(e.clone()), relay: false, rtt_ms: 0.0, up_mbps: 0.0, free_gb: 0.0, total_gb: 0.0, mem_gbs: 0.0, os: String::new(), engine: false, gpu: None },
+            Err(e) => DeviceRow { name: d.name.clone(), error: Some(e.clone()), relay: false, rtt_ms: 0.0, up_mbps: 0.0, free_gb: 0.0, total_gb: 0.0, mem_gbs: 0.0, os: String::new(), engine: false, gpu: None, local: d.local },
         })
         .collect()
 }
@@ -123,7 +125,8 @@ async fn endpoint(state: &AppState) -> CmdResult<iroh::Endpoint> {
 pub async fn mesh_probe(state: State<'_, AppState>, model: Option<String>, throughput: bool) -> CmdResult<Probe> {
     let targets = targets(&state).await?;
     let ep = endpoint(&state).await?;
-    let devices = probe_all(&ep, targets).await;
+    let mut devices = probe_all(&ep, targets).await;
+    devices.push(this_computer(&ep).await);
     let mut out = Probe { devices: rows(&devices), pipelines: Vec::new(), unused: Vec::new() };
     let usable: Vec<MeshDevice> = devices.into_iter().filter(|d| d.report.as_ref().is_ok_and(|r| r.device.engine)).collect();
     let pairs = probe_pairs(&ep, &usable).await;

@@ -16,10 +16,22 @@ use iroh::{Endpoint, EndpointAddr, EndpointId};
 /// for the KV cache.
 const MEMORY_SHARE: f64 = 0.85;
 
+#[derive(Clone)]
 pub struct MeshDevice {
     pub name: String,
     pub addr: EndpointAddr,
     pub report: Result<LinkReport, String>,
+    /// This computer, the coordinator: it holds layers too, ahead of the others.
+    pub local: bool,
+}
+
+/// This computer as a device of its own mesh: its memory and GPU, measured here, and a
+/// link to itself that costs nothing.
+pub async fn this_computer(endpoint: &Endpoint) -> MeshDevice {
+    let device = bc_mesh::probe::report(true).await;
+    // Finite, so it survives JSON for the app.
+    let report = LinkReport { rtt_ms: 0.0, up_bytes_s: 1e12, via_relay: false, device };
+    MeshDevice { name: "This computer".into(), addr: endpoint.addr(), report: Ok(report), local: true }
 }
 
 /// Devices this one is paired with (approved), with the cloud's latest address for each.
@@ -56,7 +68,7 @@ pub async fn probe_all(endpoint: &Endpoint, devices: Vec<(String, EndpointAddr)>
             let endpoint = endpoint.clone();
             tokio::spawn(async move {
                 let report = bc_mesh::probe::probe(&endpoint, addr.clone()).await.map_err(|e| format!("{e:#}"));
-                MeshDevice { name, addr, report }
+                MeshDevice { name, addr, report, local: false }
             })
         })
         .collect();
@@ -78,8 +90,10 @@ pub type Pairs = Vec<((usize, usize), Link)>;
 /// fail are left out; the planner then estimates them through this device.
 pub async fn probe_pairs(endpoint: &Endpoint, devices: &[MeshDevice]) -> Pairs {
     let mut tasks = Vec::new();
-    for i in 0..devices.len() {
-        for j in i + 1..devices.len() {
+    // This computer's links are the coordinator's own, measured already.
+    let remote = |i: usize| !devices[i].local;
+    for i in (0..devices.len()).filter(|&i| remote(i)) {
+        for j in (i + 1..devices.len()).filter(|&j| remote(j)) {
             let (ep, a, b) = (endpoint.clone(), devices[i].addr.clone(), devices[j].addr.clone());
             tasks.push(tokio::spawn(async move { ((i, j), bc_mesh::probe::probe_link(&ep, a, b).await) }));
         }
@@ -102,7 +116,7 @@ pub fn plan_for<'a>(model: &Model, devices: &'a [MeshDevice], goal: Goal, tokens
 pub fn plan_with<'a>(model: &Model, devices: &'a [MeshDevice], pairs: &Pairs, goal: Goal, tokens_per_pass: f64) -> (Plan, Vec<&'a MeshDevice>) {
     let usable: Vec<&MeshDevice> = devices.iter().filter(|d| d.report.is_ok()).collect();
     let reports: Vec<&LinkReport> = usable.iter().map(|d| d.report.as_ref().unwrap()).collect();
-    let specs: Vec<Device> = usable.iter().zip(&reports).map(|(d, r)| device_spec(&d.name, r)).collect();
+    let specs: Vec<Device> = usable.iter().zip(&reports).map(|(d, r)| Device { local: d.local, ..device_spec(&d.name, r) }).collect();
     let mut links = Links::from_coordinator(&reports.iter().map(|r| Link { rtt_ms: r.rtt_ms, bw: r.up_bytes_s }).collect::<Vec<_>>());
     if usable.len() == devices.len() {
         for &((i, j), link) in pairs {
@@ -123,7 +137,7 @@ pub fn device_spec(name: &str, r: &LinkReport) -> Device {
         Some(g) => ((g.mem_bytes as f64 * 0.85) as u64, g.bw),
         None => (0, 0.0),
     };
-    Device { name: name.into(), mem_bytes, mem_bw: r.device.mem_bw, gpu_bytes, gpu_bw }
+    Device { name: name.into(), mem_bytes, mem_bw: r.device.mem_bw, gpu_bytes, gpu_bw, local: false }
 }
 
 pub fn find_model(name: &str) -> Option<Model> {
@@ -204,8 +218,11 @@ impl Session {
             }
             _ => None,
         };
+        // Measured after the draft model is in memory, so its room is not counted twice.
+        let mut devices = devices;
+        devices.push(this_computer(&endpoint).await);
         let tokens_per_pass = if draft.is_some() { 2.5 } else { 1.0 };
-        let owned: Vec<MeshDevice> = stage_devices(&devices).iter().map(|d| MeshDevice { name: d.name.clone(), addr: d.addr.clone(), report: d.report.clone() }).collect();
+        let owned: Vec<MeshDevice> = stage_devices(&devices).iter().map(|d| (*d).clone()).collect();
         status("Measuring the links between your devices…");
         let pairs = probe_pairs(&endpoint, &owned).await;
         let plan = plan_with(&spec, &owned, &pairs, goal, tokens_per_pass).0;
@@ -213,7 +230,7 @@ impl Session {
             let need = spec.layer_bytes * spec.layers as u64 + spec.extra_bytes;
             let free: u64 = owned.iter().filter_map(|d| d.report.as_ref().ok()).map(|r| (r.device.mem_available as f64 * MEMORY_SHARE) as u64).sum();
             bail!(
-                "{name} needs {} of memory and the devices it can use have {} free together (this computer coordinates and runs the draft model, but holds no layers). Close apps on them, add a device, or pick a smaller model.",
+                "{name} needs {} of memory and your devices, this computer included, have {} free together. Close apps on them, add a device, or pick a smaller model.",
                 gb(need),
                 gb(free)
             );
@@ -244,9 +261,9 @@ impl Session {
     /// owner is busy shows up slower and gets fewer layers. Returns whether it moved.
     pub async fn rebalance(&self) -> Result<bool> {
         let mut s = self.state.lock().await;
-        let usable: Vec<MeshDevice> = stage_devices(&s.devices).iter().map(|d| MeshDevice { name: d.name.clone(), addr: d.addr.clone(), report: d.report.clone() }).collect();
+        let usable: Vec<MeshDevice> = stage_devices(&s.devices).iter().map(|d| (*d).clone()).collect();
         let reports: Vec<&LinkReport> = usable.iter().map(|d| d.report.as_ref().unwrap()).collect();
-        let mut specs: Vec<Device> = usable.iter().zip(&reports).map(|(d, r)| device_spec(&d.name, r)).collect();
+        let mut specs: Vec<Device> = usable.iter().zip(&reports).map(|(d, r)| Device { local: d.local, ..device_spec(&d.name, r) }).collect();
         for c in self.llm.replicas() {
             for (stage, ms) in c.plan.stages.iter().zip(c.stage_ms.lock().unwrap().iter()) {
                 let predicted = plan::stage_secs(&self.spec, &specs[stage.device], stage.layers.end - stage.layers.start) * 1000.0;
@@ -278,9 +295,10 @@ impl Session {
     /// After a pipeline fails: measure again, leave out devices that do not answer, plan
     /// and start again.
     pub async fn recover(&self, targets: Vec<(String, EndpointAddr)>) -> Result<()> {
-        let devices = probe_all(&self.endpoint, targets).await;
+        let mut devices = probe_all(&self.endpoint, targets).await;
+        devices.push(this_computer(&self.endpoint).await);
         let usable = stage_devices(&devices);
-        let owned: Vec<MeshDevice> = usable.iter().map(|d| MeshDevice { name: d.name.clone(), addr: d.addr.clone(), report: d.report.clone() }).collect();
+        let owned: Vec<MeshDevice> = usable.iter().map(|d| (*d).clone()).collect();
         let pairs = probe_pairs(&self.endpoint, &owned).await;
         let (plan, _) = plan_with(&self.spec, &owned, &pairs, self.goal, 1.0);
         if plan.pipelines.is_empty() {

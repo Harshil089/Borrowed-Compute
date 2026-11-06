@@ -38,6 +38,10 @@ The coordinator sends token ids to the first stage. Each stage runs its layers a
 
 Stages that never paired with each other still have to talk. The coordinator signs a **ticket** per hop: "in session S, device A may feed device B", valid five minutes, ed25519 with the coordinator's device key (`ticket.rs`). B accepts A's connection only with a ticket signed by the coordinator that set B's stage up, naming A as sender and B as receiver. Every stage still checks that the coordinator itself is on its paired list. Guests are never part of a pipeline: activations reveal what the prompt says.
 
+### 3.1a This computer is part of its own mesh
+
+The coordinator is a device too. It measures its own memory and GPU (`bc_cli::mesh::this_computer`) and the planner may give it layers, always the first ones: tokens start on this computer, so its stage costs no hop, and its links are the coordinator's own (`plan::estimate` treats them as free). It runs the same engine and fetches its layers the same way as a lending device, into memory only. When it holds the whole model, nothing crosses the network at all. Two computers with 5 GB free each now run a model neither could hold alone.
+
 ### 3.2 Latency or throughput: the planner's two goals
 
 Measured inputs per device: free memory, memory bandwidth, and its GPU if it has one (name, memory for weights, and the speed a real decoding product reaches on it). Per link: round-trip time and upload rate. The probe measures all of them (`probe.rs`), for every paired device at once.

@@ -242,6 +242,38 @@ async fn one_conversation_keeps_every_stage_busy() {
     assert!(decode < one_at_a_time * 7 / 10, "{} batches took {decode:?}; one at a time would take {one_at_a_time:?}", stats.passes);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn this_computer_holds_the_first_layers_itself() {
+    let file = bc_infer::fixtures::tiny_model(6, true);
+    let (url, _) = serve(file.clone()).await;
+    let m = mesh(1).await;
+    // Device 0 is this computer (the coordinator), device 1 a lending device.
+    let addrs = vec![m.coordinator.addr(), m.devices[0].addr()];
+    let header = Source::parse_remote(&url).unwrap().header().await.unwrap();
+    let prompt: Vec<u32> = vec![1, 40, 41, 42, 43, 44];
+    let want = local_text(&file, &prompt, 16).await;
+
+    let progress = std::sync::Mutex::new(std::collections::HashMap::new());
+    let on_loading = |stage: usize, done: u64, total: u64| {
+        progress.lock().unwrap().insert(stage, (done, total));
+    };
+    let client = Client::open(&m.coordinator, &url, plan(&[(0, 0..3), (1, 3..6)]), &addrs, &on_loading).await.unwrap();
+    assert_eq!(progress.into_inner().unwrap().len(), 2, "both this computer and the device report their download");
+    let llm = Llm::new(&header, vec![client.clone()], None).unwrap();
+    let (got, _) = llm.generate(&prompt, 16, Sampling::default(), |_| {}).await.unwrap();
+    assert_eq!(got, want, "split between this computer and a device");
+    assert!(client.stage_ms.lock().unwrap().iter().all(|&ms| ms > 0.0), "both stages measured");
+
+    // The whole model on this computer: no network at all.
+    let alone = Client::open(&m.coordinator, &url, plan(&[(0, 0..6)]), &addrs, &|_, _, _| {}).await.unwrap();
+    let llm = Llm::new(&header, vec![alone], None).unwrap();
+    assert_eq!(llm.generate(&prompt, 16, Sampling::default(), |_| {}).await.unwrap().0, want);
+
+    // Only the first stage may be this computer's.
+    let err = Client::open(&m.coordinator, &url, plan(&[(1, 0..3), (0, 3..6)]), &addrs, &|_, _, _| {}).await.err().expect("refused");
+    assert!(format!("{err:#}").contains("must come first"), "{err:#}");
+}
+
 /// A real model over three devices: `BC_TEST_MODEL=<model.gguf> [BC_TEST_DRAFT=<draft.gguf>]
 /// cargo test -p bc-mesh --release --test llm real_model -- --ignored --nocapture`.
 #[tokio::test(flavor = "multi_thread")]
