@@ -237,7 +237,11 @@ async fn local_stage(endpoint: &Endpoint, model_url: &str, layers: std::ops::Ran
     tokio::pin!(build);
     loop {
         tokio::select! {
-            built = &mut build => return built.context("loading this computer's layers"),
+            built = &mut build => {
+                let (done, total) = *rx.borrow();
+                on_loading(0, done, total);
+                return built.context("loading this computer's layers");
+            }
             Ok(()) = rx.changed() => {
                 let (done, total) = *rx.borrow_and_update();
                 on_loading(0, done, total);
