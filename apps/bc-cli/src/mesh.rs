@@ -202,12 +202,15 @@ fn stage_devices(devices: &[MeshDevice]) -> Vec<&MeshDevice> {
 /// (device name, bytes fetched, bytes in all).
 async fn open_all(endpoint: &Endpoint, url: &str, plan: &Plan, usable: &[&MeshDevice], on_loading: &(dyn Fn(&str, u64, u64) + Send + Sync)) -> Result<Vec<Arc<Client>>> {
     let addrs: Vec<EndpointAddr> = usable.iter().map(|d| d.addr.clone()).collect();
-    let mut clients = Vec::new();
-    for p in &plan.pipelines {
-        let stage_loading = |i: usize, done: u64, total: u64| on_loading(&usable[p.stages[i].device].name, done, total);
-        clients.push(Client::open(endpoint, url, p.clone(), &addrs, &stage_loading).await?);
-    }
-    Ok(clients)
+    // Every pipeline at once, as every stage within one: all devices download together.
+    let opens = plan.pipelines.iter().map(|p| {
+        let addrs = &addrs;
+        async move {
+            let stage_loading = |i: usize, done: u64, total: u64| on_loading(&usable[p.stages[i].device].name, done, total);
+            Client::open(endpoint, url, p.clone(), addrs, &stage_loading).await
+        }
+    });
+    futures_util::future::try_join_all(opens).await
 }
 
 fn gb(bytes: u64) -> String {
@@ -258,8 +261,15 @@ impl Session {
         }
         let usable = stage_devices(&devices);
         status("Each device is downloading its own layers…");
+        // One line for all of them, since they download at the same time.
+        let progress = std::sync::Mutex::new(std::collections::BTreeMap::<String, (u64, u64)>::new());
         let clients = open_all(&endpoint, &url, &plan, &usable, &|device, done, total| {
-            status(&format!("{device} is downloading its layers: {} of {}", gb(done), gb(total)));
+            let line = {
+                let mut p = progress.lock().unwrap();
+                p.insert(device.to_string(), (done, total));
+                p.iter().map(|(d, (done, total))| format!("{d} {} of {}", gb(*done), gb(*total))).collect::<Vec<_>>().join(" · ")
+            };
+            status(&format!("Downloading layers: {line}"));
         })
         .await?;
         let llm = Arc::new(Llm::new(&header, clients, draft)?);

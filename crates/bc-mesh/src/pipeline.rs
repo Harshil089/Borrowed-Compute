@@ -39,45 +39,64 @@ pub struct Output {
 /// Called while stages load: stage index, bytes fetched, bytes in all.
 pub type OnLoading<'a> = &'a (dyn Fn(usize, u64, u64) + Send + Sync);
 
-/// Sets every stage up, last first, so each one is waiting when the one before it
-/// connects.
+/// Sets every stage up at once, so every device downloads its layers at the same time;
+/// each stage registers before it loads, so the one before it can always connect.
 pub async fn open(endpoint: &Endpoint, model: &str, targets: &[Target], on_loading: OnLoading<'_>) -> Result<(Input, Output)> {
     if targets.is_empty() {
         bail!("a pipeline needs at least one stage");
     }
     let session: u64 = rand::random();
     let count = targets.len();
-    let mut opened = Vec::with_capacity(count);
-    for i in (0..count).rev() {
+    let (progress, mut reports) = tokio::sync::mpsc::unbounded_channel::<(usize, u64, u64)>();
+    let mut stages = tokio::task::JoinSet::new();
+    for i in 0..count {
         let target = &targets[i];
-        let conn = tokio::time::timeout(CONNECT_TIMEOUT, endpoint.connect(target.addr.clone(), MESH_ALPN))
-            .await
-            .with_context(|| format!("stage {i} did not answer"))?
-            .with_context(|| format!("connecting to stage {i}"))?;
-        let (mut send, mut recv) = conn.open_bi().await?;
-        let next = targets.get(i + 1).map(|n| {
-            (n.addr.clone(), Ticket::sign(endpoint.secret_key(), session, target.addr.id, n.addr.id))
+        let next = targets.get(i + 1).map(|n| (n.addr.clone(), Ticket::sign(endpoint.secret_key(), session, target.addr.id, n.addr.id)));
+        let setup = StageSetup { session, index: i as u16, count: count as u16, model: model.into(), layers: target.layers.clone(), next };
+        let (endpoint, addr, progress) = (endpoint.clone(), target.addr.clone(), progress.clone());
+        stages.spawn(async move {
+            let opened = async {
+                let conn = tokio::time::timeout(CONNECT_TIMEOUT, endpoint.connect(addr, MESH_ALPN))
+                    .await
+                    .with_context(|| format!("stage {i} did not answer"))?
+                    .with_context(|| format!("connecting to stage {i}"))?;
+                let (mut send, mut recv) = conn.open_bi().await?;
+                send_msg(&mut send, &MeshMsg::Setup(setup)).await?;
+                loop {
+                    match recv_msg::<MeshMsg>(&mut recv).await? {
+                        MeshMsg::Ready => break,
+                        MeshMsg::Loading { done, total } => {
+                            let _ = progress.send((i, done, total));
+                        }
+                        MeshMsg::Error { reason } => bail!("stage {i}: {reason}"),
+                        other => bail!("stage {i}: unexpected reply {other:?}"),
+                    }
+                }
+                anyhow::Ok((conn, send, recv))
+            };
+            (i, opened.await)
         });
-        let setup = StageSetup {
-            session,
-            index: i as u16,
-            count: count as u16,
-            model: model.into(),
-            layers: target.layers.clone(),
-            next,
-        };
-        send_msg(&mut send, &MeshMsg::Setup(setup)).await?;
-        loop {
-            match recv_msg::<MeshMsg>(&mut recv).await? {
-                MeshMsg::Ready => break,
-                MeshMsg::Loading { done, total } => on_loading(i, done, total),
-                MeshMsg::Error { reason } => bail!("stage {i}: {reason}"),
-                other => bail!("stage {i}: unexpected reply {other:?}"),
-            }
-        }
-        opened.push((conn, send, recv));
     }
-    opened.reverse();
+    drop(progress);
+    let mut slots: Vec<Option<(Connection, SendStream, RecvStream)>> = (0..count).map(|_| None).collect();
+    // Progress from every stage as it comes; the first failure stops them all (dropping
+    // the set closes their connections, and the devices stop downloading).
+    loop {
+        tokio::select! {
+            Some((i, done, total)) = reports.recv() => on_loading(i, done, total),
+            joined = stages.join_next() => match joined {
+                Some(j) => {
+                    let (i, opened) = j?;
+                    slots[i] = Some(opened?);
+                }
+                None => break,
+            },
+        }
+    }
+    while let Ok((i, done, total)) = reports.try_recv() {
+        on_loading(i, done, total);
+    }
+    let opened: Vec<(Connection, SendStream, RecvStream)> = slots.into_iter().map(|s| s.expect("every stage answered")).collect();
     let conns: Vec<Connection> = opened.iter().map(|(c, _, _)| c.clone()).collect();
     let mut first = None;
     let mut last = None;
