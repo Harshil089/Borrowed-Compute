@@ -51,6 +51,20 @@ pub struct DeviceReport {
     pub mem_bw: f64,
     /// True when this device can run pipeline stages (it has an inference engine).
     pub engine: bool,
+    /// The GPU its engine runs layers on, if it has one.
+    #[serde(default)]
+    pub gpu: Option<GpuReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GpuReport {
+    pub name: String,
+    /// Memory for weights: free memory on a discrete card. On unified memory (Apple) the
+    /// GPU reads the same RAM the CPU does, so the device's free memory is what counts.
+    pub mem_bytes: u64,
+    pub unified: bool,
+    /// Bytes of weights a second it reads in a decoding product, as measured.
+    pub bw: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -124,19 +124,22 @@ pub struct Part {
     /// θᵢ per rotated pair: base^(−2i/d), divided by the model's frequency factor if it
     /// has one (Llama 3.1+ scales its low frequencies for long context).
     inv_freq: Vec<f32>,
+    /// The first layers (and maybe the head) on this device's GPU, when it has one.
+    gpu: Option<crate::gpu::Layers>,
 }
 
 /// One conversation's keys and values for a part's layers.
 pub struct Kv {
     k: Vec<Vec<f32>>,
     v: Vec<Vec<f32>>,
+    gpu: Option<crate::gpu::Cache>,
     pub len: usize,
 }
 
 impl Kv {
-    /// Bytes held.
+    /// Bytes held, in RAM and on the GPU.
     pub fn bytes(&self) -> usize {
-        self.k.iter().chain(&self.v).map(|x| x.len() * 4).sum()
+        self.k.iter().chain(&self.v).map(|x| x.len() * 4).sum::<usize>() + self.gpu.as_ref().map_or(0, |g| g.bytes())
     }
 }
 
@@ -175,14 +178,51 @@ impl Part {
             bail!("layers {layers:?} are past the model's {}", cfg.n_layer);
         }
         let factors = tensors.get("rope_freqs.weight").map(|t| t.to_f32());
-        let inv_freq = (0..cfg.rope_dim / 2)
+        let inv_freq: Vec<f32> = (0..cfg.rope_dim / 2)
             .map(|i| cfg.rope_base.powf(-2.0 * i as f32 / cfg.rope_dim as f32) / factors.as_ref().and_then(|f| f.get(i)).copied().unwrap_or(1.0))
             .collect();
-        Ok(Part { cfg, layers, blocks, embed, head, inv_freq })
+        let gpu = match crate::gpu::get() {
+            Some(g) => Self::on_gpu(g, &cfg, &blocks, head.as_ref(), &inv_freq)?,
+            None => None,
+        };
+        Ok(Part { cfg, layers, blocks, embed, head, inv_freq, gpu })
+    }
+
+    /// Layers the GPU's memory holds, leaving room for key/value caches: on unified memory
+    /// the weights are shared with the CPU and cost nothing more, so all of them go.
+    fn on_gpu(g: &'static crate::gpu::Gpu, cfg: &Config, blocks: &[Block], head: Option<&(Vec<f32>, Arc<QTensor>)>, inv_freq: &[f32]) -> Result<Option<crate::gpu::Layers>> {
+        let budget = if g.unified() { u64::MAX } else { (g.memory() as f64 * 0.85) as u64 };
+        let weights: Vec<crate::gpu::LayerWeights> = blocks
+            .iter()
+            .map(|b| crate::gpu::LayerWeights {
+                attn_norm: &b.attn_norm,
+                wq: &b.wq,
+                wk: &b.wk,
+                wv: &b.wv,
+                wo: &b.wo,
+                bias: [b.bq.as_deref(), b.bk.as_deref(), b.bv.as_deref()],
+                ffn_norm: &b.ffn_norm,
+                gate: &b.gate,
+                up: &b.up,
+                down: &b.down,
+            })
+            .collect();
+        crate::gpu::Layers::new(g, cfg, &weights, head.map(|(n, o)| (n.as_slice(), o)), inv_freq, budget)
+    }
+
+    /// The same part on the CPU only (for checking the GPU against it).
+    pub fn without_gpu(mut self) -> Self {
+        self.gpu = None;
+        self
+    }
+
+    /// Where this part runs: layers on the GPU (from the first) and whether the head is.
+    pub fn gpu_layers(&self) -> (usize, bool) {
+        self.gpu.as_ref().map_or((0, false), |g| (g.len(), g.has_head()))
     }
 
     pub fn new_kv(&self) -> Kv {
-        Kv { k: vec![Vec::new(); self.blocks.len()], v: vec![Vec::new(); self.blocks.len()], len: 0 }
+        Kv { k: vec![Vec::new(); self.blocks.len()], v: vec![Vec::new(); self.blocks.len()], gpu: self.gpu.as_ref().map(|g| g.new_cache()), len: 0 }
     }
 
     pub fn is_first(&self) -> bool {
@@ -220,7 +260,14 @@ impl Part {
             bail!("{} tokens are past the model's context of {}", pos + rows, c.context);
         }
         let kvd = c.kv_dim();
-        for (b, (kc, vc)) in self.blocks.iter().zip(kv.k.iter_mut().zip(kv.v.iter_mut())) {
+        let on_gpu = match (&self.gpu, kv.gpu.as_mut()) {
+            (Some(g), Some(cache)) => {
+                g.forward(c, x, rows, pos, cache)?;
+                g.len()
+            }
+            _ => 0,
+        };
+        for (b, (kc, vc)) in self.blocks.iter().zip(kv.k.iter_mut().zip(kv.v.iter_mut())).skip(on_gpu) {
             kc.truncate(pos * kvd);
             vc.truncate(pos * kvd);
             let n = rms_norm(x, &b.attn_norm, c.eps);
@@ -255,6 +302,9 @@ impl Part {
     /// Next-token scores for each row (rows × vocab).
     pub fn logits(&self, x: &[f32], rows: usize) -> Result<Vec<f32>> {
         let (norm, out) = self.head.as_ref().context("this part has no output head")?;
+        if let Some(scores) = self.gpu.as_ref().map(|g| g.logits(&self.cfg, x, rows)).transpose()?.flatten() {
+            return Ok(scores);
+        }
         let n = rms_norm(x, norm, self.cfg.eps);
         debug_assert_eq!(n.len(), rows * self.cfg.n_embd);
         Ok(out.matmul(&n, rows))
@@ -377,6 +427,67 @@ pub(crate) mod tests {
             let again = run(&[&whole], &mut kv1, &[40], 4);
             assert_eq!(again, one);
         }
+    }
+
+    #[test]
+    fn the_gpu_computes_what_the_cpu_does() {
+        if crate::gpu::get().is_none() {
+            eprintln!("no GPU here: skipped");
+            return;
+        }
+        for neox in [false, true] {
+            let file = tiny_model(4, neox);
+            let gpu = load_all(&file, 0..4, true, true);
+            assert_eq!(gpu.gpu_layers(), (4, true), "all of a small model goes on the GPU");
+            let cpu = load_all(&file, 0..4, true, true).without_gpu();
+            let (mut kg, mut kc) = ([gpu.new_kv()], [cpu.new_kv()]);
+            let prompt = [5, 9, 13, 2, 7, 1];
+            let close = |a: &[f32], b: &[f32]| {
+                let err = a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0f32, f32::max);
+                let top = b.iter().fold(0f32, |m, v| m.max(v.abs()));
+                assert!(err <= 0.02 * (1.0 + top), "max error {err} against scores up to {top}");
+            };
+            close(&run(&[&gpu], &mut kg, &prompt, 0), &run(&[&cpu], &mut kc, &prompt, 0));
+            close(&run(&[&gpu], &mut kg, &[40], 6), &run(&[&cpu], &mut kc, &[40], 6));
+            // On the GPU itself, results are exact: a batch scores each row as a
+            // one-token pass would, and a split model matches the whole one bit for bit.
+            let mut fresh = [gpu.new_kv()];
+            let all = run(&[&gpu], &mut fresh, &[5, 9, 13, 2, 7, 1, 40], 0);
+            let mut steps = [gpu.new_kv()];
+            run(&[&gpu], &mut steps, &prompt, 0);
+            let one = run(&[&gpu], &mut steps, &[40], 6);
+            assert_eq!(&all[6 * gpu.cfg.vocab..], &one[..]);
+            let a = load_all(&file, 0..1, true, false);
+            let b = load_all(&file, 1..4, false, true);
+            let mut ks = [a.new_kv(), b.new_kv()];
+            assert_eq!(run(&[&a, &b], &mut ks, &[5, 9, 13, 2, 7, 1, 40], 0), all);
+            // Going back cuts the GPU cache too.
+            assert_eq!(run(&[&gpu], &mut steps, &[40], 6), one);
+        }
+    }
+
+    #[test]
+    fn a_long_conversation_grows_the_gpu_cache() {
+        if crate::gpu::get().is_none() {
+            return;
+        }
+        let file = tiny_model(2, true);
+        let gpu = load_all(&file, 0..2, true, true);
+        let cpu = load_all(&file, 0..2, true, true).without_gpu();
+        // Past the first 256-token allocation and past one attention tile of 1024.
+        let prompt: Vec<u32> = (0..1100).map(|i| (i * 7 % 90) as u32 + 1).collect();
+        let (mut kg, mut kc) = ([gpu.new_kv()], [cpu.new_kv()]);
+        let mut g = Vec::new();
+        let mut c = Vec::new();
+        for (i, chunk) in prompt.chunks(300).enumerate() {
+            g = run(&[&gpu], &mut kg, chunk, i * 300);
+            c = run(&[&cpu], &mut kc, chunk, i * 300);
+        }
+        let v = gpu.cfg.vocab;
+        let (g, c) = (&g[g.len() - v..], &c[c.len() - v..]);
+        let err = g.iter().zip(c).map(|(x, y)| (x - y).abs()).fold(0f32, f32::max);
+        assert!(err < 0.05, "{err}");
+        assert!(kg[0].bytes() >= 1100 * 2 * 2 * 32 * 4);
     }
 
     #[test]

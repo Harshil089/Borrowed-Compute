@@ -12,5 +12,14 @@ serde.workspace = true
 reqwest.workspace = true
 tokio = { workspace = true, features = ["rt", "fs"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+metal = "0.33.0"
+
+# Loaded when the program starts, not linked: PCs without an NVIDIA driver run on the CPU.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+cudarc = { version = "0.19.10", default-features = false, features = ["driver", "nvrtc", "dynamic-loading", "cuda-12000", "std"] }
+
 [dev-dependencies]
+sha2.workspace = true
+hex.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

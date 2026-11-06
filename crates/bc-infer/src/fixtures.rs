@@ -48,7 +48,7 @@ pub fn tiny_model(layers: u32, neox: bool) -> Vec<u8> {
         (if neox { "qwen2.attention.head_count" } else { "llama.attention.head_count" }, Meta::U32(heads)),
         (if neox { "qwen2.attention.head_count_kv" } else { "llama.attention.head_count_kv" }, Meta::U32(kv_heads)),
         (if neox { "qwen2.feed_forward_length" } else { "llama.feed_forward_length" }, Meta::U32(ff as u32)),
-        (if neox { "qwen2.context_length" } else { "llama.context_length" }, Meta::U32(1024)),
+        (if neox { "qwen2.context_length" } else { "llama.context_length" }, Meta::U32(2048)),
         ("tokenizer.ggml.model", Meta::Str("llama".into())),
         ("tokenizer.ggml.tokens", Meta::Strs(tokens)),
         ("tokenizer.ggml.scores", Meta::F32s(vec![0.0; vocab as usize])),
@@ -57,4 +57,37 @@ pub fn tiny_model(layers: u32, neox: bool) -> Vec<u8> {
     ];
     let tensors: Vec<(&str, Vec<u64>, u32, Vec<u8>)> = tensors.iter().map(|(n, d, t, b)| (n.as_str(), d.clone(), *t, b.clone())).collect();
     gguf(&meta, &tensors)
+}
+
+/// A `rows`×`cols` tensor of `ty` with random weights and sane scales, for checking every
+/// block format's kernels against each other.
+pub fn random_tensor(ty: crate::quant::GgmlType, rows: usize, cols: usize, seed: u64) -> crate::quant::QTensor {
+    use crate::quant::{f32_to_f16, GgmlType::*};
+    let mut s = seed.wrapping_mul(0x9e3779b97f4a7c15) | 1;
+    let mut next = move || {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        s
+    };
+    let len = ty.bytes_for(rows * cols).expect("whole blocks");
+    let mut data: Vec<u8> = (0..len).map(|_| next() as u8).collect();
+    let (n, size) = ty.block();
+    let small = |next: &mut dyn FnMut() -> u64| f32_to_f16(((next() % 1000) as f32 + 1.0) / 40000.0).to_le_bytes();
+    for blk in data.chunks_exact_mut(size) {
+        match ty {
+            F32 => blk.copy_from_slice(&(((next() % 2001) as f32 - 1000.0) / 1000.0).to_le_bytes()),
+            F16 => blk.copy_from_slice(&f32_to_f16(((next() % 2001) as f32 - 1000.0) / 1000.0).to_le_bytes()),
+            BF16 => blk.copy_from_slice(&(((((next() % 2001) as f32 - 1000.0) / 1000.0).to_bits() >> 16) as u16).to_le_bytes()),
+            Q6K => blk[208..210].copy_from_slice(&small(&mut next)),
+            _ => {
+                blk[0..2].copy_from_slice(&small(&mut next));
+                if matches!(ty, Q4_1 | Q5_1 | Q4K | Q5K) {
+                    blk[2..4].copy_from_slice(&small(&mut next));
+                }
+            }
+        }
+    }
+    debug_assert_eq!(len, rows * cols / n * size);
+    crate::quant::QTensor::new(ty, rows, cols, data).expect("valid tensor")
 }

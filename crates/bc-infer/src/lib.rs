@@ -5,6 +5,7 @@
 #[doc(hidden)]
 pub mod fixtures;
 pub mod gguf;
+pub mod gpu;
 pub mod model;
 pub mod pool;
 pub mod quant;
