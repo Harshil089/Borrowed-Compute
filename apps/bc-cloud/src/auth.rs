@@ -242,7 +242,7 @@ async fn account_for(state: &AppState, id: &Identity, now: i64) -> ApiResult<(i6
                         sqlx::query_as("select count(*) from accounts").fetch_one(&state.db).await?;
                     if accounts > 0 {
                         return Err(ApiError::forbidden(
-                            "this Mac's cloud belongs to another account; sign in with the account used on the Mac",
+                            "this computer's account belongs to someone else: sign in with that account, or keep your own account on a computer of yours",
                         ));
                     }
                 }
