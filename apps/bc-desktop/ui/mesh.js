@@ -129,6 +129,7 @@ listen("mesh-phase", (e) => {
 });
 
 $("mesh-measure").addEventListener("click", measure);
+$("mesh-cancel").addEventListener("click", () => invoke("mesh_stop").catch((e) => message(String(e))));
 $("mesh-run").addEventListener("click", start);
 $("mesh-stop").addEventListener("click", async () => {
   await invoke("mesh_stop").catch((e) => message(String(e)));
