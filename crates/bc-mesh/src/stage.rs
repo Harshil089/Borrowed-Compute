@@ -155,6 +155,8 @@ impl Host {
                 loop {
                     tokio::select! {
                         built = &mut build => break built,
+                        // The coordinator gave up (or was stopped): stop downloading.
+                        _ = conn.closed() => bail!("the device that set this stage up went away"),
                         Ok(()) = rx.changed() => {
                             let (done, total) = *rx.borrow_and_update();
                             if sent.elapsed() >= PROGRESS_EVERY || done == total {

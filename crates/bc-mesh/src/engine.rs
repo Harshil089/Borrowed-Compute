@@ -69,11 +69,18 @@ pub fn held_bytes() -> u64 {
 pub fn factory() -> StageFactory {
     Arc::new(|setup: StageSetup, loading: Loading| {
         Box::pin(async move {
-            let key = (setup.session, setup.layers.start);
-            let stage = load(setup, loading).await;
-            if stage.is_err() {
-                hosted().lock().unwrap().remove(&key);
+            // Unlisted if loading fails or is dropped midway (the coordinator went away).
+            struct Unlist((u64, u32), bool);
+            impl Drop for Unlist {
+                fn drop(&mut self) {
+                    if !self.1 {
+                        hosted().lock().unwrap().remove(&self.0);
+                    }
+                }
             }
+            let mut unlist = Unlist((setup.session, setup.layers.start), false);
+            let stage = load(setup, loading).await;
+            unlist.1 = stage.is_ok();
             stage.map(|s| Box::new(s) as Box<dyn Stage>)
         })
     })

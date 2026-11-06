@@ -15,6 +15,8 @@ use crate::{err_chain, AppState, CmdResult};
 #[derive(Default)]
 pub struct MeshState {
     running: Mutex<Option<Running>>,
+    /// Stops a start still in progress; Stop must not wait for it to finish.
+    starting: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
 
 struct Running {
@@ -191,13 +193,17 @@ pub async fn mesh_start(app: AppHandle, state: State<'_, AppState>, mesh: State<
     let ep = endpoint(&state).await?;
     let goal = if throughput { Goal::Throughput } else { Goal::Latency };
     let phase = app.clone();
-    let session = Arc::new(
-        Session::start(ep, targets, &model, goal, None, move |s| {
+    let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
+    *mesh.starting.lock().unwrap() = Some(cancel);
+    // Dropping the start closes its connections, and the devices stop downloading.
+    let started = tokio::select! {
+        s = Session::start(ep, targets, &model, goal, None, move |s| {
             let _ = phase.emit("mesh-phase", s.to_string());
-        })
-        .await
-        .map_err(err_chain)?,
-    );
+        }) => s.map_err(err_chain),
+        _ = cancelled => Err("Stopped before it finished starting.".to_string()),
+    };
+    mesh.starting.lock().unwrap().take();
+    let session = Arc::new(started?);
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.map_err(|e| format!("port {port}: {e}"))?;
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let home = state.home.clone();
@@ -235,6 +241,10 @@ pub async fn mesh_start(app: AppHandle, state: State<'_, AppState>, mesh: State<
 /// Stops serving. The devices drop their layers once the grace period passes.
 #[tauri::command]
 pub async fn mesh_stop(mesh: State<'_, MeshState>) -> CmdResult<()> {
+    if let Some(cancel) = mesh.starting.lock().unwrap().take() {
+        let _ = cancel.send(());
+        return Ok(());
+    }
     if let Some(r) = mesh.running.lock().await.take() {
         let _ = r.stop.send(());
         r.session.llm.set_replicas(Vec::new());
