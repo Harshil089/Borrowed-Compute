@@ -12,8 +12,15 @@ use crate::quant::QTensor;
 /// Ranges this far apart or closer are fetched as one request.
 const MERGE_GAP: u64 = 1 << 20;
 /// Requests are cut into pieces of this size and fetched in parallel.
-const PIECE: u64 = 32 << 20;
+const PIECE: u64 = 8 << 20;
 const PARALLEL: usize = 6;
+/// Tries per piece before a download gives up.
+const PIECE_TRIES: u32 = 5;
+/// A piece still under MIN_BYTES_PER_SEC this many seconds in is dropped and tried again.
+const SLOW_AFTER_SECS: f64 = 20.0;
+const MIN_BYTES_PER_SEC: f64 = 128.0 * 1024.0;
+/// Download progress is reported at least this many bytes apart.
+const REPORT_EVERY: u64 = 4 << 20;
 
 #[derive(Debug, Clone)]
 pub enum Source {
@@ -85,6 +92,33 @@ impl Source {
     }
 
     pub async fn read(&self, start: u64, end: u64) -> Result<Vec<u8>> {
+        self.read_counted(start, end, &|_| {}).await
+    }
+
+    /// One piece of a download, tried again on a fresh connection when it fails or
+    /// crawls. Bytes of a failed try are taken back from the progress count.
+    async fn read_piece(&self, start: u64, end: u64, arrived: &(dyn Fn(i64) + Send + Sync)) -> Result<Vec<u8>> {
+        let mut tries = 0;
+        loop {
+            let got = std::sync::atomic::AtomicU64::new(0);
+            let count = |n: u64| {
+                got.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+                arrived(n as i64);
+            };
+            match self.read_counted(start, end, &count).await {
+                Ok(b) => return Ok(b),
+                Err(_) if tries + 1 < PIECE_TRIES => {
+                    tries += 1;
+                    arrived(-(got.into_inner() as i64));
+                }
+                Err(e) => return Err(e.context(format!("bytes {start}..{end}, after {PIECE_TRIES} tries"))),
+            }
+        }
+    }
+
+    /// [`Source::read`], telling `arrived` about each piece of the body as it comes in, so
+    /// a download of gigabytes shows progress by the megabyte.
+    async fn read_counted(&self, start: u64, end: u64, arrived: &(dyn Fn(u64) + Send + Sync)) -> Result<Vec<u8>> {
         match self {
             Source::Split(_) => bail!("a split model is read file by file"),
             Source::File(p) => {
@@ -99,6 +133,7 @@ impl Source {
                     Ok(buf)
                 })
                 .await?
+                .inspect(|b| arrived(b.len() as u64))
             }
             Source::Http(url) => {
                 let resp = client()
@@ -114,7 +149,20 @@ impl Source {
                 if status.as_u16() != 206 {
                     bail!("{url} answered {status} to a range request; it must serve byte ranges");
                 }
-                Ok(resp.bytes().await?.to_vec())
+                let mut resp = resp;
+                let mut body = Vec::with_capacity((end - start) as usize);
+                let started = std::time::Instant::now();
+                while let Some(chunk) = resp.chunk().await? {
+                    arrived(chunk.len() as u64);
+                    body.extend_from_slice(&chunk);
+                    // A connection to a slow server trickles but never times out; drop it
+                    // and let a fresh one (often to a faster server) take over.
+                    let secs = started.elapsed().as_secs_f64();
+                    if secs > SLOW_AFTER_SECS && (body.len() as f64) < MIN_BYTES_PER_SEC * secs {
+                        bail!("{url} is sending under {} KB/s", MIN_BYTES_PER_SEC as u64 >> 10);
+                    }
+                }
+                Ok(body)
             }
         }
     }
@@ -177,16 +225,27 @@ impl Source {
             .flat_map(|&(s, e)| (s..e).step_by(PIECE as usize).map(move |p| (p, (p + PIECE).min(e))))
             .collect();
         let total: u64 = pieces.iter().map(|(s, e)| e - s).sum();
-        let done = std::sync::atomic::AtomicU64::new(0);
+        // Bytes as they arrive, reported every REPORT_EVERY and at the end.
+        // Negative when a failed try's bytes are taken back.
+        let done = std::sync::atomic::AtomicI64::new(0);
+        let reported = std::sync::atomic::AtomicU64::new(0);
+        let arrived = |n: i64| {
+            use std::sync::atomic::Ordering::Relaxed;
+            let now = (done.fetch_add(n, Relaxed) + n).max(0) as u64;
+            if now.abs_diff(reported.load(Relaxed)) >= REPORT_EVERY || now == total {
+                reported.store(now, Relaxed);
+                progress(now, total);
+            }
+        };
         let mut fetched: Vec<(u64, Vec<u8>)> = Vec::with_capacity(pieces.len());
         for batch in pieces.chunks(PARALLEL) {
-            let results = futures_join(batch.iter().map(|&(s, e)| async move { self.read(s, e).await.map(|b| (s, e, b)) })).await;
+            let arrived = &arrived;
+            let results = futures_join(batch.iter().map(|&(s, e)| async move { self.read_piece(s, e, arrived).await.map(|b| (s, e, b)) })).await;
             for r in results {
                 let (s, e, b) = r?;
                 if b.len() as u64 != e - s {
                     bail!("the model file ended early");
                 }
-                progress(done.fetch_add(e - s, std::sync::atomic::Ordering::Relaxed) + (e - s), total);
                 fetched.push((s, b));
             }
         }
@@ -220,7 +279,15 @@ impl Source {
 fn client() -> reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     CLIENT
-        .get_or_init(|| reqwest::Client::builder().user_agent("borrowed-compute").build().expect("http client"))
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .user_agent("borrowed-compute")
+                // No bytes for this long means a dead connection, not a slow one.
+                .read_timeout(std::time::Duration::from_secs(20))
+                .connect_timeout(std::time::Duration::from_secs(20))
+                .build()
+                .expect("http client")
+        })
         .clone()
 }
 
@@ -282,7 +349,10 @@ mod tests {
         let src = Source::File(path);
         let h = src.header().await.unwrap();
         let wanted = crate::model::needed(&h, &(1..2), false, false);
-        let map = src.tensors(&wanted, |_, _| {}).await.unwrap();
+        let last = std::sync::Mutex::new((0, 0));
+        let map = src.tensors(&wanted, |done, total| *last.lock().unwrap() = (done, total)).await.unwrap();
+        let (done, total) = last.into_inner().unwrap();
+        assert!(total > 0 && done == total, "the last report says everything arrived: {done} of {total}");
         assert!(map.keys().all(|k| k.starts_with("blk.1.")) && map.len() == wanted.len());
         let t = h.tensor("blk.1.attn_q.weight").unwrap();
         assert_eq!(map["blk.1.attn_q.weight"].data[..], file[t.range.start as usize..t.range.end as usize]);
