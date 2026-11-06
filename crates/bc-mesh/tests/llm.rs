@@ -15,6 +15,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Serves `file` over plain HTTP on localhost, honouring `Range`. Counts bytes served.
 async fn serve(file: Vec<u8>) -> (String, Arc<std::sync::atomic::AtomicU64>) {
+    serve_slow(file, Duration::ZERO).await
+}
+
+/// [`serve`], answering each request only after `delay`, like a slow download.
+async fn serve_slow(file: Vec<u8>, delay: Duration) -> (String, Arc<std::sync::atomic::AtomicU64>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/model.gguf", listener.local_addr().unwrap());
     let file = Arc::new(file);
@@ -27,6 +32,7 @@ async fn serve(file: Vec<u8>) -> (String, Arc<std::sync::atomic::AtomicU64>) {
             tokio::spawn(async move {
                 let mut buf = vec![0u8; 8192];
                 let n = s.read(&mut buf).await.unwrap_or(0);
+                tokio::time::sleep(delay).await;
                 let req = String::from_utf8_lossy(&buf[..n]).to_string();
                 let range = req.lines().find_map(|l| l.to_lowercase().strip_prefix("range: bytes=").map(String::from));
                 let (start, end) = match range.and_then(|r| r.split_once('-').map(|(a, b)| (a.trim().parse::<usize>().ok(), b.trim().parse::<usize>().ok()))) {
@@ -273,6 +279,33 @@ async fn this_computer_holds_the_first_layers_itself() {
     // Only the first stage may be this computer's.
     let err = Client::open(&m.coordinator, &url, plan(&[(1, 0..3), (0, 3..6)]), &addrs, &|_, _, _| {}).await.err().expect("refused");
     assert!(format!("{err:#}").contains("must come first"), "{err:#}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancelled_start_frees_the_models_memory() {
+    let file = bc_infer::fixtures::tiny_model(6, false);
+    let (url, _) = serve_slow(file.clone(), Duration::from_millis(1500)).await;
+    let m = mesh(1).await;
+    let addrs: Vec<_> = m.devices.iter().map(|d| d.addr()).collect();
+    // A first run with half the layers leaves them cached for a while, for a quick restart.
+    let first = Client::open(&m.coordinator, &url, plan(&[(0, 0..3)]), &addrs, &|_, _, _| {}).await.unwrap();
+    drop(first);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(bc_mesh::engine::held_bytes_of(&url) > 0, "kept for the grace period");
+    // A second start needs the other half from the slow server and is cancelled midway:
+    // every weight of that model leaves memory, the cached half included.
+    let start = tokio::spawn({
+        let (ep, url, addrs) = (m.coordinator.clone(), url.clone(), addrs.clone());
+        async move { Client::open(&ep, &url, plan(&[(0, 0..6)]), &addrs, &|_, _, _| {}).await.map(|_| ()) }
+    });
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    start.abort();
+    let freed = async {
+        while bc_mesh::engine::held_bytes_of(&url) > 0 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), freed).await.expect("the cancelled model left memory");
 }
 
 /// A real model over three devices: `BC_TEST_MODEL=<model.gguf> [BC_TEST_DRAFT=<draft.gguf>]

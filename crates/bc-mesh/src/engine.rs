@@ -60,6 +60,21 @@ fn prune() {
     w.headers.retain(|u, _| used.contains(u));
 }
 
+/// Drops every cached tensor of the model at `url` that no running stage uses: after a
+/// cancelled start, its weights leave memory at once instead of after [`GRACE`].
+pub fn forget(url: &str) {
+    let mut w = weights().lock().unwrap();
+    w.tensors.retain(|(u, _), c| u != url || Arc::strong_count(&c.tensor) > 1);
+    if !w.tensors.keys().any(|(u, _)| u == url) {
+        w.headers.remove(url);
+    }
+}
+
+/// Bytes of the model at `url` held in memory now.
+pub fn held_bytes_of(url: &str) -> u64 {
+    weights().lock().unwrap().tensors.iter().filter(|((u, _), _)| u == url).map(|(_, c)| c.tensor.data.len() as u64).sum()
+}
+
 /// Bytes of weights held in memory now (for the UI and tests).
 pub fn held_bytes() -> u64 {
     weights().lock().unwrap().tensors.values().map(|c| c.tensor.data.len() as u64).sum()
@@ -69,18 +84,29 @@ pub fn held_bytes() -> u64 {
 pub fn factory() -> StageFactory {
     Arc::new(|setup: StageSetup, loading: Loading| {
         Box::pin(async move {
-            // Unlisted if loading fails or is dropped midway (the coordinator went away).
-            struct Unlist((u64, u32), bool);
+            // If loading fails or is dropped midway (the start was cancelled, or the
+            // coordinator went away): unlisted, and the model's weights dropped from memory
+            // at once rather than kept for a rebalance that will not come. Forgotten again a
+            // moment later, once the dropped load has let go of what it held.
+            struct Unlist((u64, u32), String, bool);
             impl Drop for Unlist {
                 fn drop(&mut self) {
-                    if !self.1 {
+                    if !self.2 {
                         hosted().lock().unwrap().remove(&self.0);
+                        forget(&self.1);
+                        let url = self.1.clone();
+                        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                            rt.spawn(async move {
+                                tokio::time::sleep(Duration::from_millis(200)).await;
+                                forget(&url);
+                            });
+                        }
                     }
                 }
             }
-            let mut unlist = Unlist((setup.session, setup.layers.start), false);
+            let mut unlist = Unlist((setup.session, setup.layers.start), setup.model.clone(), false);
             let stage = load(setup, loading).await;
-            unlist.1 = stage.is_ok();
+            unlist.2 = stage.is_ok();
             stage.map(|s| Box::new(s) as Box<dyn Stage>)
         })
     })
