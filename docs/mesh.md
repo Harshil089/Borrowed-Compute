@@ -40,9 +40,9 @@ Stages that never paired with each other still have to talk. The coordinator sig
 
 ### 3.2 Latency or throughput: the planner's two goals
 
-Measured inputs per device: free memory, memory bandwidth. Per link: round-trip time and upload rate. The probe measures all of them (`probe.rs`), for every paired device at once.
+Measured inputs per device: free memory, memory bandwidth, and its GPU if it has one (name, memory for weights, and the speed a real decoding product reaches on it). Per link: round-trip time and upload rate. The probe measures all of them (`probe.rs`), for every paired device at once.
 
-Decoding one token reads every weight once, so a layer's time on a device is its bytes divided by the device's memory bandwidth (with 70% efficiency). That gives two different optimal placements (`plan.rs`):
+Decoding one token reads every weight once, so a layer's time on a device is its bytes divided by the speed it reads them at. A device has up to two tiers (`stage_secs`): the layers its GPU holds run at the GPU's measured speed, the rest at 70% of its RAM's copy bandwidth. On Apple's unified memory the GPU reaches every layer in RAM; a discrete card holds what fits in 85% of its free memory, and the engine puts a stage's first layers there and the rest on the CPU. Each layer's cost only grows as a stage grows, so filling layer by layer where the next one costs least is optimal: GPU memory anywhere first, then the fastest RAM. That gives two different optimal placements (`plan.rs`):
 
 - **One conversation (latency).** The token visits every stage in turn, so time per token = the sum of all stages' work + all hops. Adding devices never makes one conversation faster; it only adds hops. The planner fills the fastest devices first and uses only as many as memory requires. **Many devices exist to fit bigger models, not to speed one up.**
 - **Many requests (throughput).** With a request in flight on every stage, the slowest stage sets the pace. The planner balances layers so each stage takes equal time (assigning each layer where the stage total stays lowest, which is optimal for the slowest stage). When devices can hold the whole model, or a small group can, it makes several independent pipelines (replicas) instead of one long one, choosing the pipeline with the most tokens a second per device used. Two 2-device replicas serve as much as one 4-device pipeline with half the hops.
@@ -132,6 +132,17 @@ The inner sum is in i32 and compiles to the CPU's integer multiply-add. This is 
 | Qwen2.5-0.5B-Instruct (Q4_K_M) | "The capital of France is Paris." |
 | Llama-3.2-1B-Instruct (Q4_K_M) | "391" for 17×23, "Tokyo" for Japan's capital |
 
+### 4.1 On a GPU (`gpu/`)
+
+Decoding is bandwidth-bound, and a GPU reads memory several times faster than a CPU's cores can, so a part runs on the device's GPU whenever there is one, with no setting: **Metal** on a Mac (Apple's GPUs, what PyTorch calls MPS), **CUDA** on an NVIDIA card elsewhere. `BC_INFER_GPU=0` turns it off; `BC_INFER_GPU=debug` says why a GPU was not used.
+
+- **A whole layer per trip.** RMSNorm, the seven products, biases, RoPE, the key/value cache append, attention and SwiGLU all run on the GPU, every layer of a pass in one command buffer: one trip to the GPU per pass, not one per product. The key/value cache lives on the card and grows by doubling.
+- **One kernel source, two backends.** `kernels.h` is plain C both compilers take. Metal compiles it when the app starts. CUDA gets it ahead of time as PTX (`kernels.ptx`, built by `build-ptx.sh` with clang alone), which the NVIDIA driver compiles for whatever card it finds: users need only the driver, not the CUDA Toolkit. A test fails if `kernels.ptx` is older than its source.
+- **Weights stay in their block format** (every format the CPU reads). The common ones (Q4_0, Q8_0, Q5_0, Q4_K, Q5_K, Q6_K) have wide-load paths: each lane of a 32-wide SIMD group takes a whole group of 32 weights, reads two or four weight bytes and four inputs per load, and the lanes sum with a SIMD reduction. Attention uses an online softmax over tiles of 1,024 positions (Milakov and Gimelshein; FlashAttention), so any context length works with fixed on-chip memory.
+- **No copy on a Mac.** Weights live in page-aligned memory (`quant::Bytes`), and each Metal buffer wraps those very pages (`newBufferWithBytesNoCopy`), so the GPU gets the whole model at no extra RAM. On a discrete card weights are copied into its memory; layers that do not fit run on the CPU after the ones that do.
+- **Checked before use.** At startup the GPU's product is compared with the CPU's on every weight format; on any mismatch the engine stays on the CPU and says why. On the GPU itself results are exact and repeatable: no atomics, fixed reduction order, so a batch scores each row exactly as a one-row pass does (speculative checking relies on it) and a split model matches the whole one bit for bit. CPU and GPU round differently (the CPU quantizes inputs to int8 per block, the GPU multiplies in f32), as any two kinds of hardware do; a mixed pipeline is still exact across its own hops.
+- **Measured.** On this M2 (with the screen and other apps using the GPU): plain copies reach 72 GB/s; a Q4_0 product 26 to 30 GB/s, against about 5 GB/s on its CPU cores. Llama 3.2 1B writes 23.8 tokens a second on the GPU against 9.9 on the CPU, the same text, and a split still matches the whole model.
+
 ## 5. The mesh, end to end
 
 **Lending device** (`bc_mesh::engine`, served by the agent to paired devices while lending):
@@ -201,6 +212,7 @@ The planner's throughput split assigns each layer where the stage total stays sm
 
 ## 7. Limits and next steps
 
-- **CPU only.** Metal and CUDA kernels would multiply per-device speed; the mesh does not change.
+- **CUDA is untested on a card.** The CUDA backend compiles, its kernels are the ones Metal runs, and its PTX is generated and checked for staleness, but no NVIDIA GPU has run it yet; the startup check keeps a broken one on the CPU. AMD and Intel GPUs run on the CPU.
+- **GPU products reach about 40% of the M2's bandwidth.** llama.cpp's hand-tuned Metal kernels reach more; several rows per SIMD group and simdgroup matrix instructions for prompts are the next steps.
 - **Nothing drifts across devices.** The wire is exact, so any split writes what the whole model writes on one device. The engine's own products quantize each input row to int8 per block of 32, as llama.cpp does; that is part of the model's numerics on every device alike, not something the network adds.
 - **Single conversation speed.** Adding devices fits larger models and serves more requests at once; one conversation is fastest on the fewest, fastest devices (3.2).

@@ -9,7 +9,7 @@ use bc_net::{recv_msg, send_msg, MESH_ALPN};
 use iroh::{Endpoint, EndpointAddr};
 use serde::{Deserialize, Serialize};
 
-use crate::msg::{DeviceReport, MeshMsg};
+use crate::msg::{DeviceReport, GpuReport, MeshMsg};
 
 const PINGS: usize = 5;
 const BULK_BYTES: usize = 2 << 20;
@@ -126,7 +126,17 @@ pub async fn report(engine: bool) -> DeviceReport {
         mem_available,
         mem_bw,
         engine,
+        gpu: if engine { tokio::task::spawn_blocking(gpu).await.unwrap_or(None) } else { None },
     }
+}
+
+/// The engine's GPU and its measured speed, once per process (the measurement reads a
+/// 38 MB matrix eight times).
+fn gpu() -> Option<GpuReport> {
+    static GPU: OnceLock<Option<(String, bool, f64)>> = OnceLock::new();
+    let (name, unified, bw) = GPU.get_or_init(|| bc_infer::gpu::get().and_then(|g| Some((g.name.clone(), g.unified(), g.bandwidth().ok()?)))).clone()?;
+    let g = bc_infer::gpu::get()?;
+    Some(GpuReport { name, mem_bytes: if unified { 0 } else { g.memory() }, unified, bw })
 }
 
 /// Total and available memory. macOS can report no available memory at all under

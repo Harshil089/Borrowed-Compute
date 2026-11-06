@@ -426,7 +426,7 @@ async fn mesh(cloud: &CloudClient, key_path: &std::path::Path, action: MeshActio
     for d in &devices {
         match &d.report {
             Ok(r) => println!(
-                "{:<20} {:<6} {:>7.1} ms  {:>8.1} Mbit/s up  {:>5.1}/{:<5.1} GB free  {:>5.1} GB/s memory  {}",
+                "{:<20} {:<6} {:>7.1} ms  {:>8.1} Mbit/s up  {:>5.1}/{:<5.1} GB free  {:>5.1} GB/s memory  {}  {}",
                 d.name,
                 if r.via_relay { "relay" } else { "direct" },
                 r.rtt_ms,
@@ -435,6 +435,7 @@ async fn mesh(cloud: &CloudClient, key_path: &std::path::Path, action: MeshActio
                 gb(r.device.mem_total),
                 r.device.mem_bw / 1e9,
                 r.device.os,
+                r.device.gpu.as_ref().map_or("CPU only".to_string(), |g| format!("GPU {} at {:.0} GB/s", g.name, g.bw / 1e9)),
             ),
             Err(e) => println!("{:<20} unreachable: {e}", d.name),
         }

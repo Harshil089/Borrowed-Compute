@@ -1,0 +1,4 @@
+# The PTX test hashes these byte for byte; Windows checkouts must not add CR.
+crates/bc-infer/src/gpu/cuda.cu text eol=lf
+crates/bc-infer/src/gpu/kernels.h text eol=lf
+crates/bc-infer/src/gpu/kernels.ptx text eol=lf

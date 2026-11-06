@@ -285,7 +285,7 @@ mod tests {
         let map = src.tensors(&wanted, |_, _| {}).await.unwrap();
         assert!(map.keys().all(|k| k.starts_with("blk.1.")) && map.len() == wanted.len());
         let t = h.tensor("blk.1.attn_q.weight").unwrap();
-        assert_eq!(map["blk.1.attn_q.weight"].data, file[t.range.start as usize..t.range.end as usize]);
+        assert_eq!(map["blk.1.attn_q.weight"].data[..], file[t.range.start as usize..t.range.end as usize]);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

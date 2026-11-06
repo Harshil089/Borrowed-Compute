@@ -49,6 +49,7 @@ function renderDevices(devices) {
             <span class="kv"><b>Upload</b> <span class="num">${fmt(d.up_mbps, 1)}<i>Mbit/s</i></span></span>
             <span class="kv"><b>Free memory</b> <span class="num">${fmt(d.free_gb, 1)}<i>of ${fmt(d.total_gb)} GB</i></span></span>
             <span class="kv"><b>Memory speed</b> <span class="num">${fmt(d.mem_gbs, 1)}<i>GB/s</i></span></span>
+            <span class="kv"><b>GPU</b> ${d.gpu ? esc(d.gpu) : "none, runs on the CPU"}</span>
           </span>
         </span>
         ${pill}

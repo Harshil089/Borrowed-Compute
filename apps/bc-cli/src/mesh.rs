@@ -102,15 +102,7 @@ pub fn plan_for<'a>(model: &Model, devices: &'a [MeshDevice], goal: Goal, tokens
 pub fn plan_with<'a>(model: &Model, devices: &'a [MeshDevice], pairs: &Pairs, goal: Goal, tokens_per_pass: f64) -> (Plan, Vec<&'a MeshDevice>) {
     let usable: Vec<&MeshDevice> = devices.iter().filter(|d| d.report.is_ok()).collect();
     let reports: Vec<&LinkReport> = usable.iter().map(|d| d.report.as_ref().unwrap()).collect();
-    let specs: Vec<Device> = usable
-        .iter()
-        .zip(&reports)
-        .map(|(d, r)| Device {
-            name: d.name.clone(),
-            mem_bytes: (r.device.mem_available as f64 * MEMORY_SHARE) as u64,
-            mem_bw: r.device.mem_bw,
-        })
-        .collect();
+    let specs: Vec<Device> = usable.iter().zip(&reports).map(|(d, r)| device_spec(&d.name, r)).collect();
     let mut links = Links::from_coordinator(&reports.iter().map(|r| Link { rtt_ms: r.rtt_ms, bw: r.up_bytes_s }).collect::<Vec<_>>());
     if usable.len() == devices.len() {
         for &((i, j), link) in pairs {
@@ -119,6 +111,19 @@ pub fn plan_with<'a>(model: &Model, devices: &'a [MeshDevice], pairs: &Pairs, go
     }
     let opts = Options { goal, tokens_per_pass, ..Default::default() };
     (plan::plan(model, &specs, &links, &opts), usable)
+}
+
+/// What the planner knows of a device from its report: its memory, and its GPU's when it
+/// has one (on unified memory the GPU reaches all of it; a discrete card holds what fits
+/// in 85% of its free memory, as the engine does).
+pub fn device_spec(name: &str, r: &LinkReport) -> Device {
+    let mem_bytes = (r.device.mem_available as f64 * MEMORY_SHARE) as u64;
+    let (gpu_bytes, gpu_bw) = match &r.device.gpu {
+        Some(g) if g.unified => (mem_bytes, g.bw),
+        Some(g) => ((g.mem_bytes as f64 * 0.85) as u64, g.bw),
+        None => (0, 0.0),
+    };
+    Device { name: name.into(), mem_bytes, mem_bw: r.device.mem_bw, gpu_bytes, gpu_bw }
 }
 
 pub fn find_model(name: &str) -> Option<Model> {
@@ -221,17 +226,16 @@ impl Session {
         let mut s = self.state.lock().await;
         let usable: Vec<MeshDevice> = stage_devices(&s.devices).iter().map(|d| MeshDevice { name: d.name.clone(), addr: d.addr.clone(), report: d.report.clone() }).collect();
         let reports: Vec<&LinkReport> = usable.iter().map(|d| d.report.as_ref().unwrap()).collect();
-        let mut specs: Vec<Device> = usable
-            .iter()
-            .zip(&reports)
-            .map(|(d, r)| Device { name: d.name.clone(), mem_bytes: (r.device.mem_available as f64 * MEMORY_SHARE) as u64, mem_bw: r.device.mem_bw })
-            .collect();
+        let mut specs: Vec<Device> = usable.iter().zip(&reports).map(|(d, r)| device_spec(&d.name, r)).collect();
         for c in self.llm.replicas() {
             for (stage, ms) in c.plan.stages.iter().zip(c.stage_ms.lock().unwrap().iter()) {
-                let layers = (stage.layers.end - stage.layers.start) as f64;
-                if *ms > 0.0 && layers > 0.0 {
-                    // Inverse of plan's time model: ms = layers · bytes / (bw · 0.7).
-                    specs[stage.device].mem_bw = layers * self.spec.layer_bytes as f64 / (*ms as f64 / 1000.0) / 0.7;
+                let predicted = plan::stage_secs(&self.spec, &specs[stage.device], stage.layers.end - stage.layers.start) * 1000.0;
+                if *ms > 0.0 && predicted > 0.0 {
+                    // The device is as much faster or slower as measured, GPU and CPU alike.
+                    let d = &mut specs[stage.device];
+                    let k = predicted / *ms as f64;
+                    d.mem_bw *= k;
+                    d.gpu_bw *= k;
                 }
             }
         }

@@ -80,13 +80,19 @@ pub fn catalog() -> Vec<Model> {
     ]
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Device {
     pub name: String,
     /// Memory this device can give the model (weights and its share of the KV cache).
     pub mem_bytes: u64,
     /// Measured memory bandwidth, bytes a second.
     pub mem_bw: f64,
+    /// Weights its GPU holds (all of `mem_bytes` on unified memory); 0 without a GPU.
+    #[serde(default)]
+    pub gpu_bytes: u64,
+    /// Bytes of weights a second its GPU reads in a decoding product, as measured.
+    #[serde(default)]
+    pub gpu_bw: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -196,6 +202,16 @@ fn layer_secs(model: &Model, d: &Device) -> f64 {
     model.layer_bytes as f64 / (d.mem_bw * BANDWIDTH_EFFICIENCY).max(1.0)
 }
 
+/// Seconds a stage of `n` layers on `d` takes per token: the layers its GPU holds at the
+/// GPU's measured speed (the engine puts a stage's first layers there), the rest at the
+/// CPU's. Never less per layer as `n` grows, which the splits below rely on.
+pub fn stage_secs(model: &Model, d: &Device, n: u32) -> f64 {
+    let on_gpu = if d.gpu_bw > 0.0 { (d.gpu_bytes / model.layer_bytes.max(1)).min(n as u64) as u32 } else { 0 };
+    let gpu_layer = model.layer_bytes as f64 / d.gpu_bw.max(1.0);
+    // A GPU slower than the CPU (never seen, but measured) is not used for more layers.
+    on_gpu as f64 * gpu_layer.min(layer_secs(model, d)) + (n - on_gpu) as f64 * layer_secs(model, d)
+}
+
 /// Layers each device in `order` can hold, given which ends carry the extras.
 fn caps(model: &Model, devices: &[Device], order: &[usize]) -> Vec<u32> {
     let last = order.len() - 1;
@@ -216,29 +232,20 @@ fn split(model: &Model, devices: &[Device], order: &[usize], goal: Goal) -> Opti
     if caps.iter().map(|&c| c as u64).sum::<u64>() < model.layers as u64 {
         return None;
     }
-    let t: Vec<f64> = order.iter().map(|&d| layer_secs(model, &devices[d])).collect();
+    let cost = |i: usize, k: u32| stage_secs(model, &devices[order[i]], k);
     let mut n = vec![0u32; order.len()];
-    match goal {
-        // The sum of n·t is all that matters: fill the fastest first.
-        Goal::Latency => {
-            let mut by_speed: Vec<usize> = (0..order.len()).collect();
-            by_speed.sort_by(|&a, &b| t[a].total_cmp(&t[b]));
-            let mut left = model.layers;
-            for i in by_speed {
-                n[i] = caps[i].min(left);
-                left -= n[i];
-            }
-        }
-        // Each layer goes where the stage's new total stays smallest: optimal for the
-        // slowest stage, which sets the pace.
-        Goal::Throughput => {
-            for _ in 0..model.layers {
-                let i = (0..order.len())
-                    .filter(|&i| n[i] < caps[i])
-                    .min_by(|&a, &b| ((n[a] + 1) as f64 * t[a]).total_cmp(&((n[b] + 1) as f64 * t[b])))?;
-                n[i] += 1;
-            }
-        }
+    for _ in 0..model.layers {
+        let open = (0..order.len()).filter(|&i| n[i] < caps[i]);
+        let i = match goal {
+            // The sum of every stage's time is all that matters: each layer goes where it
+            // costs least, GPU memory first, then the fastest CPU. Costs per layer only
+            // grow with a stage's size, so this greedy fill is optimal.
+            Goal::Latency => open.min_by(|&a, &b| (cost(a, n[a] + 1) - cost(a, n[a])).total_cmp(&(cost(b, n[b] + 1) - cost(b, n[b])))),
+            // Each layer goes where the stage's new total stays smallest: optimal for the
+            // slowest stage, which sets the pace.
+            Goal::Throughput => open.min_by(|&a, &b| cost(a, n[a] + 1).total_cmp(&cost(b, n[b] + 1))),
+        }?;
+        n[i] += 1;
     }
     n.iter().all(|&k| k > 0).then_some(n)
 }
@@ -250,7 +257,7 @@ pub fn estimate(model: &Model, devices: &[Device], links: &Links, opts: &Options
     let hidden_bytes = model.hidden as f64 * opts.bytes_per_value;
     let stage_ms: Vec<f64> = stages
         .iter()
-        .map(|s| (s.layers.end - s.layers.start) as f64 * layer_secs(model, &devices[s.device]) * 1000.0)
+        .map(|s| stage_secs(model, &devices[s.device], s.layers.end - s.layers.start) * 1000.0)
         .collect();
     // Token ids are a few bytes: those hops cost half a round trip. Hidden states also
     // pay for their bytes.
@@ -318,7 +325,7 @@ fn permutations(items: &mut Vec<usize>, k: usize, visit: &mut impl FnMut(&[usize
 /// The best single pipeline from `available`, trying every subset and order.
 fn best_pipeline(model: &Model, devices: &[Device], links: &Links, opts: &Options, available: &[usize]) -> Option<PipelinePlan> {
     let mut pool = available.to_vec();
-    pool.sort_by(|&a, &b| devices[b].mem_bw.total_cmp(&devices[a].mem_bw));
+    pool.sort_by(|&a, &b| stage_secs(model, &devices[a], 1).total_cmp(&stage_secs(model, &devices[b], 1)));
     pool.truncate(MAX_SEARCH);
     let mut best: Option<PipelinePlan> = None;
     for mask in 1u32..(1 << pool.len()) {
@@ -386,7 +393,31 @@ mod tests {
     }
 
     fn dev(name: &str, mem_gb: u64, bw_gbs: f64) -> Device {
-        Device { name: name.into(), mem_bytes: mem_gb * GB, mem_bw: bw_gbs * GB as f64 }
+        Device { name: name.into(), mem_bytes: mem_gb * GB, mem_bw: bw_gbs * GB as f64, ..Default::default() }
+    }
+
+    fn gpu(mut d: Device, vram_gb: u64, bw_gbs: f64) -> Device {
+        d.gpu_bytes = vram_gb * GB;
+        d.gpu_bw = bw_gbs * GB as f64;
+        d
+    }
+
+    #[test]
+    fn gpus_take_layers_first_and_ram_takes_the_rest() {
+        // A PC with an 8 GB card at 500 GB/s and 64 GB of RAM at 50 GB/s, and a laptop
+        // with 100 GB/s of memory and no GPU. 40 one-gigabyte layers.
+        let devices = [dev("laptop", 64, 100.0), gpu(dev("pc", 64, 50.0), 8, 500.0)];
+        let p = plan(&model(40), &devices, &net(2, 1.0), &Options::default());
+        let mut l = layers(&p.pipelines[0]);
+        l.sort();
+        // 8 layers on the card are cheapest; then the laptop's faster memory beats the
+        // PC's RAM, and holds the remaining 32.
+        assert_eq!(l, [(0, 32), (1, 8)]);
+        // On unified memory (an Apple GPU) the GPU reaches every layer in RAM.
+        let mac = gpu(dev("mac", 64, 100.0), 64, 400.0);
+        assert!(stage_secs(&model(40), &mac, 40) < stage_secs(&model(40), &devices[0], 40) / 3.0);
+        let p = plan(&model(40), &[devices[0].clone(), mac], &net(2, 1.0), &Options::default());
+        assert_eq!(layers(&p.pipelines[0]), [(1, 40)], "the Mac's GPU alone");
     }
 
     fn net(n: usize, rtt_ms: f64) -> Links {

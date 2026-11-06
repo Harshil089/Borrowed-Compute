@@ -56,6 +56,7 @@ pub struct DeviceRow {
     mem_gbs: f64,
     os: String,
     engine: bool,
+    gpu: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -97,8 +98,9 @@ fn rows(devices: &[MeshDevice]) -> Vec<DeviceRow> {
                 mem_gbs: r.device.mem_bw / 1e9,
                 os: r.device.os.clone(),
                 engine: r.device.engine,
+                gpu: r.device.gpu.as_ref().map(|g| format!("{} · {:.0} GB/s", g.name, g.bw / 1e9)),
             },
-            Err(e) => DeviceRow { name: d.name.clone(), error: Some(e.clone()), relay: false, rtt_ms: 0.0, up_mbps: 0.0, free_gb: 0.0, total_gb: 0.0, mem_gbs: 0.0, os: String::new(), engine: false },
+            Err(e) => DeviceRow { name: d.name.clone(), error: Some(e.clone()), relay: false, rtt_ms: 0.0, up_mbps: 0.0, free_gb: 0.0, total_gb: 0.0, mem_gbs: 0.0, os: String::new(), engine: false, gpu: None },
         })
         .collect()
 }

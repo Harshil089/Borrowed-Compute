@@ -31,6 +31,23 @@ pub enum GgmlType {
 }
 
 impl GgmlType {
+    /// ggml's number for the type, as GGUF stores it (and the GPU kernels switch on).
+    pub fn id(self) -> u32 {
+        match self {
+            GgmlType::F32 => 0,
+            GgmlType::F16 => 1,
+            GgmlType::Q4_0 => 2,
+            GgmlType::Q4_1 => 3,
+            GgmlType::Q5_0 => 6,
+            GgmlType::Q5_1 => 7,
+            GgmlType::Q8_0 => 8,
+            GgmlType::Q4K => 12,
+            GgmlType::Q5K => 13,
+            GgmlType::Q6K => 14,
+            GgmlType::BF16 => 30,
+        }
+    }
+
     pub fn from_u32(t: u32) -> Result<Self> {
         Ok(match t {
             0 => GgmlType::F32,
@@ -231,7 +248,71 @@ pub struct QTensor {
     pub ty: GgmlType,
     pub rows: usize,
     pub cols: usize,
-    pub data: Vec<u8>,
+    pub data: Bytes,
+}
+
+/// Page alignment of weight storage: Apple's GPU can then use the very same memory
+/// (`newBufferWithBytesNoCopy` wants whole 16 KB pages), so weights on a Mac are never
+/// held twice.
+const PAGE: usize = 16384;
+
+/// Bytes in a page-aligned allocation, padded to whole pages.
+pub struct Bytes {
+    ptr: std::ptr::NonNull<u8>,
+    len: usize,
+}
+
+// SAFETY: Bytes owns its allocation and only hands out shared or exclusive borrows of it.
+unsafe impl Send for Bytes {}
+unsafe impl Sync for Bytes {}
+
+impl Bytes {
+    fn layout(len: usize) -> std::alloc::Layout {
+        std::alloc::Layout::from_size_align(len.div_ceil(PAGE).max(1) * PAGE, PAGE).expect("weight size")
+    }
+
+    pub fn from_slice(b: &[u8]) -> Self {
+        let layout = Self::layout(b.len());
+        // SAFETY: the layout has a non-zero size; the allocation is zeroed, so the padding
+        // past `len` is initialized too.
+        let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+        let ptr = std::ptr::NonNull::new(ptr).unwrap_or_else(|| std::alloc::handle_alloc_error(layout));
+        // SAFETY: both regions are valid for b.len() bytes and do not overlap.
+        unsafe { std::ptr::copy_nonoverlapping(b.as_ptr(), ptr.as_ptr(), b.len()) };
+        Bytes { ptr, len: b.len() }
+    }
+
+    /// The allocation's length, whole pages.
+    pub fn padded_len(&self) -> usize {
+        Self::layout(self.len).size()
+    }
+}
+
+impl std::ops::Deref for Bytes {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        // SAFETY: ptr is valid for len initialized bytes for as long as self lives.
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+    }
+}
+
+impl Drop for Bytes {
+    fn drop(&mut self) {
+        // SAFETY: allocated in from_slice with this same layout.
+        unsafe { std::alloc::dealloc(self.ptr.as_ptr(), Self::layout(self.len)) }
+    }
+}
+
+impl Clone for Bytes {
+    fn clone(&self) -> Self {
+        Bytes::from_slice(self)
+    }
+}
+
+impl std::fmt::Debug for Bytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} bytes", self.len)
+    }
 }
 
 /// Weight-uses per piece of a parallel product: smaller pieces cost more to hand out
@@ -247,10 +328,10 @@ impl QTensor {
         if !cols.is_multiple_of(ty.block().0) {
             bail!("rows of {cols} do not fill whole {ty:?} blocks");
         }
-        Ok(QTensor { ty, rows, cols, data })
+        Ok(QTensor { ty, rows, cols, data: Bytes::from_slice(&data) })
     }
 
-    fn row_bytes(&self) -> usize {
+    pub fn row_bytes(&self) -> usize {
         self.cols / self.ty.block().0 * self.ty.block().1
     }
 
