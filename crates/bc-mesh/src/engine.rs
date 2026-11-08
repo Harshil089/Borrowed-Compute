@@ -310,12 +310,15 @@ impl Stage for LlmStage {
         let part = &self.part;
         let (kv, used) = self.streams.entry(meta.stream).or_insert_with(|| (part.new_kv(), Instant::now()));
         *used = Instant::now();
+        if let Some((base, rows)) = &meta.keep {
+            kv.keep(*base as usize, rows)?;
+        }
         // A stream starts over at position 0, or continues from where it is.
         let pos = meta.pos as usize;
         if pos > kv.len {
             bail!("stream {} is at {} tokens here, the batch starts at {pos}; replay it from the start", meta.stream, kv.len);
         }
-        part.forward(&mut x, rows, pos, kv)?;
+        part.forward_tree(&mut x, rows, pos, meta.tree.as_deref(), kv)?;
         if rows == 1 {
             let (g, c) = part.last_split_ms();
             let avg = |old: f32, new: f32| if old == 0.0 { new } else { 0.8 * old + 0.2 * new };

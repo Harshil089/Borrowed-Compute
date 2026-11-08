@@ -45,10 +45,11 @@ pub enum K {
     SiluMul,
     Add,
     Copy,
+    Move,
 }
 
 impl K {
-    const ALL: [K; 8] = [K::Matmul, K::RmsNorm, K::Rope, K::Attention, K::BiasAdd, K::SiluMul, K::Add, K::Copy];
+    const ALL: [K; 9] = [K::Matmul, K::RmsNorm, K::Rope, K::Attention, K::BiasAdd, K::SiluMul, K::Add, K::Copy, K::Move];
 
     fn name(self) -> &'static str {
         match self {
@@ -60,6 +61,7 @@ impl K {
             K::SiluMul => "k_silu_mul",
             K::Add => "k_add",
             K::Copy => "k_copy",
+            K::Move => "k_move",
         }
     }
 }
@@ -251,6 +253,8 @@ struct Scratch {
 
 /// One conversation's keys and values on the GPU, per layer, with room for `cap` tokens.
 pub struct Cache {
+    gpu: &'static Gpu,
+    kvd: usize,
     k: Vec<Buf>,
     v: Vec<Buf>,
     cap: usize,
@@ -273,6 +277,25 @@ pub struct LayerWeights<'a> {
 
 impl Cache {
     /// Bytes the cache holds on the GPU.
+    /// See [`crate::Kv::keep`]: moves the accepted rows' keys and values down to
+    /// consecutive slots, in order, every layer in one trip to the GPU.
+    pub fn keep(&mut self, base: usize, rows: &[u32]) -> Result<()> {
+        let n = self.kvd as u32;
+        let mut cmds = Vec::new();
+        for buf in self.k.iter().chain(&self.v) {
+            for (i, &r) in rows.iter().enumerate() {
+                if r as usize != i {
+                    let (from, to) = (((base + r as usize) * self.kvd) as u32, ((base + i) * self.kvd) as u32);
+                    cmds.push(Cmd { k: K::Move, grid: (n.div_ceil(256), 1), threads: 256, args: vec![Arg::B(buf), Arg::U(from), Arg::U(to), Arg::U(n)] });
+                }
+            }
+        }
+        if !cmds.is_empty() {
+            self.gpu.run(&cmds)?;
+        }
+        Ok(())
+    }
+
     pub fn bytes(&self) -> usize {
         self.bytes
     }
@@ -333,7 +356,7 @@ impl Layers {
     }
 
     pub fn new_cache(&self) -> Cache {
-        Cache { k: Vec::new(), v: Vec::new(), cap: 0, bytes: 0 }
+        Cache { gpu: self.gpu, kvd: self.layers[0].wk.rows as usize, k: Vec::new(), v: Vec::new(), cap: 0, bytes: 0 }
     }
 
 
@@ -355,18 +378,26 @@ impl Layers {
             }
             self.gpu.run(&cmds)?;
         }
-        *c = Cache { bytes: k.len() * 2 * cap * kvd * 4, k, v, cap };
+        *c = Cache { gpu: self.gpu, kvd, bytes: k.len() * 2 * cap * kvd * 4, k, v, cap };
         Ok(())
     }
 
     /// Runs the GPU's layers on `rows` hidden states at positions `pos..`, in place.
-    pub fn forward(&self, cfg: &Config, x: &mut [f32], rows: usize, pos: usize, cache: &mut Cache) -> Result<()> {
+    /// One row per entry of `positions`, row i at `positions[i]`; with `masks`, a tree
+    /// (see `Part::forward_tree`).
+    pub fn forward(&self, cfg: &Config, x: &mut [f32], pos: usize, positions: &[u32], masks: Option<&[u64]>, cache: &mut Cache) -> Result<()> {
+        let rows = positions.len();
         self.reserve(cfg, cache, pos + rows, pos)?;
         let b = &self.gpu.backend;
         let (e, hd, nh, nkv) = (cfg.n_embd, cfg.head_dim, cfg.n_head, cfg.n_head_kv);
         let (qd, kvd) = (nh * hd, nkv * hd);
         let ff = self.layers[0].gate.rows as usize;
         let bx = b.upload(x)?;
+        // Integers ride in float buffers bit for bit; the kernels read them as uint.
+        let bpos = b.upload(&positions.iter().map(|&p| f32::from_bits(p)).collect::<Vec<_>>())?;
+        let bits: Vec<f32> = masks.unwrap_or(&[0]).iter().flat_map(|&m| [f32::from_bits(m as u32), f32::from_bits((m >> 32) as u32)]).collect();
+        let bmask = b.upload(&bits)?;
+        let tree = masks.is_some() as usize;
         // Every kernel writes all of its output, so reused buffers need no clearing.
         let mut held = self.scratch.lock().unwrap();
         if held.as_ref().is_none_or(|s| s.rows < rows) {
@@ -394,7 +425,7 @@ impl Layers {
                     k: K::Rope,
                     grid: ew(n),
                     threads: 256,
-                    args: vec![Arg::B(t), Arg::B(&self.inv_freq), u(heads), u(hd), u(cfg.rope_dim), u(pos), u(cfg.rope_neox as usize), u(n)],
+                    args: vec![Arg::B(t), Arg::B(&self.inv_freq), Arg::B(&bpos), u(heads), u(hd), u(cfg.rope_dim), u(cfg.rope_neox as usize), u(n)],
                 });
             }
             for (src, dst) in [(bk, kc), (bv, vc)] {
@@ -404,7 +435,7 @@ impl Layers {
                 k: K::Attention,
                 grid: (nh as u32, rows as u32),
                 threads: 32,
-                args: vec![Arg::B(bq), Arg::B(kc), Arg::B(vc), Arg::B(ba), u(nh), u(nkv), u(hd), u(pos), Arg::F(1.0 / (hd as f32).sqrt())],
+                args: vec![Arg::B(bq), Arg::B(kc), Arg::B(vc), Arg::B(ba), Arg::B(&bmask), u(tree), u(nh), u(nkv), u(hd), u(pos), Arg::F(1.0 / (hd as f32).sqrt())],
             });
             cmds.push(self.gpu.matmul(&l.wo, ba, bo, rows));
             cmds.push(Cmd { k: K::Add, grid: ew(rows * e), threads: 256, args: vec![Arg::B(&bx), Arg::B(bo), u(rows * e)] });

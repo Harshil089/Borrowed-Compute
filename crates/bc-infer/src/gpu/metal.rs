@@ -29,6 +29,7 @@ using namespace metal;
 #define BITS2F(b) as_type<float>((uint)(b))
 #define H2F(h) ((float)as_type<half>((ushort)(h)))
 #define F4(a, b, c, d) float4((a), (b), (c), (d))
+#define POPC(x) popcount(x)
 #define WSUM(v) simd_sum(v)
 #define WMAX(v) simd_max(v)
 #define BARRIER() threadgroup_barrier(mem_flags::mem_threadgroup)
@@ -47,19 +48,21 @@ kernel void k_matmul(device const uchar* w [[buffer(0)]], device const float* x 
     constant uint& rb [[buffer(7)]], G) { matmul(w, x, out, ty, rows, cols, n, rb, g.x * ROWS_PER_GROUP + sg, g.y * NB, lane); }
 kernel void k_rms_norm(device const float* x [[buffer(0)]], device const float* w [[buffer(1)]], device float* out [[buffer(2)]],
     constant uint& cols [[buffer(3)]], constant float& eps [[buffer(4)]], G) { rms_norm(x, w, out, cols, eps, g.x, lane); }
-kernel void k_rope(device float* x [[buffer(0)]], device const float* f [[buffer(1)]], constant uint& heads [[buffer(2)]],
-    constant uint& hd [[buffer(3)]], constant uint& rd [[buffer(4)]], constant uint& pos [[buffer(5)]], constant uint& neox [[buffer(6)]],
-    constant uint& n [[buffer(7)]], I) { if (gi.x < n) rope(x, f, heads, hd, rd, pos, neox, gi.x); }
+kernel void k_rope(device float* x [[buffer(0)]], device const float* f [[buffer(1)]], device const uint* positions [[buffer(2)]],
+    constant uint& heads [[buffer(3)]], constant uint& hd [[buffer(4)]], constant uint& rd [[buffer(5)]], constant uint& neox [[buffer(6)]],
+    constant uint& n [[buffer(7)]], I) { if (gi.x < n) rope(x, f, positions, heads, hd, rd, neox, gi.x); }
 kernel void k_attention(device const float* q [[buffer(0)]], device const float* kc [[buffer(1)]], device const float* vc [[buffer(2)]],
-    device float* out [[buffer(3)]], constant uint& nh [[buffer(4)]], constant uint& nkv [[buffer(5)]], constant uint& hd [[buffer(6)]],
-    constant uint& pos [[buffer(7)]], constant float& scale [[buffer(8)]], G) {
+    device float* out [[buffer(3)]], device const uint* masks [[buffer(4)]], constant uint& tree [[buffer(5)]], constant uint& nh [[buffer(6)]],
+    constant uint& nkv [[buffer(7)]], constant uint& hd [[buffer(8)]], constant uint& pos [[buffer(9)]], constant float& scale [[buffer(10)]], G) {
     threadgroup float sh[TILE];
-    attention(q, kc, vc, out, sh, nh, nkv, hd, pos, scale, g.x, g.y, lane);
+    attention(q, kc, vc, out, sh, masks, tree, nh, nkv, hd, pos, scale, g.x, g.y, lane);
 }
 kernel void k_bias_add(device float* x [[buffer(0)]], device const float* b [[buffer(1)]], constant uint& n [[buffer(2)]],
     constant uint& dim [[buffer(3)]], I) { bias_add(x, b, n, dim, gi.x); }
 kernel void k_silu_mul(device float* g [[buffer(0)]], device const float* u [[buffer(1)]], constant uint& n [[buffer(2)]], I) { silu_mul(g, u, n, gi.x); }
 kernel void k_add(device float* x [[buffer(0)]], device const float* y [[buffer(1)]], constant uint& n [[buffer(2)]], I) { add(x, y, n, gi.x); }
+kernel void k_move(device float* b [[buffer(0)]], constant uint& from [[buffer(1)]], constant uint& to [[buffer(2)]],
+    constant uint& n [[buffer(3)]], I) { move(b, from, to, n, gi.x); }
 kernel void k_copy(device const float* s [[buffer(0)]], device float* d [[buffer(1)]], constant uint& off [[buffer(2)]],
     constant uint& n [[buffer(3)]], I) { copy(s, d, off, n, gi.x); }
 "#;

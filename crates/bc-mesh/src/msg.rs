@@ -115,6 +115,14 @@ pub struct Meta {
     /// Passed on without computing (see `epoch`); the payload is empty.
     #[serde(default)]
     pub skipped: bool,
+    /// The rows form a tree: each row's parent row, or `bc_infer::ROOT` (see
+    /// `Part::forward_tree`). `None` is a line.
+    #[serde(default)]
+    pub tree: Option<Vec<u32>>,
+    /// Before this batch: of the rows the last tree pass placed from position `.0`, keep
+    /// only `.1` (the accepted path), in order (`Kv::keep`).
+    #[serde(default)]
+    pub keep: Option<(u32, Vec<u32>)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

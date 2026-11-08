@@ -41,6 +41,7 @@ __device__ static inline float h2f(uint h) {
     return f;
 }
 #define H2F(h) h2f(h)
+#define POPC(x) __builtin_popcount(x)
 
 __device__ static inline float wsum(float v) {
     for (int o = 16; o > 0; o >>= 1) v += __nvvm_shfl_sync_bfly_f32(0xffffffffu, v, o, 0x1f);
@@ -77,12 +78,13 @@ extern "C" __global__ void k_matmul(const uchar* w, const float* x, float* out, 
     matmul(w, x, out, ty, rows, cols, n, rb, BX * ROWS_PER_GROUP + TX / 32, BY * NB, TX % 32);
 }
 extern "C" __global__ void k_rms_norm(const float* x, const float* w, float* out, uint cols, float eps) { rms_norm(x, w, out, cols, eps, BX, TX); }
-extern "C" __global__ void k_rope(float* x, const float* f, uint heads, uint hd, uint rd, uint pos, uint neox, uint n) { if (IX < n) rope(x, f, heads, hd, rd, pos, neox, IX); }
-extern "C" __global__ void k_attention(const float* q, const float* kc, const float* vc, float* out, uint nh, uint nkv, uint hd, uint pos, float scale) {
+extern "C" __global__ void k_rope(float* x, const float* f, const uint* positions, uint heads, uint hd, uint rd, uint neox, uint n) { if (IX < n) rope(x, f, positions, heads, hd, rd, neox, IX); }
+extern "C" __global__ void k_attention(const float* q, const float* kc, const float* vc, float* out, const uint* masks, uint tree, uint nh, uint nkv, uint hd, uint pos, float scale) {
     __shared__ static float sh[TILE];
-    attention(q, kc, vc, out, sh, nh, nkv, hd, pos, scale, BX, BY, TX);
+    attention(q, kc, vc, out, sh, masks, tree, nh, nkv, hd, pos, scale, BX, BY, TX);
 }
 extern "C" __global__ void k_bias_add(float* x, const float* b, uint n, uint dim) { bias_add(x, b, n, dim, IX); }
 extern "C" __global__ void k_silu_mul(float* g, const float* u, uint n) { silu_mul(g, u, n, IX); }
 extern "C" __global__ void k_add(float* x, const float* y, uint n) { add(x, y, n, IX); }
+extern "C" __global__ void k_move(float* b, uint from, uint to, uint n) { move(b, from, to, n, IX); }
 extern "C" __global__ void k_copy(const float* s, float* d, uint off, uint n) { copy(s, d, off, n, IX); }

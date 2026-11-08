@@ -204,10 +204,17 @@ async fn speculative_decoding_writes_the_same_text_in_fewer_passes() {
     let same = Local::load(&Source::File(dir.join("d.gguf"))).await.unwrap();
     let client = Client::open(&m.coordinator, &url, plan(&[(0, 0..2), (1, 2..4)]), &addrs, &|_, _, _| {}).await.unwrap();
     let llm = Llm::new(&header, vec![client], Some(same)).unwrap();
-    let (got, stats) = llm.generate(&prompt, 24, Sampling::default(), |_| {}).await.unwrap();
-    assert_eq!(got, want);
-    if got.len() > 5 {
-        assert!(stats.passes * 3 <= got.len() + 3, "{} passes for {} tokens", stats.passes, got.len());
+    // Tree, then chain, then plain (each is tried once): every way writes the same text,
+    // and the tree takes the fewest passes when every guess is right.
+    let mut passes = Vec::new();
+    for _ in 0..3 {
+        let (got, stats) = llm.generate(&prompt, 24, Sampling::default(), |_| {}).await.unwrap();
+        assert_eq!(got, want);
+        passes.push(stats.passes);
+    }
+    if want.len() > 5 {
+        assert!(passes[0] * 4 <= want.len() + 4, "tree: {} passes for {} tokens", passes[0], want.len());
+        assert!(passes[0] <= passes[1] && passes[1] < passes[2], "tree, chain, plain: {passes:?}");
     }
 
     // A different, smaller draft: guesses are sometimes wrong, the text never is.
@@ -216,8 +223,10 @@ async fn speculative_decoding_writes_the_same_text_in_fewer_passes() {
     let _ = std::fs::remove_dir_all(&dir);
     let client = Client::open(&m.coordinator, &url, plan(&[(1, 0..1), (0, 1..4)]), &addrs, &|_, _, _| {}).await.unwrap();
     let llm = Llm::new(&header, vec![client], Some(other)).unwrap();
-    let (got, _) = llm.generate(&prompt, 24, Sampling::default(), |_| {}).await.unwrap();
-    assert_eq!(got, want);
+    for _ in 0..3 {
+        let (got, _) = llm.generate(&prompt, 24, Sampling::default(), |_| {}).await.unwrap();
+        assert_eq!(got, want);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -235,6 +244,8 @@ async fn one_conversation_keeps_every_stage_busy() {
     let same = Local::load(&Source::File(dir.join("d.gguf"))).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
     let client = Client::open(&m.coordinator, &url, plan(&[(0, 0..1), (1, 1..2), (2, 2..3)]), &addrs, &|_, _, _| {}).await.unwrap();
+    // This test is about the pipelined chain: measured as the fastest way here.
+    client.speed.lock().unwrap().ms = [100.0, 1.0, 100.0];
     let llm = Llm::new(&header, vec![client], Some(same)).unwrap();
     let prompt: Vec<u32> = vec![1, 60, 61, 62];
     let want = local_text(&file, &prompt, 40).await;
