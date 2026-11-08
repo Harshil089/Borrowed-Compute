@@ -74,6 +74,24 @@ Qwen2.5 1.5B with the 0.5B as draft, 43 tokens, one M2, same text every way:
 | Tree, 40 guesses | 3.9 | 2.4 | 4.8 |
 | Tree, 15 guesses | 2.9 | | 7.8 |
 
+**Guesses that cost nothing.** Every tree also takes up to 8 guesses read from the text
+itself (prompt lookup: where the last 2 to 4 tokens appeared before, what followed), and
+a fourth way of decoding, lookup, checks a tree of those alone with no draft model. The
+draft scores only the first 32k tokens of the vocabulary (`DRAFT_VOCAB`), and only its
+last row when it catches up. Same model and M2, asking for a small code edit (which
+repeats its input):
+
+| Way | Tokens a pass | Tokens a second |
+|---|---|---|
+| Plain | 1.0 | 15.1 to 15.5 |
+| Chain | 2.5 | 10.5 |
+| Tree (draft and lookup) | 4.3 | 13.8 |
+| Lookup alone | 2.4 | **23.7** |
+
+The first way faster than plain on this computer: half again, with no draft model at
+all, for any model. On text that does not repeat (the sky question) lookup finds nothing
+and the measured choice keeps plain.
+
 A 15-guess round is now about 360 ms: the check (16 rows) 155 ms, 2.6 one-row passes,
 and drafting 200 ms. What still holds it back on this pair, and next:
 
@@ -85,7 +103,10 @@ and drafting 200 ms. What still holds it back on this pair, and next:
    check can never be much under 2 one-row passes there. NVIDIA tensor cores have 30 to
    100 times the arithmetic per byte read, so trees of 40 to 60 should pay there; size the
    tree per GPU once measured (CUDA still runs batches on `k_matmul`).
-3. Measure the swarm with real devices: drafters on idle computers take drafting off
+3. **Draft while the target checks.** The draft waits for each check today; growing
+   the next tree from the draft's likeliest path while the check runs would hide most
+   of the drafting.
+4. Measure the swarm with real devices: drafters on idle computers take drafting off
    the coordinator, which is now half of each round.
 
 Until then the measured choice keeps plain decoding where it is faster, so nobody is

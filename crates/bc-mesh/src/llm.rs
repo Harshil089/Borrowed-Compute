@@ -29,13 +29,15 @@ use bc_infer::{Config, Kv, Local, Part, Sampling, Tokenizer, MAX_TREE, ROOT};
 use iroh::{Endpoint, EndpointAddr};
 use tokio::sync::{oneshot, Mutex};
 
-/// Runs the draft model off the async threads: scores after each token in `tokens`.
+/// Runs the draft model off the async threads: its scores after the last of `tokens`,
+/// over the [`DRAFT_VOCAB`] tokens it guesses from.
 async fn draft_run(d: (Arc<Part>, Kv), tokens: Vec<u32>, pos: usize) -> Result<((Arc<Part>, Kv), Vec<f32>)> {
     tokio::task::spawn_blocking(move || {
         let (part, mut kv) = d;
         let mut x = part.embed(&tokens)?;
         part.forward(&mut x, tokens.len(), pos, &mut kv)?;
-        let scores = part.logits(&x, tokens.len())?;
+        let e = part.cfg.n_embd;
+        let scores = part.logits_upto(&x[x.len() - e..], 1, DRAFT_VOCAB)?;
         Ok(((part, kv), scores))
     })
     .await?
@@ -43,7 +45,7 @@ async fn draft_run(d: (Arc<Part>, Kv), tokens: Vec<u32>, pos: usize) -> Result<(
 
 use crate::msg::{Activation, Meta, StageSetup};
 
-use crate::tree::{grow, top_k, TREE_NODES, TREE_ROOT_K};
+use crate::tree::{add_chain, grow, lookup, top_k, DRAFT_VOCAB, LOOKUP_TOKENS, TREE_NODES, TREE_ROOT_K};
 
 /// [`grow`] off the async threads, under the likeliest first tokens from `root`.
 async fn grow_tree(d: (Arc<Part>, Kv), roots: Vec<(u32, f32)>, pos: usize, budget: usize) -> Result<((Arc<Part>, Kv), Vec<(u32, u32)>)> {
@@ -82,12 +84,14 @@ pub struct Client {
 }
 
 /// How a request decodes: a token a pass, a chain of guesses pipelined through the
-/// stages, or a tree of guesses checked in one pass.
+/// stages, a tree of guesses checked in one pass, or a tree of guesses read from the text
+/// alone (no draft model: free, and fastest for edits and code, which repeat their input).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Plain = 0,
     Chain = 1,
     Tree = 2,
+    Lookup = 3,
 }
 
 /// Which way of decoding is fastest on a pipeline, as measured. Guessing pays when the
@@ -98,24 +102,26 @@ pub enum Mode {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Speed {
     /// Milliseconds a token, by [`Mode`]; 0 until measured.
-    pub ms: [f64; 3],
+    pub ms: [f64; 4],
     requests: u64,
 }
 
 const EXPLORE: u64 = 8;
 /// Untried ways go in this order, so a new pipeline's first answer is never the costly
 /// experiment.
-const MODES: [Mode; 3] = [Mode::Plain, Mode::Chain, Mode::Tree];
+const MODES: [Mode; 4] = [Mode::Plain, Mode::Lookup, Mode::Chain, Mode::Tree];
 
 impl Speed {
-    fn choose(&mut self) -> Mode {
+    /// The way to decode next; a chain and a drafted tree need a draft model.
+    fn choose(&mut self, draft: bool) -> Mode {
         self.requests += 1;
-        if let Some(&untried) = MODES.iter().find(|m| self.ms[**m as usize] == 0.0) {
+        let modes: Vec<Mode> = MODES.into_iter().filter(|&m| draft || !matches!(m, Mode::Chain | Mode::Tree)).collect();
+        if let Some(&untried) = modes.iter().find(|m| self.ms[**m as usize] == 0.0) {
             return untried;
         }
-        let best = *MODES.iter().min_by(|a, b| self.ms[**a as usize].total_cmp(&self.ms[**b as usize])).unwrap();
+        let best = *modes.iter().min_by(|a, b| self.ms[**a as usize].total_cmp(&self.ms[**b as usize])).unwrap();
         if self.requests.is_multiple_of(EXPLORE) {
-            let other = MODES[(self.requests / EXPLORE) as usize % MODES.len()];
+            let other = modes[(self.requests / EXPLORE) as usize % modes.len()];
             if other != best {
                 return other;
             }
@@ -388,7 +394,7 @@ impl Llm {
     async fn tree_decode(
         &self,
         client: &Client,
-        draft: &Arc<Part>,
+        draft: Option<&Arc<Part>>,
         prompt: &[u32],
         seq: &mut Vec<u32>,
         target_len: &mut usize,
@@ -398,49 +404,60 @@ impl Llm {
         meta: &impl Fn(usize, bool) -> Meta,
         push: &mut impl FnMut(u32, &mut Vec<u32>, &mut Vec<u32>) -> bool,
     ) -> Result<()> {
-        let vocab = self.cfg.vocab;
-        let (mut d, _) = draft_run((draft.clone(), draft.new_kv()), prompt.to_vec(), 0).await?;
+        let mut d = match draft {
+            Some(draft) => Some(draft_run((draft.clone(), draft.new_kv()), prompt.to_vec(), 0).await?.0),
+            None => None,
+        };
         let mut draft_len = prompt.len();
         let mut keep: Option<(u32, Vec<u32>)> = None;
-        let drafters: Vec<Arc<Client>> = self.drafters.lock().unwrap().iter().filter(|d| d.alive()).cloned().collect();
+        // Swarm drafters grow under the local draft's roots, so they need one.
+        let drafters: Vec<Arc<Client>> = if d.is_some() { self.drafters.lock().unwrap().iter().filter(|d| d.alive()).cloned().collect() } else { Vec::new() };
         // Confirmed tokens each drafter has seen.
         let mut drafted = vec![0usize; drafters.len()];
         while out.len() < max_tokens {
-            // The draft catches up on the confirmed text; its last scores seed the tree.
-            let feed = seq[draft_len..].to_vec();
-            let (back, scores) = draft_run(d, feed.clone(), draft_len).await?;
-            draft_len = seq.len();
             let real = seq.len() - *target_len;
             let budget = TREE_NODES.min(MAX_TREE - real);
-            // The likeliest first tokens: the second, third… each go to a drafter of the
-            // swarm, which grows the subtree below it; this computer grows the rest.
-            let mut roots = top_k(&scores[(feed.len() - 1) * vocab..], TREE_ROOT_K + drafters.len());
-            let swarm = drafters.len().min(roots.len().saturating_sub(1));
-            let share = budget / (swarm + 1);
-            let mut asks = Vec::with_capacity(swarm);
-            for (i, (root, _)) in roots.drain(1..1 + swarm).enumerate() {
-                let mut tokens = seq[drafted[i]..].to_vec();
-                tokens.push(root);
-                let m = Meta { grow: Some(share.saturating_sub(1) as u32), ..meta(drafted[i], false) };
-                drafted[i] = seq.len();
-                asks.push((root, drafters[i].submit(m, Activation::Tokens(tokens)).await));
-            }
-            let mine = Instant::now();
-            let (back, mut nodes) = grow_tree(back, roots, draft_len, budget - swarm * share).await?;
-            d = back;
-            // Subtrees that arrive while this computer's part takes as long again join the
-            // tree; later ones are left out of this pass.
-            let wait = mine.elapsed().max(std::time::Duration::from_millis(20));
-            for (root, ask) in asks {
-                let Ok(rx) = ask else { continue };
-                let Ok(Ok(Ok((_, Activation::Tokens(flat))))) = tokio::time::timeout(wait, rx).await else { continue };
-                let at = nodes.len() as u32;
-                nodes.push((root, ROOT));
-                for pair in flat.chunks_exact(2).take(share.saturating_sub(1)) {
-                    nodes.push((pair[0], if pair[1] == ROOT { at } else { at + 1 + pair[1] }));
+            // Guesses from the text itself cost nothing; the draft fills the rest.
+            let chain = lookup(seq, LOOKUP_TOKENS.min(budget));
+            let mut nodes = Vec::new();
+            if let Some(back) = d.take() {
+                // The draft catches up on the confirmed text; its last scores seed the tree.
+                let feed = seq[draft_len..].to_vec();
+                let (back, scores) = draft_run(back, feed, draft_len).await?;
+                draft_len = seq.len();
+                let budget = budget - chain.len();
+                // The likeliest first tokens: the second, third… each go to a drafter of
+                // the swarm, which grows the subtree below it; this computer grows the rest.
+                let mut roots = top_k(&scores, TREE_ROOT_K + drafters.len());
+                let swarm = drafters.len().min(roots.len().saturating_sub(1));
+                let share = budget / (swarm + 1);
+                let mut asks = Vec::with_capacity(swarm);
+                for (i, (root, _)) in roots.drain(1..1 + swarm).enumerate() {
+                    let mut tokens = seq[drafted[i]..].to_vec();
+                    tokens.push(root);
+                    let m = Meta { grow: Some(share.saturating_sub(1) as u32), ..meta(drafted[i], false) };
+                    drafted[i] = seq.len();
+                    asks.push((root, drafters[i].submit(m, Activation::Tokens(tokens)).await));
                 }
+                let mine = Instant::now();
+                let (back, grown) = grow_tree(back, roots, draft_len, budget - swarm * share).await?;
+                d = Some(back);
+                nodes = grown;
+                // Subtrees that arrive while this computer's part takes as long again join
+                // the tree; later ones are left out of this pass.
+                let wait = mine.elapsed().max(std::time::Duration::from_millis(20));
+                for (root, ask) in asks {
+                    let Ok(rx) = ask else { continue };
+                    let Ok(Ok(Ok((_, Activation::Tokens(flat))))) = tokio::time::timeout(wait, rx).await else { continue };
+                    let at = nodes.len() as u32;
+                    nodes.push((root, ROOT));
+                    for pair in flat.chunks_exact(2).take(share.saturating_sub(1)) {
+                        nodes.push((pair[0], if pair[1] == ROOT { at } else { at + 1 + pair[1] }));
+                    }
+                }
+                nodes.truncate(budget);
             }
-            nodes.truncate(budget);
+            add_chain(&mut nodes, &chain, TREE_NODES.min(MAX_TREE - real));
             let mut tokens: Vec<u32> = seq[*target_len..].to_vec();
             let mut parents: Vec<u32> = (0..real as u32).map(|i| if i == 0 { ROOT } else { i - 1 }).collect();
             for &(t, p) in &nodes {
@@ -542,10 +559,10 @@ impl Llm {
                 client.speed.lock().unwrap().record(mode, ms);
             }
         };
-        let greedy = sampling.temperature <= 0.0 && self.draft.is_some();
-        let mode = if greedy { client.speed.lock().unwrap().choose() } else { Mode::Plain };
-        let Some(draft) = self.draft.clone().filter(|_| mode != Mode::Plain) else {
-            // No draft model, sampling, or guessing measured slower here: a token a pass.
+        let greedy = sampling.temperature <= 0.0;
+        let mode = if greedy { client.speed.lock().unwrap().choose(self.draft.is_some()) } else { Mode::Plain };
+        if mode == Mode::Plain {
+            // Sampling, or guessing measured slower here: a token a pass.
             while out.len() < max_tokens {
                 stats.passes += 1;
                 let ids = client.call(meta(target_len, false), Activation::Tokens(seq[target_len..].to_vec())).await?;
@@ -560,18 +577,21 @@ impl Llm {
                 record(Mode::Plain, &stats);
             }
             return Ok((out, stats));
-        };
+        }
 
-        if mode == Mode::Tree {
+        if matches!(mode, Mode::Tree | Mode::Lookup) {
             client.in_flight.fetch_add(1, Ordering::Relaxed);
-            let tree = self.tree_decode(&client, &draft, prompt, &mut seq, &mut target_len, &mut out, max_tokens, &mut stats, &meta, &mut push).await;
+            let tree = self.tree_decode(&client, self.draft.as_ref().filter(|_| mode == Mode::Tree), prompt, &mut seq, &mut target_len, &mut out, max_tokens, &mut stats, &meta, &mut push).await;
             client.in_flight.fetch_sub(1, Ordering::Relaxed);
             tree?;
             stats.generated = out.len();
             stats.total_ms = started.elapsed().as_secs_f64() * 1000.0;
-            record(Mode::Tree, &stats);
+            record(mode, &stats);
             return Ok((out, stats));
         }
+
+        // A chain: `choose` picks one only with a draft model.
+        let draft = self.draft.clone().context("no draft model for a chain of guesses")?;
 
         // Pipelined speculation. The stream is `seq` (confirmed) then `guesses` (the
         // draft's, unchecked); `sent` positions of it are in the target's pipeline. While
@@ -582,7 +602,6 @@ impl Llm {
         // next batch starts at the corrected position, where the stages cut their caches
         // back. The text is exactly what the target alone writes.
         client.in_flight.fetch_add(1, Ordering::Relaxed);
-        let vocab = self.cfg.vocab;
         let spec = async {
             let (mut d, _) = draft_run((draft.clone(), draft.new_kv()), prompt.to_vec(), 0).await?;
             let mut draft_len = prompt.len();
@@ -608,11 +627,10 @@ impl Llm {
                     for _ in 0..want {
                         let stream_len = seq.len() + guesses.len();
                         let feed: Vec<u32> = seq.iter().chain(&guesses).skip(draft_len).copied().collect();
-                        let n = feed.len();
                         let (back, scores) = draft_run(d, feed, draft_len).await?;
                         d = back;
                         draft_len = stream_len;
-                        guesses.push(bc_infer::sample::argmax(&scores[(n - 1) * vocab..]));
+                        guesses.push(bc_infer::sample::argmax(&scores));
                     }
                     let rows: Vec<u32> = seq.iter().chain(&guesses).skip(sent).copied().collect();
                     if !rows.is_empty() {
@@ -679,20 +697,29 @@ mod tests {
         use super::Mode::*;
         let mut s = Speed::default();
         // Each way is tried once first, plain first.
-        assert_eq!(s.choose(), Plain);
+        assert_eq!(s.choose(true), Plain);
         s.record(Plain, 20.0);
-        assert_eq!(s.choose(), Chain);
+        assert_eq!(s.choose(true), Lookup);
+        s.record(Lookup, 25.0);
+        assert_eq!(s.choose(true), Chain);
         s.record(Chain, 30.0);
-        assert_eq!(s.choose(), Tree);
+        assert_eq!(s.choose(true), Tree);
         s.record(Tree, 10.0);
         // Then the fastest, with an occasional recheck of another.
-        let picks: Vec<_> = (0..24).map(|_| s.choose()).collect();
+        let picks: Vec<_> = (0..24).map(|_| s.choose(true)).collect();
         let others = picks.iter().filter(|&&m| m != Tree).count();
         assert!((1..=4).contains(&others), "{picks:?}");
         // Plain got faster: it takes over.
         for _ in 0..4 {
             s.record(Plain, 2.0);
         }
-        assert!((0..7).filter(|_| s.choose() == Plain).count() >= 6);
+        assert!((0..7).filter(|_| s.choose(true) == Plain).count() >= 6);
+        // Without a draft model only plain and lookup are ways.
+        let mut s = Speed::default();
+        assert_eq!(s.choose(false), Plain);
+        s.record(Plain, 20.0);
+        assert_eq!(s.choose(false), Lookup);
+        s.record(Lookup, 10.0);
+        assert!((0..40).all(|_| matches!(s.choose(false), Plain | Lookup)));
     }
 }

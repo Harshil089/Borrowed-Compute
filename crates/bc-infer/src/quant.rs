@@ -369,17 +369,23 @@ impl QTensor {
     /// sum in i32. That is llama.cpp's method; it turns the inner loop into integer
     /// multiply-adds the CPU does 16 at a time.
     pub fn matmul(&self, x: &[f32], n: usize) -> Vec<f32> {
+        self.matmul_rows(x, n, self.rows)
+    }
+
+    /// [`QTensor::matmul`] against the first `upto` weight rows only: `out` is n×upto.
+    pub fn matmul_rows(&self, x: &[f32], n: usize, upto: usize) -> Vec<f32> {
+        let total = upto.min(self.rows);
         debug_assert_eq!(x.len(), n * self.cols);
         let acts: Vec<Q8Row> = (0..n).map(|i| Q8Row::new(&x[i * self.cols..(i + 1) * self.cols])).collect();
         // Pieces of at least PARALLEL_MIN weight-uses, several per thread for big products,
         // so a paused thread delays only a small piece and small products stay on one.
-        let work = self.rows * self.cols * n.max(1);
-        let chunks = (work / PARALLEL_MIN).clamp(1, crate::pool::threads() * 4).min(self.rows.div_ceil(16).max(1));
-        let per = self.rows.div_ceil(chunks);
+        let work = total * self.cols * n.max(1);
+        let chunks = (work / PARALLEL_MIN).clamp(1, crate::pool::threads() * 4).min(total.div_ceil(16).max(1));
+        let per = total.div_ceil(chunks);
         let slots: Vec<std::sync::Mutex<Vec<f32>>> = (0..chunks).map(|_| Default::default()).collect();
         let integer = unpackable(self.ty);
         crate::pool::run(chunks, &|t| {
-            let rows = (t * per).min(self.rows)..((t + 1) * per).min(self.rows);
+            let rows = (t * per).min(total)..((t + 1) * per).min(total);
             let mut part = vec![0.0f32; n * rows.len()];
             let mut buf = Vec::new();
             let (bn, bb) = self.ty.block();
@@ -409,13 +415,13 @@ impl QTensor {
             }
             *slots[t].lock().unwrap() = part;
         });
-        let mut out = vec![0.0f32; n * self.rows];
+        let mut out = vec![0.0f32; n * total];
         for (t, slot) in slots.into_iter().enumerate() {
             let part = slot.into_inner().unwrap();
-            let start = (t * per).min(self.rows);
+            let start = (t * per).min(total);
             let len = part.len() / n.max(1);
             for i in 0..n {
-                out[i * self.rows + start..i * self.rows + start + len].copy_from_slice(&part[i * len..(i + 1) * len]);
+                out[i * total + start..i * total + start + len].copy_from_slice(&part[i * len..(i + 1) * len]);
             }
         }
         out
