@@ -341,8 +341,8 @@ impl Llm {
     pub fn new(header: &Header, replicas: Vec<Arc<Client>>, draft: Option<Local>) -> Result<Self> {
         let tokenizer = Tokenizer::from_header(header)?;
         if let Some(d) = &draft {
-            if d.tokenizer.vocab() != tokenizer.vocab() {
-                bail!("the draft model's vocabulary ({}) differs from the model's ({})", d.tokenizer.vocab(), tokenizer.vocab());
+            if !d.tokenizer.same_ids(&tokenizer) {
+                bail!("the draft model's vocabulary differs from the model's");
             }
         }
         Ok(Llm { tokenizer, cfg: Config::from_header(header)?, replicas: StdMutex::new(replicas), draft: draft.map(|d| Arc::new(d.part)), drafters: StdMutex::default() })

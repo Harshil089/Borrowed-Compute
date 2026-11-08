@@ -130,6 +130,12 @@ impl Tokenizer {
         self.tokens.len()
     }
 
+    /// True when both give every id they both have the same token: sizes of one family
+    /// differ only in padding at the end (Qwen2.5 0.5B has 151936 ids, 7B 152064).
+    pub fn same_ids(&self, other: &Tokenizer) -> bool {
+        self.tokens.iter().zip(&other.tokens).all(|(a, b)| a == b)
+    }
+
     pub fn is_stop(&self, id: u32) -> bool {
         self.stops.contains(&id)
     }
