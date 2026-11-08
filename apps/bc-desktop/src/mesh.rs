@@ -168,11 +168,13 @@ pub struct MeshStatus {
     model: String,
     url: String,
     pipelines: Vec<PipelineRow>,
+    /// Devices drafting guesses for the swarm.
+    drafters: Vec<String>,
 }
 
 async fn status_of(running: &Option<Running>) -> MeshStatus {
     let Some(r) = running else {
-        return MeshStatus { running: false, model: String::new(), url: String::new(), pipelines: Vec::new() };
+        return MeshStatus { running: false, model: String::new(), url: String::new(), pipelines: Vec::new(), drafters: Vec::new() };
     };
     let layout = r.session.layout().await;
     let replicas = r.session.llm.replicas();
@@ -189,7 +191,7 @@ async fn status_of(running: &Option<Running>) -> MeshStatus {
             }
         })
         .collect();
-    MeshStatus { running: true, model: r.session.name.clone(), url: format!("http://127.0.0.1:{}/v1", r.port), pipelines }
+    MeshStatus { running: true, model: r.session.name.clone(), url: format!("http://127.0.0.1:{}/v1", r.port), pipelines, drafters: r.session.drafter_names.clone() }
 }
 
 #[tauri::command]

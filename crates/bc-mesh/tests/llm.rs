@@ -204,10 +204,17 @@ async fn speculative_decoding_writes_the_same_text_in_fewer_passes() {
     let same = Local::load(&Source::File(dir.join("d.gguf"))).await.unwrap();
     let client = Client::open(&m.coordinator, &url, plan(&[(0, 0..2), (1, 2..4)]), &addrs, &|_, _, _| {}).await.unwrap();
     let llm = Llm::new(&header, vec![client], Some(same)).unwrap();
-    let (got, stats) = llm.generate(&prompt, 24, Sampling::default(), |_| {}).await.unwrap();
-    assert_eq!(got, want);
-    if got.len() > 5 {
-        assert!(stats.passes * 3 <= got.len() + 3, "{} passes for {} tokens", stats.passes, got.len());
+    // Plain, then chain, then tree (each is tried once): every way writes the same text,
+    // and the tree takes the fewest passes when every guess is right.
+    let mut passes = Vec::new();
+    for _ in 0..3 {
+        let (got, stats) = llm.generate(&prompt, 24, Sampling::default(), |_| {}).await.unwrap();
+        assert_eq!(got, want);
+        passes.push(stats.passes);
+    }
+    if want.len() > 5 {
+        assert!(passes[2] * 4 <= want.len() + 4, "tree: {} passes for {} tokens", passes[2], want.len());
+        assert!(passes[2] <= passes[1] && passes[1] < passes[0], "plain, chain, tree: {passes:?}");
     }
 
     // A different, smaller draft: guesses are sometimes wrong, the text never is.
@@ -216,8 +223,10 @@ async fn speculative_decoding_writes_the_same_text_in_fewer_passes() {
     let _ = std::fs::remove_dir_all(&dir);
     let client = Client::open(&m.coordinator, &url, plan(&[(1, 0..1), (0, 1..4)]), &addrs, &|_, _, _| {}).await.unwrap();
     let llm = Llm::new(&header, vec![client], Some(other)).unwrap();
-    let (got, _) = llm.generate(&prompt, 24, Sampling::default(), |_| {}).await.unwrap();
-    assert_eq!(got, want);
+    for _ in 0..3 {
+        let (got, _) = llm.generate(&prompt, 24, Sampling::default(), |_| {}).await.unwrap();
+        assert_eq!(got, want);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -235,6 +244,8 @@ async fn one_conversation_keeps_every_stage_busy() {
     let same = Local::load(&Source::File(dir.join("d.gguf"))).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
     let client = Client::open(&m.coordinator, &url, plan(&[(0, 0..1), (1, 1..2), (2, 2..3)]), &addrs, &|_, _, _| {}).await.unwrap();
+    // This test is about the pipelined chain: measured as the fastest way here.
+    client.speed.lock().unwrap().ms = [100.0, 1.0, 100.0];
     let llm = Llm::new(&header, vec![client], Some(same)).unwrap();
     let prompt: Vec<u32> = vec![1, 60, 61, 62];
     let want = local_text(&file, &prompt, 40).await;
@@ -308,6 +319,37 @@ async fn a_cancelled_start_frees_the_models_memory() {
     tokio::time::timeout(Duration::from_secs(5), freed).await.expect("the cancelled model left memory");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_swarm_drafter_grows_part_of_the_tree() {
+    let file = bc_infer::fixtures::tiny_model(4, false);
+    let small = bc_infer::fixtures::tiny_model(2, false);
+    let (url, _) = serve(file.clone()).await;
+    let (draft_url, _) = serve(small.clone()).await;
+    let m = mesh(2).await;
+    let addrs: Vec<_> = m.devices.iter().map(|d| d.addr()).collect();
+    let header = Source::parse_remote(&url).unwrap().header().await.unwrap();
+    let prompt: Vec<u32> = vec![1, 50, 51, 52];
+    let want = local_text(&file, &prompt, 24).await;
+    // The model on device 0; a whole draft model on device 1, drafting for the swarm;
+    // the same draft model on this computer.
+    let target = Client::open(&m.coordinator, &url, plan(&[(0, 0..4)]), &addrs, &|_, _, _| {}).await.unwrap();
+    let drafter = Client::open(&m.coordinator, &draft_url, plan(&[(1, 0..2)]), &addrs, &|_, _, _| {}).await.unwrap();
+    let dir = tempfile_dir();
+    std::fs::write(dir.join("d.gguf"), &small).unwrap();
+    let local = Local::load(&Source::File(dir.join("d.gguf"))).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    let llm = Llm::new(&header, vec![target.clone()], Some(local)).unwrap();
+    llm.set_drafters(vec![drafter.clone()]);
+    assert_eq!(llm.drafters(), 1);
+    // Tree decoding, as measured fastest here: the drafter's subtrees join it.
+    target.speed.lock().unwrap().ms = [100.0, 100.0, 1.0];
+    let (got, stats) = llm.generate(&prompt, 24, Sampling::default(), |_| {}).await.unwrap();
+    assert_eq!(got, want, "a tree grown by two devices still writes exactly the target's text");
+    assert!(stats.passes >= 1);
+    // The drafter really drafted: it computed batches.
+    assert!(bc_mesh::engine::hosted_now().iter().any(|h| h.of == 2 && h.batches > 0));
+}
+
 /// A real model over three devices: `BC_TEST_MODEL=<model.gguf> [BC_TEST_DRAFT=<draft.gguf>]
 /// cargo test -p bc-mesh --release --test llm real_model -- --ignored --nocapture`.
 #[tokio::test(flavor = "multi_thread")]
@@ -343,4 +385,14 @@ async fn real_model_over_three_devices() {
     let want = local_text(&file, &prompt, ids.len()).await;
     assert_eq!(ids, want, "the split model writes exactly what the whole one does");
     println!("matches one computer for all {} tokens", ids.len());
+    // With a draft, every way of decoding is tried in turn (plain, chain, tree): same text,
+    // and how many tokens each pass through the pipeline yields.
+    if llm.has_draft() {
+        for _ in 0..3 {
+            let (again, s) = llm.generate(&prompt, 96, Sampling::default(), |_| {}).await.unwrap();
+            assert_eq!(again, ids);
+            let secs = ((s.total_ms - s.first_token_ms) / 1000.0).max(1e-3);
+            println!("{} tokens in {} passes ({:.2} a pass), {:.1} tokens/s", s.generated, s.passes, s.generated as f64 / s.passes.max(1) as f64, s.generated.saturating_sub(1) as f64 / secs);
+        }
+    }
 }

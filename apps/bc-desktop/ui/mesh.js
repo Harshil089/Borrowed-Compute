@@ -58,7 +58,7 @@ function renderDevices(devices) {
   }).join("");
 }
 
-function renderPlan(pipelines, unused = []) {
+function renderPlan(pipelines, unused = [], drafters = []) {
   $("mesh-plan-block").classList.toggle("hidden", !pipelines.length);
   if (!pipelines.length) return;
   const layers = Math.max(...pipelines.flatMap((p) => p.stages.map((s) => s.end)));
@@ -76,7 +76,9 @@ function renderPlan(pipelines, unused = []) {
       </div>`).join("");
     const sum = `<div class="mesh-sum">About ${fmt(p.token_ms)} ms a token for one conversation (${fmt(p.network_ms)} ms of it network); ${fmt(p.tokens_per_s, 1)} tokens/s with every device busy.</div>`;
     return head + stages + sum;
-  }).join("") + (unused.length ? `<div class="mesh-sum">Not needed: ${unused.map(esc).join(", ")}</div>` : "");
+  }).join("") + (drafters.length
+    ? `<div class="mesh-sum">Swarm: ${drafters.map(esc).join(", ")} ${drafters.length === 1 ? "drafts" : "draft"} guesses for this model, so each pass can confirm several tokens.</div>`
+    : unused.length ? `<div class="mesh-sum">Not used: one conversation is fastest without ${unused.map(esc).join(", ")}. Choose Many requests to use every device.</div>` : "");
 }
 
 function renderRunning(s) {
@@ -90,7 +92,7 @@ function renderRunning(s) {
   if (!running) return;
   $("mesh-name").textContent = s.model;
   $("mesh-url").innerHTML = `<span class="mono code">${esc(s.url)}</span><button data-copy="${esc(s.url)}">${copyIcon}</button>`;
-  renderPlan(s.pipelines);
+  renderPlan(s.pipelines, [], s.drafters || []);
 }
 
 async function measure() {

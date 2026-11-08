@@ -14,7 +14,7 @@ pub mod sample;
 pub mod source;
 pub mod tokenizer;
 
-pub use model::{Config, Kv, Part};
+pub use model::{Config, Kv, Part, MAX_TREE, ROOT};
 pub use sample::Sampling;
 pub use source::Source;
 pub use tokenizer::Tokenizer;

@@ -25,7 +25,7 @@ use std::time::Instant;
 
 use anyhow::{anyhow, bail, Context, Result};
 use bc_infer::gguf::Header;
-use bc_infer::{Config, Kv, Local, Part, Sampling, Tokenizer};
+use bc_infer::{Config, Kv, Local, Part, Sampling, Tokenizer, MAX_TREE, ROOT};
 use iroh::{Endpoint, EndpointAddr};
 use tokio::sync::{oneshot, Mutex};
 
@@ -42,6 +42,18 @@ async fn draft_run(d: (Arc<Part>, Kv), tokens: Vec<u32>, pos: usize) -> Result<(
 }
 
 use crate::msg::{Activation, Meta, StageSetup};
+
+use crate::tree::{grow, top_k, TREE_NODES, TREE_ROOT_K};
+
+/// [`grow`] off the async threads, under the likeliest first tokens from `root`.
+async fn grow_tree(d: (Arc<Part>, Kv), roots: Vec<(u32, f32)>, pos: usize, budget: usize) -> Result<((Arc<Part>, Kv), Vec<(u32, u32)>)> {
+    tokio::task::spawn_blocking(move || {
+        let (part, mut kv) = d;
+        let nodes = grow(&part, &mut kv, pos, roots, budget)?;
+        Ok(((part, kv), nodes))
+    })
+    .await?
+}
 use crate::pipeline::{self, Input, Target};
 use crate::plan::{Model, PipelinePlan};
 
@@ -69,34 +81,50 @@ pub struct Client {
     pub speed: StdMutex<Speed>,
 }
 
-/// Which way of decoding is faster on a pipeline, as measured. Guessing pays when the
-/// stages check several tokens for about the price of one (CPU stages, and memory-bound
-/// GPUs) and the draft agrees often; it costs when checking is dear or guesses miss. So
-/// each pipeline keeps both times and decodes the faster way, trying the other every
-/// [`EXPLORE`] requests in case things changed.
+/// How a request decodes: a token a pass, a chain of guesses pipelined through the
+/// stages, or a tree of guesses checked in one pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Plain = 0,
+    Chain = 1,
+    Tree = 2,
+}
+
+/// Which way of decoding is fastest on a pipeline, as measured. Guessing pays when the
+/// stages check many rows for about the price of one (CPU stages, and memory-bound GPUs)
+/// and the draft agrees often; it costs when checking is dear or guesses miss. So each
+/// pipeline keeps the milliseconds a token of every way, decodes the fastest, and tries
+/// another every [`EXPLORE`] requests in case things changed.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Speed {
-    pub plain_ms: f64,
-    pub spec_ms: f64,
+    /// Milliseconds a token, by [`Mode`]; 0 until measured.
+    pub ms: [f64; 3],
     requests: u64,
 }
 
 const EXPLORE: u64 = 8;
+/// Untried ways go in this order, so a new pipeline's first answer is never the costly
+/// experiment.
+const MODES: [Mode; 3] = [Mode::Plain, Mode::Chain, Mode::Tree];
 
 impl Speed {
-    fn speculate(&mut self) -> bool {
+    fn choose(&mut self) -> Mode {
         self.requests += 1;
-        let faster = self.spec_ms <= self.plain_ms;
-        match (self.spec_ms > 0.0, self.plain_ms > 0.0) {
-            (false, _) => true,
-            (true, false) => false,
-            _ if self.requests.is_multiple_of(EXPLORE) => !faster,
-            _ => faster,
+        if let Some(&untried) = MODES.iter().find(|m| self.ms[**m as usize] == 0.0) {
+            return untried;
         }
+        let best = *MODES.iter().min_by(|a, b| self.ms[**a as usize].total_cmp(&self.ms[**b as usize])).unwrap();
+        if self.requests.is_multiple_of(EXPLORE) {
+            let other = MODES[(self.requests / EXPLORE) as usize % MODES.len()];
+            if other != best {
+                return other;
+            }
+        }
+        best
     }
 
-    fn record(&mut self, speculated: bool, ms_per_token: f64) {
-        let slot = if speculated { &mut self.spec_ms } else { &mut self.plain_ms };
+    fn record(&mut self, mode: Mode, ms_per_token: f64) {
+        let slot = &mut self.ms[mode as usize];
         *slot = if *slot == 0.0 { ms_per_token } else { 0.7 * *slot + 0.3 * ms_per_token };
     }
 }
@@ -298,6 +326,9 @@ pub struct Llm {
     replicas: StdMutex<Vec<Arc<Client>>>,
     /// Shared by every request: each keeps its own cache, so drafts run side by side.
     draft: Option<Arc<Part>>,
+    /// The swarm: whole draft models on other devices, each growing its own branch of
+    /// the tree while this computer grows the rest (one-stage pipelines).
+    drafters: StdMutex<Vec<Arc<Client>>>,
 }
 
 impl Llm {
@@ -308,7 +339,20 @@ impl Llm {
                 bail!("the draft model's vocabulary ({}) differs from the model's ({})", d.tokenizer.vocab(), tokenizer.vocab());
             }
         }
-        Ok(Llm { tokenizer, cfg: Config::from_header(header)?, replicas: StdMutex::new(replicas), draft: draft.map(|d| Arc::new(d.part)) })
+        Ok(Llm { tokenizer, cfg: Config::from_header(header)?, replicas: StdMutex::new(replicas), draft: draft.map(|d| Arc::new(d.part)), drafters: StdMutex::default() })
+    }
+
+    /// Devices that draft for tree speculation alongside this computer.
+    pub fn set_drafters(&self, drafters: Vec<Arc<Client>>) {
+        *self.drafters.lock().unwrap() = drafters;
+    }
+
+    pub fn drafters(&self) -> usize {
+        self.drafters.lock().unwrap().iter().filter(|d| d.alive()).count()
+    }
+
+    pub fn has_draft(&self) -> bool {
+        self.draft.is_some()
     }
 
     pub fn replicas(&self) -> Vec<Arc<Client>> {
@@ -331,6 +375,107 @@ impl Llm {
                 ka.total_cmp(&kb)
             })
             .context("no pipeline is running")
+    }
+
+    /// Tree speculation, one pass at a time: the draft grows a tree of guesses after the
+    /// confirmed text, the whole tree (after the confirmed tokens the stages have not yet
+    /// seen) goes through the pipeline as one batch, and the target's own choice is walked
+    /// down the tree for as long as a guess matches it; its choice where none does is the
+    /// next token. The next batch tells every stage which rows to keep. The text is
+    /// exactly what the target alone writes, since each tree row is scored as if its path
+    /// had been fed alone.
+    #[allow(clippy::too_many_arguments)]
+    async fn tree_decode(
+        &self,
+        client: &Client,
+        draft: &Arc<Part>,
+        prompt: &[u32],
+        seq: &mut Vec<u32>,
+        target_len: &mut usize,
+        out: &mut Vec<u32>,
+        max_tokens: usize,
+        stats: &mut Stats,
+        meta: &impl Fn(usize, bool) -> Meta,
+        push: &mut impl FnMut(u32, &mut Vec<u32>, &mut Vec<u32>) -> bool,
+    ) -> Result<()> {
+        let vocab = self.cfg.vocab;
+        let (mut d, _) = draft_run((draft.clone(), draft.new_kv()), prompt.to_vec(), 0).await?;
+        let mut draft_len = prompt.len();
+        let mut keep: Option<(u32, Vec<u32>)> = None;
+        let drafters: Vec<Arc<Client>> = self.drafters.lock().unwrap().iter().filter(|d| d.alive()).cloned().collect();
+        // Confirmed tokens each drafter has seen.
+        let mut drafted = vec![0usize; drafters.len()];
+        while out.len() < max_tokens {
+            // The draft catches up on the confirmed text; its last scores seed the tree.
+            let feed = seq[draft_len..].to_vec();
+            let (back, scores) = draft_run(d, feed.clone(), draft_len).await?;
+            draft_len = seq.len();
+            let real = seq.len() - *target_len;
+            let budget = TREE_NODES.min(MAX_TREE - real);
+            // The likeliest first tokens: the second, third… each go to a drafter of the
+            // swarm, which grows the subtree below it; this computer grows the rest.
+            let mut roots = top_k(&scores[(feed.len() - 1) * vocab..], TREE_ROOT_K + drafters.len());
+            let swarm = drafters.len().min(roots.len().saturating_sub(1));
+            let share = budget / (swarm + 1);
+            let mut asks = Vec::with_capacity(swarm);
+            for (i, (root, _)) in roots.drain(1..1 + swarm).enumerate() {
+                let mut tokens = seq[drafted[i]..].to_vec();
+                tokens.push(root);
+                let m = Meta { grow: Some(share.saturating_sub(1) as u32), ..meta(drafted[i], false) };
+                drafted[i] = seq.len();
+                asks.push((root, drafters[i].submit(m, Activation::Tokens(tokens)).await));
+            }
+            let mine = Instant::now();
+            let (back, mut nodes) = grow_tree(back, roots, draft_len, budget - swarm * share).await?;
+            d = back;
+            // Subtrees that arrive while this computer's part takes as long again join the
+            // tree; later ones are left out of this pass.
+            let wait = mine.elapsed().max(std::time::Duration::from_millis(20));
+            for (root, ask) in asks {
+                let Ok(rx) = ask else { continue };
+                let Ok(Ok(Ok((_, Activation::Tokens(flat))))) = tokio::time::timeout(wait, rx).await else { continue };
+                let at = nodes.len() as u32;
+                nodes.push((root, ROOT));
+                for pair in flat.chunks_exact(2).take(share.saturating_sub(1)) {
+                    nodes.push((pair[0], if pair[1] == ROOT { at } else { at + 1 + pair[1] }));
+                }
+            }
+            nodes.truncate(budget);
+            let mut tokens: Vec<u32> = seq[*target_len..].to_vec();
+            let mut parents: Vec<u32> = (0..real as u32).map(|i| if i == 0 { ROOT } else { i - 1 }).collect();
+            for &(t, p) in &nodes {
+                tokens.push(t);
+                parents.push(if p == ROOT { real as u32 - 1 } else { p + real as u32 });
+            }
+            let m = Meta { tree: Some(parents.clone()), keep: keep.take(), ..meta(*target_len, true) };
+            let checked = client.call(m, Activation::Tokens(tokens.clone())).await?;
+            stats.passes += 1;
+            // Rows the stages keep: the confirmed ones, then every accepted guess.
+            let mut path: Vec<u32> = (0..real as u32).collect();
+            let mut at = real - 1;
+            let mut more = true;
+            loop {
+                let pred = checked[at];
+                let child = (real..tokens.len()).find(|&r| parents[r] as usize == at && tokens[r] == pred);
+                if !push(pred, out, seq) {
+                    more = false;
+                    break;
+                }
+                match child {
+                    Some(c) => {
+                        path.push(c as u32);
+                        at = c;
+                    }
+                    None => break,
+                }
+            }
+            *target_len += path.len();
+            keep = Some(((*target_len - path.len()) as u32, path));
+            if !more {
+                break;
+            }
+        }
+        Ok(())
     }
 
     /// Generates up to `max_tokens` after `prompt`, calling `on_text` with each new piece.
@@ -391,14 +536,15 @@ impl Llm {
         }
 
         // Decoding speed, for choosing how to decode next time; short answers say little.
-        let record = |speculated: bool, stats: &Stats| {
+        let record = |mode: Mode, stats: &Stats| {
             if stats.generated >= 8 {
                 let ms = (stats.total_ms - stats.first_token_ms) / (stats.generated - 1) as f64;
-                client.speed.lock().unwrap().record(speculated, ms);
+                client.speed.lock().unwrap().record(mode, ms);
             }
         };
-        let speculate = sampling.temperature <= 0.0 && self.draft.is_some() && client.speed.lock().unwrap().speculate();
-        let Some(draft) = self.draft.clone().filter(|_| speculate) else {
+        let greedy = sampling.temperature <= 0.0 && self.draft.is_some();
+        let mode = if greedy { client.speed.lock().unwrap().choose() } else { Mode::Plain };
+        let Some(draft) = self.draft.clone().filter(|_| mode != Mode::Plain) else {
             // No draft model, sampling, or guessing measured slower here: a token a pass.
             while out.len() < max_tokens {
                 stats.passes += 1;
@@ -410,11 +556,22 @@ impl Llm {
             }
             stats.generated = out.len();
             stats.total_ms = started.elapsed().as_secs_f64() * 1000.0;
-            if self.draft.is_some() && sampling.temperature <= 0.0 {
-                record(false, &stats);
+            if greedy {
+                record(Mode::Plain, &stats);
             }
             return Ok((out, stats));
         };
+
+        if mode == Mode::Tree {
+            client.in_flight.fetch_add(1, Ordering::Relaxed);
+            let tree = self.tree_decode(&client, &draft, prompt, &mut seq, &mut target_len, &mut out, max_tokens, &mut stats, &meta, &mut push).await;
+            client.in_flight.fetch_sub(1, Ordering::Relaxed);
+            tree?;
+            stats.generated = out.len();
+            stats.total_ms = started.elapsed().as_secs_f64() * 1000.0;
+            record(Mode::Tree, &stats);
+            return Ok((out, stats));
+        }
 
         // Pipelined speculation. The stream is `seq` (confirmed) then `guesses` (the
         // draft's, unchecked); `sent` positions of it are in the target's pipeline. While
@@ -508,7 +665,7 @@ impl Llm {
         spec?;
         stats.generated = out.len();
         stats.total_ms = started.elapsed().as_secs_f64() * 1000.0;
-        record(true, &stats);
+        record(Mode::Chain, &stats);
         Ok((out, stats))
     }
 }
@@ -518,18 +675,24 @@ mod tests {
     use super::Speed;
 
     #[test]
-    fn decoding_takes_the_faster_way_and_rechecks_the_other() {
+    fn decoding_takes_the_fastest_way_and_rechecks_the_others() {
+        use super::Mode::*;
         let mut s = Speed::default();
-        assert!(s.speculate(), "first, try guessing");
-        s.record(true, 30.0);
-        assert!(!s.speculate(), "then measure without");
-        s.record(false, 20.0);
-        let choices: Vec<bool> = (0..16).map(|_| s.speculate()).collect();
-        assert_eq!(choices.iter().filter(|&&c| c).count(), 2, "plain is faster: guess only to recheck, {choices:?}");
-        s.record(true, 5.0);
-        s.record(true, 5.0);
-        s.record(true, 5.0);
-        assert!(s.spec_ms < s.plain_ms);
-        assert!((0..7).filter(|_| s.speculate()).count() >= 6, "guessing got faster: use it");
+        // Each way is tried once first, plain first.
+        assert_eq!(s.choose(), Plain);
+        s.record(Plain, 20.0);
+        assert_eq!(s.choose(), Chain);
+        s.record(Chain, 30.0);
+        assert_eq!(s.choose(), Tree);
+        s.record(Tree, 10.0);
+        // Then the fastest, with an occasional recheck of another.
+        let picks: Vec<_> = (0..24).map(|_| s.choose()).collect();
+        let others = picks.iter().filter(|&&m| m != Tree).count();
+        assert!((1..=4).contains(&others), "{picks:?}");
+        // Plain got faster: it takes over.
+        for _ in 0..4 {
+            s.record(Plain, 2.0);
+        }
+        assert!((0..7).filter(|_| s.choose() == Plain).count() >= 6);
     }
 }

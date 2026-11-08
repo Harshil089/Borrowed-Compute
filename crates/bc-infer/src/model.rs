@@ -140,6 +140,31 @@ pub struct Kv {
 }
 
 impl Kv {
+    /// Keeps, of the rows a tree pass placed at slots `base..`, only `rows` (ascending,
+    /// the accepted path), moved to `base, base + 1, …`, and drops everything after them:
+    /// the cache then holds exactly the accepted text, as if it had been fed in a line.
+    pub fn keep(&mut self, base: usize, rows: &[u32]) -> Result<()> {
+        if rows.windows(2).any(|w| w[0] >= w[1]) || rows.iter().any(|&r| base + r as usize >= self.len) {
+            bail!("rows {rows:?} at {base} are not an ascending path within the {} cached tokens", self.len);
+        }
+        if let Some(g) = self.gpu.as_mut() {
+            g.keep(base, rows)?;
+        }
+        for c in self.k.iter_mut().chain(self.v.iter_mut()) {
+            if c.is_empty() {
+                continue;
+            }
+            let width = c.len() / self.len;
+            for (n, &r) in rows.iter().enumerate() {
+                let (from, to) = ((base + r as usize) * width, (base + n) * width);
+                c.copy_within(from..from + width, to);
+            }
+            c.truncate((base + rows.len()) * width);
+        }
+        self.len = base + rows.len();
+        Ok(())
+    }
+
     /// Bytes held, in RAM and on the GPU.
     pub fn bytes(&self) -> usize {
         self.k.iter().chain(&self.v).map(|x| x.len() * 4).sum::<usize>() + self.gpu.as_ref().map_or(0, |g| g.bytes())
@@ -258,7 +283,17 @@ impl Part {
     /// The cache is cut back to `pos` first, which drops tokens a speculative pass
     /// proposed and the coordinator then rejected.
     pub fn forward(&self, x: &mut [f32], rows: usize, pos: usize, kv: &mut Kv) -> Result<()> {
+        self.forward_tree(x, rows, pos, None, kv)
+    }
+
+    /// [`Part::forward`] for a tree of rows: `tree[i]` is row i's parent row, or [`ROOT`]
+    /// for a row that follows the cached text directly. Row i sits at position
+    /// `pos + depth(i)` and sees the cache before `pos` plus its own ancestors, so each
+    /// row is scored exactly as if its path alone had been fed. Its keys and values go to
+    /// slot `pos + i`; [`Kv::keep`] then keeps the accepted path. `None` is a line.
+    pub fn forward_tree(&self, x: &mut [f32], rows: usize, pos: usize, tree: Option<&[u32]>, kv: &mut Kv) -> Result<()> {
         let c = &self.cfg;
+        let shape = Shape::new(rows, pos, tree)?;
         if x.len() != rows * c.n_embd {
             bail!("{} values are not {rows} rows of {}", x.len(), c.n_embd);
         }
@@ -272,7 +307,8 @@ impl Part {
         let started = std::time::Instant::now();
         let on_gpu = match (&self.gpu, kv.gpu.as_mut()) {
             (Some(g), Some(cache)) => {
-                g.forward(c, x, rows, pos, cache)?;
+                let positions: Vec<u32> = shape.positions.iter().map(|&p| p as u32).collect();
+                g.forward(c, x, pos, &positions, shape.visible.as_deref(), cache)?;
                 g.len()
             }
             _ => 0,
@@ -288,14 +324,13 @@ impl Part {
             add_bias(&mut q, b.bq.as_deref());
             add_bias(&mut k, b.bk.as_deref());
             add_bias(&mut v, b.bv.as_deref());
-            for i in 0..rows {
-                let p = pos + i;
+            for (i, &p) in shape.positions.iter().enumerate() {
                 rope(&mut q[i * c.n_head * c.head_dim..(i + 1) * c.n_head * c.head_dim], c, p, &self.inv_freq);
                 rope(&mut k[i * kvd..(i + 1) * kvd], c, p, &self.inv_freq);
             }
             kc.extend_from_slice(&k);
             vc.extend_from_slice(&v);
-            let att = attention(c, &q, kc, vc, rows, pos);
+            let att = attention(c, &q, kc, vc, rows, pos, shape.visible.as_deref());
             let o = b.wo.matmul(&att, rows);
             x.iter_mut().zip(&o).for_each(|(a, b)| *a += b);
 
@@ -357,20 +392,62 @@ fn rope(x: &mut [f32], c: &Config, pos: usize, inv_freq: &[f32]) {
     }
 }
 
+/// A row of a tree that follows the cached text directly.
+pub const ROOT: u32 = u32::MAX;
+/// Rows a tree pass may hold: which earlier rows each sees is one 64-bit mask.
+pub const MAX_TREE: usize = 64;
+
+/// Where each row of a batch sits and what it sees.
+struct Shape {
+    /// RoPE position of each row.
+    positions: Vec<usize>,
+    /// For a tree, the batch rows each row sees (its ancestors and itself), as bits.
+    visible: Option<Vec<u64>>,
+}
+
+impl Shape {
+    fn new(rows: usize, pos: usize, tree: Option<&[u32]>) -> Result<Self> {
+        let Some(parents) = tree else {
+            return Ok(Shape { positions: (pos..pos + rows).collect(), visible: None });
+        };
+        if parents.len() != rows || rows > MAX_TREE {
+            bail!("a tree of {} parents for {rows} rows (at most {MAX_TREE})", parents.len());
+        }
+        let (mut positions, mut visible) = (Vec::with_capacity(rows), Vec::<u64>::with_capacity(rows));
+        for (i, &p) in parents.iter().enumerate() {
+            let (depth, seen) = match p {
+                ROOT => (0, 0),
+                p if (p as usize) < i => (positions[p as usize] - pos + 1, visible[p as usize]),
+                p => bail!("row {i}'s parent {p} does not come before it"),
+            };
+            positions.push(pos + depth);
+            visible.push(seen | 1 << i);
+        }
+        Ok(Shape { positions, visible: Some(visible) })
+    }
+}
+
 /// Causal grouped-query attention for `rows` new tokens at `pos..`, against the cache.
-fn attention(c: &Config, q: &[f32], kc: &[f32], vc: &[f32], rows: usize, pos: usize) -> Vec<f32> {
+/// With `visible`, row i sees the cache before `pos` and only the batch rows its bits
+/// name (a tree); without, every earlier row (a line).
+fn attention(c: &Config, q: &[f32], kc: &[f32], vc: &[f32], rows: usize, pos: usize, visible: Option<&[u64]>) -> Vec<f32> {
     let (hd, kvd) = (c.head_dim, c.kv_dim());
     let group = c.n_head / c.n_head_kv.max(1);
     let scale = 1.0 / (hd as f32).sqrt();
     let mut out = vec![0.0; rows * c.n_head * hd];
     let mut scores = Vec::new();
+    let mut slots: Vec<usize> = Vec::new();
     for i in 0..rows {
-        let upto = pos + i + 1;
+        slots.clear();
+        match visible {
+            None => slots.extend(0..pos + i + 1),
+            Some(v) => slots.extend((0..pos).chain((0..rows).filter(|&j| v[i] >> j & 1 == 1).map(|j| pos + j))),
+        }
         for h in 0..c.n_head {
             let qh = &q[(i * c.n_head + h) * hd..(i * c.n_head + h + 1) * hd];
             let kvh = h / group.max(1);
             scores.clear();
-            scores.extend((0..upto).map(|t| dot(qh, &kc[t * kvd + kvh * hd..t * kvd + (kvh + 1) * hd]) * scale));
+            scores.extend(slots.iter().map(|&t| dot(qh, &kc[t * kvd + kvh * hd..t * kvd + (kvh + 1) * hd]) * scale));
             let max = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
             let mut sum = 0.0;
             for s in scores.iter_mut() {
@@ -378,7 +455,7 @@ fn attention(c: &Config, q: &[f32], kc: &[f32], vc: &[f32], rows: usize, pos: us
                 sum += *s;
             }
             let o = &mut out[(i * c.n_head + h) * hd..(i * c.n_head + h + 1) * hd];
-            for (t, p) in scores.iter().enumerate() {
+            for (&t, p) in slots.iter().zip(&scores) {
                 let vt = &vc[t * kvd + kvh * hd..t * kvd + (kvh + 1) * hd];
                 let w = p / sum;
                 o.iter_mut().zip(vt).for_each(|(a, b)| *a += w * b);
@@ -441,6 +518,56 @@ pub(crate) mod tests {
             let again = run(&[&whole], &mut kv1, &[40], 4);
             assert_eq!(again, one);
         }
+    }
+
+    #[test]
+    fn a_tree_pass_scores_every_path_as_if_fed_alone() {
+        // On the CPU, and on the GPU when there is one: each must match itself exactly.
+        let gpu = crate::gpu::get().is_some();
+        for (neox, on_gpu) in [(false, false), (true, false), (false, true), (true, true)] {
+            if on_gpu && !gpu {
+                continue;
+            }
+            let file = tiny_model(3, neox);
+            let part = load_all(&file, 0..3, true, true);
+            let part = if on_gpu { part } else { part.without_gpu() };
+            assert_eq!(part.gpu_layers().0 > 0, on_gpu);
+            let v = part.cfg.vocab;
+            let prefix = [5u32, 9, 13];
+            // Two branches from the text, the first branching again:
+            //   40 ─┬─ 41 ── 43
+            //       └─ 42
+            //   44
+            let tokens = [40u32, 41, 42, 43, 44];
+            let tree = [ROOT, 0, 0, 1, ROOT];
+            let mut kv = part.new_kv();
+            run(&[&part], std::slice::from_mut(&mut kv), &prefix, 0);
+            let mut x = part.embed(&tokens).unwrap();
+            part.forward_tree(&mut x, tokens.len(), prefix.len(), Some(&tree), &mut kv).unwrap();
+            let scores = part.logits(&x, tokens.len()).unwrap();
+            let paths: [&[u32]; 5] = [&[40], &[40, 41], &[40, 42], &[40, 41, 43], &[44]];
+            for (row, path) in paths.iter().enumerate() {
+                let mut alone = part.new_kv();
+                let line: Vec<u32> = prefix.iter().chain(path.iter()).copied().collect();
+                let want = run(&[&part], std::slice::from_mut(&mut alone), &line, 0);
+                assert_eq!(&scores[row * v..(row + 1) * v], &want[(line.len() - 1) * v..], "row {row}, path {path:?}");
+            }
+            // Accept 40 → 41 → 43 (rows 0, 1, 3): the cache then holds exactly that text.
+            kv.keep(prefix.len(), &[0, 1, 3]).unwrap();
+            assert_eq!(kv.len, 6);
+            let next = run(&[&part], std::slice::from_mut(&mut kv), &[50], 6);
+            let mut fresh = part.new_kv();
+            let want = run(&[&part], std::slice::from_mut(&mut fresh), &[5, 9, 13, 40, 41, 43, 50], 0);
+            assert_eq!(next, &want[6 * v..]);
+        }
+        // Parents must come first, and a path must ascend.
+        assert!(Shape::new(2, 0, Some(&[1, ROOT])).is_err());
+        let file = tiny_model(1, false);
+        let part = load_all(&file, 0..1, true, true).without_gpu();
+        let mut kv = part.new_kv();
+        run(&[&part], std::slice::from_mut(&mut kv), &[1, 2, 3], 0);
+        assert!(kv.keep(0, &[2, 1]).is_err());
+        assert!(kv.keep(0, &[0, 5]).is_err());
     }
 
     #[test]

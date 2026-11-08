@@ -232,11 +232,12 @@ DEVFN void rms_norm(GLOBAL const float* x, GLOBAL const float* w, GLOBAL float* 
 }
 
 // Rotates pair i of every head of row r by (pos + r)·θᵢ.
-DEVFN void rope(GLOBAL float* x, GLOBAL const float* inv_freq, uint heads, uint head_dim, uint rope_dim, uint pos, uint neox, uint idx) {
+// positions[r] is row r's position: pos + r in a line, pos + depth in a tree.
+DEVFN void rope(GLOBAL float* x, GLOBAL const float* inv_freq, GLOBAL const uint* positions, uint heads, uint head_dim, uint rope_dim, uint neox, uint idx) {
     uint hh = rope_dim / 2u;
     uint i = idx % hh, h = (idx / hh) % heads, r = idx / (hh * heads);
     GLOBAL float* hp = x + ((ulong)r * heads + h) * head_dim;
-    float theta = (float)(pos + r) * inv_freq[i];
+    float theta = (float)positions[r] * inv_freq[i];
     float sn = SIN(theta), cs = COS(theta);
     uint a = neox != 0u ? i : 2u * i;
     uint b = neox != 0u ? i + hh : 2u * i + 1u;
@@ -249,11 +250,30 @@ DEVFN void rope(GLOBAL float* x, GLOBAL const float* inv_freq, uint heads, uint 
 // running ("online") softmax over tiles of TILE positions: m is the largest score so far,
 // l the sum of e^(s − m), and acc the weighted sum of values, all rescaled by e^(m − m')
 // when a tile raises the maximum (Milakov and Gimelshein 2018; FlashAttention).
+// The k-th of the batch rows a tree row sees: the k-th set bit of its mask.
+DEVFN uint nth_bit(uint lo, uint hi, uint k) {
+    for (uint b = 0; b < 64u; b++) {
+        uint set = b < 32u ? (lo >> b) & 1u : (hi >> (b - 32u)) & 1u;
+        if (set != 0u) {
+            if (k == 0u) return b;
+            k -= 1u;
+        }
+    }
+    return 0u;
+}
+
+// For a tree (masks != 0), row r sees the cache before pos and the batch rows its mask
+// (two words per row) names, walked in the same order as a line would walk them: list
+// index k is cache slot k below pos, then the (k - pos)-th visible row. So a tree row is
+// summed in exactly the order a one-path pass would sum it, bit for bit.
 DEVFN void attention(GLOBAL const float* q, GLOBAL const float* kc, GLOBAL const float* vc, GLOBAL float* out, LOCAL float* sh,
+                     GLOBAL const uint* masks, uint tree,
                      uint n_head, uint n_head_kv, uint head_dim, uint pos, float scale, uint h, uint r, uint lane) {
     uint kvd = n_head_kv * head_dim;
     uint kvh = h / (n_head / n_head_kv);
-    uint upto = pos + r + 1u;
+    uint lo = tree != 0u ? masks[2u * r] : 0u, hi = tree != 0u ? masks[2u * r + 1u] : 0u;
+    uint upto = tree != 0u ? pos + POPC(lo) + POPC(hi) : pos + r + 1u;
+#define SLOT(k) ((tree == 0u || (k) < pos) ? (k) : pos + nth_bit(lo, hi, (k) - pos))
     GLOBAL const float* qh = q + ((ulong)r * n_head + h) * head_dim;
     float acc[MAX_HEAD / 32];
     for (uint j = 0; j < MAX_HEAD / 32u; j++) acc[j] = 0.0f;
@@ -262,7 +282,7 @@ DEVFN void attention(GLOBAL const float* q, GLOBAL const float* kc, GLOBAL const
         uint end = start + TILE < upto ? start + TILE : upto;
         float tmax = NEG_INF;
         for (uint t = start + lane; t < end; t += 32u) {
-            GLOBAL const float* kt = kc + (ulong)t * kvd + kvh * head_dim;
+            GLOBAL const float* kt = kc + (ulong)SLOT(t) * kvd + kvh * head_dim;
             float s = 0.0f;
             for (uint d = 0; d < head_dim; d++) s += qh[d] * kt[d];
             s *= scale;
@@ -271,7 +291,8 @@ DEVFN void attention(GLOBAL const float* q, GLOBAL const float* kc, GLOBAL const
         }
         tmax = WMAX(tmax);
         float mn = m > tmax ? m : tmax;
-        float corr = EXP(m - mn);
+        // A tile with nothing visible yet (a tree row's first tile is never one) keeps m.
+        float corr = mn == NEG_INF ? 1.0f : EXP(m - mn);
         BARRIER();
         float part = 0.0f;
         for (uint t = start + lane; t < end; t += 32u) {
@@ -284,7 +305,7 @@ DEVFN void attention(GLOBAL const float* q, GLOBAL const float* kc, GLOBAL const
         BARRIER();
         for (uint t = start; t < end; t++) {
             float p = sh[t - start];
-            GLOBAL const float* vt = vc + (ulong)t * kvd + kvh * head_dim;
+            GLOBAL const float* vt = vc + (ulong)SLOT(t) * kvd + kvh * head_dim;
             for (uint j = 0; j < MAX_HEAD / 32u; j++) {
                 uint d = lane + 32u * j;
                 if (d < head_dim) acc[j] += p * vt[d];
@@ -300,8 +321,12 @@ DEVFN void attention(GLOBAL const float* q, GLOBAL const float* kc, GLOBAL const
     }
 }
 
+#undef SLOT
+
 // Elementwise kernels: one thread per value, i < n.
 DEVFN void bias_add(GLOBAL float* x, GLOBAL const float* b, uint n, uint dim, uint i) { if (i < n) x[i] += b[i % dim]; }
 DEVFN void silu_mul(GLOBAL float* g, GLOBAL const float* u, uint n, uint i) { if (i < n) { float v = g[i]; g[i] = v / (1.0f + EXP(-v)) * u[i]; } }
 DEVFN void add(GLOBAL float* x, GLOBAL const float* y, uint n, uint i) { if (i < n) x[i] += y[i]; }
 DEVFN void copy(GLOBAL const float* src, GLOBAL float* dst, uint offset, uint n, uint i) { if (i < n) dst[offset + i] = src[i]; }
+// Within one buffer, `to` never after `from`: keeps an accepted tree row in the cache.
+DEVFN void move(GLOBAL float* b, uint from, uint to, uint n, uint i) { if (i < n) b[to + i] = b[from + i]; }

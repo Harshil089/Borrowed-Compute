@@ -173,8 +173,13 @@ pub struct Session {
     pub spec: Model,
     pub goal: Goal,
     endpoint: Endpoint,
+    /// Devices drafting for the swarm.
+    pub drafter_names: Vec<String>,
     state: tokio::sync::Mutex<SessionState>,
 }
+
+/// Swarm drafters at most: past a few, a wider tree no longer pays for its checking.
+const MAX_DRAFTERS: usize = 3;
 
 struct SessionState {
     devices: Vec<MeshDevice>,
@@ -231,17 +236,23 @@ impl Session {
         let spec = bc_mesh::llm::model_spec(&name, &header)?;
         status(&format!("Measuring {} devices at once…", targets.len()));
         let devices = probe_all(&endpoint, targets).await;
+        // A draft published at a web address can also run on other devices, for the swarm.
+        let mut draft_url = None;
         let draft = match draft.or(suggested.as_deref()) {
             Some(d) if d != "none" => {
                 status(&format!("Downloading the draft model {d} to this computer's memory…"));
                 let src = match resolve_model(d) {
-                    Ok((_, u, _)) => Source::parse_remote(&u)?,
+                    Ok((_, u, _)) => {
+                        draft_url = Some(u.clone());
+                        Source::parse_remote(&u)?
+                    }
                     Err(_) => Source::parse_local(d)?,
                 };
                 Some(Local::load_with(&src, |done, total| status(&format!("Downloading the draft model {d} to this computer's memory: {} of {}", gb(done), gb(total)))).await?)
             }
             _ => None,
         };
+        let draft_layers = draft.as_ref().map(|d| d.part.cfg.n_layer as u32);
         // Measured after the draft model is in memory, so its room is not counted twice.
         let mut devices = devices;
         devices.push(this_computer(&endpoint).await);
@@ -273,7 +284,31 @@ impl Session {
         })
         .await?;
         let llm = Arc::new(Llm::new(&header, clients, draft)?);
-        Ok(Session { llm, name, url, spec, goal, endpoint, state: tokio::sync::Mutex::new(SessionState { devices, pairs, plan }) })
+        // The swarm: devices the model does not need each run the draft model and grow a
+        // branch of every tree of guesses (docs/frontier.md, phase 1).
+        let mut drafter_names = Vec::new();
+        if let (Some(durl), Some(layers)) = (draft_url, draft_layers) {
+            let idle: Vec<usize> = plan.unused.iter().copied().filter(|&i| !usable[i].local).take(MAX_DRAFTERS).collect();
+            if !idle.is_empty() {
+                status(&format!("Starting {} swarm drafter(s)…", idle.len()));
+                let addrs: Vec<EndpointAddr> = usable.iter().map(|d| d.addr.clone()).collect();
+                let opens = idle.iter().map(|&i| {
+                    let p = bc_mesh::plan::PipelinePlan { stages: vec![bc_mesh::plan::StagePlan { device: i, layers: 0..layers }], token_ms: 0.0, network_ms: 0.0, tokens_per_s: 0.0, prefill_net_ms_per_1k: 0.0 };
+                    let (endpoint, durl, addrs) = (&endpoint, &durl, &addrs);
+                    async move { (i, Client::open(endpoint, durl, p, addrs, &|_, _, _| {}).await) }
+                });
+                let mut drafters = Vec::new();
+                for (i, opened) in futures_util::future::join_all(opens).await {
+                    // A device that cannot draft is simply left out of the swarm.
+                    if let Ok(c) = opened {
+                        drafters.push(c);
+                        drafter_names.push(usable[i].name.clone());
+                    }
+                }
+                llm.set_drafters(drafters);
+            }
+        }
+        Ok(Session { llm, name, url, spec, goal, endpoint, drafter_names, state: tokio::sync::Mutex::new(SessionState { devices, pairs, plan }) })
     }
 
     /// Stages and devices, for display: (device name, layers) per pipeline.
