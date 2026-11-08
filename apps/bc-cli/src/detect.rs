@@ -213,7 +213,26 @@ pub fn python_setup(root: &Path, os: Os) -> Option<String> {
     } else {
         return None;
     };
-    Some(format!("{} -m venv .venv && {}pip install -q {deps}", os.python(), os.venv_bin()))
+    Some(format!("{} -m venv .venv && {}pip install -q {deps}", pinned_python(root, os), os.venv_bin()))
+}
+
+/// The Python a project asks for in `runtime.txt` (`python-3.12.0`) or `.python-version`
+/// (`3.12`), on a device that has it, else the default: the newest Python often lacks
+/// prebuilt packages its dependencies need.
+fn pinned_python(root: &Path, os: Os) -> String {
+    let asked = ["runtime.txt", ".python-version"].iter().find_map(|n| std::fs::read_to_string(root.join(n)).ok());
+    let minor = asked.and_then(|t| {
+        let v = t.trim().trim_start_matches("python-");
+        let mut parts = v.split('.');
+        let (major, minor) = (parts.next()?, parts.next()?);
+        // Only digits reach the shell command.
+        [major, minor].iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())).then(|| format!("{major}.{minor}"))
+    });
+    match (minor, os) {
+        (Some(v), Os::Unix) => format!("\"$(command -v python{v} || echo python3)\""),
+        (Some(v), Os::Windows) => format!("py -{v}"),
+        (None, _) => os.python().to_string(),
+    }
 }
 
 /// `requirements.txt`, else another `requirements*.txt` (`requirements-shared.txt`).
@@ -477,6 +496,14 @@ mod tests {
         let d = detect(project(&[("requirements-shared.txt", "flask"), ("tests/", "")]).path(), Os::Unix).unwrap();
         assert_eq!(d.reason, "requirements-shared.txt");
         assert!(argv(&d, 0).contains("pip install -q -r requirements-shared.txt pytest"));
+    }
+
+    #[test]
+    fn python_version_pins_choose_the_interpreter() {
+        let d = detect(project(&[("requirements.txt", ""), ("runtime.txt", "python-3.12.0"), ("main.py", "")]).path(), Os::Unix).unwrap();
+        assert!(argv(&d, 0).contains("\"$(command -v python3.12 || echo python3)\" -m venv"));
+        let d = detect(project(&[("requirements.txt", ""), (".python-version", "3.11; rm -rf /"), ("main.py", "")]).path(), Os::Unix).unwrap();
+        assert!(argv(&d, 0).starts_with("python3 -m venv") || argv(&d, 0).contains(" python3 -m venv"), "{}", argv(&d, 0));
     }
 
     #[test]
