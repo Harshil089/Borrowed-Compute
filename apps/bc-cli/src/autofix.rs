@@ -93,14 +93,22 @@ pub fn after_failure(project: &Path, argv: &[String], output: &str, os: Os) -> O
         let top = module.split('.').next().unwrap_or(module);
         let package = PYTHON_PACKAGES.iter().find(|(m, _)| *m == top).map(|(_, p)| *p).unwrap_or(top);
         let bin = os.venv_bin();
+        // Subprojects' requirements (gateway/requirements.txt) often hold what is missing.
+        let script = Os::shell_script(argv).unwrap_or_default();
+        let subs: String = sub_requirements(project).iter().filter(|r| !script.contains(r.as_str())).map(|r| format!("-r {r} ")).collect();
+        let install = format!("{bin}pip install -q {subs}{package}");
+        let reason = format!("Installing the missing Python package {package} into the workspace");
+        // A command that already sets up the virtualenv keeps its Python: install just before the run.
+        if script.contains("-m venv .venv") {
+            let mut steps: Vec<&str> = script.split(" && ").collect();
+            steps.insert(steps.len() - 1, &install);
+            return Some(Fix { reason, argv: os.shell(&steps.join(" && ")) });
+        }
         let setup = match python_setup(project, os) {
-            Some(setup) => format!("{setup} && {bin}pip install -q {package}"),
-            None => format!("{} -m venv .venv && {bin}pip install -q {package}", os.python()),
+            Some(setup) => format!("{setup} && {install}"),
+            None => format!("{} -m venv .venv && {install}", os.python()),
         };
-        return Some(Fix {
-            reason: format!("Installing the missing Python package {package} into the workspace"),
-            argv: os.shell(&format!("{setup} && {}", in_venv(argv, os))),
-        });
+        return Some(Fix { reason, argv: os.shell(&format!("{setup} && {}", in_venv(argv, os))) });
     }
 
     let (pm, install) = node_package_manager(project)?;
@@ -131,6 +139,33 @@ pub fn after_failure(project: &Path, argv: &[String], output: &str, os: Os) -> O
         return Some(chain("Installing dependencies; a package was missing".into(), &[install.to_string()], argv, os));
     }
     None
+}
+
+/// `requirements.txt` files one or two folders down (`gateway/`, `services/x/`), as
+/// relative paths with `/`, which pip reads on every system. Paths that would need
+/// quoting are left out.
+fn sub_requirements(project: &Path) -> Vec<String> {
+    let skip = |n: &str| n.starts_with('.') || ["venv", "node_modules", "__pycache__"].contains(&n);
+    let dirs = |dir: &Path| -> Vec<(String, std::path::PathBuf)> {
+        let mut found: Vec<_> = std::fs::read_dir(dir).into_iter().flatten().filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .map(|e| (e.file_name().to_string_lossy().into_owned(), e.path()))
+            .filter(|(n, _)| !skip(n))
+            .collect();
+        found.sort();
+        found
+    };
+    let mut out = Vec::new();
+    for (name, path) in dirs(project) {
+        let mut rels = vec![(name.clone(), path.clone())];
+        rels.extend(dirs(&path).into_iter().map(|(n, p)| (format!("{name}/{n}"), p)));
+        for (rel, p) in rels {
+            if p.join("requirements.txt").is_file() && rel.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-/".contains(&b)) {
+                out.push(format!("{rel}/requirements.txt"));
+            }
+        }
+    }
+    out
 }
 
 /// The oldest Python a retry falls back to.
@@ -398,6 +433,17 @@ mod tests {
         // Names that are not plain package names never reach the shell.
         let out = "cpython-315\nFailed building wheel for x;rm -rf ~\n";
         assert_eq!(after_failure(p.path(), &cmd, out, Os::Unix), None);
+    }
+
+    #[test]
+    fn a_missing_module_keeps_the_chosen_python_and_reads_subproject_requirements() {
+        let p = project(&[("requirements-shared.txt", ""), ("gateway/", ""), ("gateway/requirements.txt", "flask-login"), ("services/", ""), ("services/geo/", ""), ("services/geo/requirements.txt", ""), ("venv/", "")]);
+        let cmd = argv(&["sh", "-c", "PY=x; \"$PY\" -m venv .venv && .venv/bin/pip install -q -r requirements-shared.txt pytest && .venv/bin/python -m pytest"]);
+        let fix = after_failure(p.path(), &cmd, "E   ModuleNotFoundError: No module named 'flask_login'\n", Os::Unix).unwrap();
+        assert_eq!(
+            line(&fix),
+            "PY=x; \"$PY\" -m venv .venv && .venv/bin/pip install -q -r requirements-shared.txt pytest && .venv/bin/pip install -q -r gateway/requirements.txt -r services/geo/requirements.txt flask_login && .venv/bin/python -m pytest"
+        );
     }
 
     #[test]

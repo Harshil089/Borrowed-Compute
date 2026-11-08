@@ -181,7 +181,7 @@ pub async fn run_on_mac(
 }
 
 /// Retries after failures, each with a different fix.
-const MAX_FIXES: usize = 6;
+const MAX_FIXES: usize = 8;
 
 /// Keeps the last [`TAIL_BYTES`] written, in memory only, while passing everything on.
 const TAIL_BYTES: usize = 64 * 1024;
