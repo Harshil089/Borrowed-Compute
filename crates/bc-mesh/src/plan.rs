@@ -99,6 +99,10 @@ pub struct Device {
     /// so its layers cost no hop at all.
     #[serde(default)]
     pub local: bool,
+    /// The owner wants this device used even when the plan would be faster without it:
+    /// it gets at least one layer.
+    #[serde(default)]
+    pub include: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -239,8 +243,12 @@ fn split(model: &Model, devices: &[Device], order: &[usize], goal: Goal) -> Opti
         return None;
     }
     let cost = |i: usize, k: u32| stage_secs(model, &devices[order[i]], k);
-    let mut n = vec![0u32; order.len()];
-    for _ in 0..model.layers {
+    // Devices the owner asked for start with a layer each; the greedy fill does the rest.
+    let mut n: Vec<u32> = order.iter().zip(&caps).map(|(&d, &c)| (devices[d].include && c > 0) as u32).collect();
+    if n.iter().sum::<u32>() > model.layers {
+        return None;
+    }
+    for _ in n.iter().sum::<u32>()..model.layers {
         let open = (0..order.len()).filter(|&i| n[i] < caps[i]);
         let i = match goal {
             // The sum of every stage's time is all that matters: each layer goes where it
@@ -372,10 +380,12 @@ fn permutations(items: &mut Vec<usize>, k: usize, visit: &mut impl FnMut(&[usize
 /// The best single pipeline from `available`, trying every subset and order.
 fn best_pipeline(model: &Model, devices: &[Device], links: &Links, opts: &Options, available: &[usize]) -> Option<PipelinePlan> {
     let mut pool = available.to_vec();
-    pool.sort_by(|&a, &b| stage_secs(model, &devices[a], 1).total_cmp(&stage_secs(model, &devices[b], 1)));
+    // Devices the owner asked for first, so the search never drops them; then the fastest.
+    pool.sort_by(|&a, &b| devices[b].include.cmp(&devices[a].include).then(stage_secs(model, &devices[a], 1).total_cmp(&stage_secs(model, &devices[b], 1))));
     pool.truncate(MAX_SEARCH);
+    let wanted: u32 = (0..pool.len()).filter(|&i| devices[pool[i]].include).fold(0, |m, i| m | 1 << i);
     let mut best: Option<PipelinePlan> = None;
-    for mask in 1u32..(1 << pool.len()) {
+    for mask in (1u32..(1 << pool.len())).filter(|m| m & wanted == wanted) {
         let mut subset: Vec<usize> = (0..pool.len()).filter(|i| mask & (1 << i) != 0).map(|i| pool[i]).collect();
         permutations(&mut subset, 0, &mut |order| {
             if order.iter().skip(1).any(|&d| devices[d].local) {
@@ -393,8 +403,18 @@ fn best_pipeline(model: &Model, devices: &[Device], links: &Links, opts: &Option
 }
 
 /// Places `model` on `devices`. For latency, one pipeline; for throughput, as many
-/// replicas as the devices hold.
+/// replicas as the devices hold. Devices marked `include` are in the first pipeline when
+/// the model fits that way; when it does not, they are planned like the rest.
 pub fn plan(model: &Model, devices: &[Device], links: &Links, opts: &Options) -> Plan {
+    let p = plan_once(model, devices, links, opts);
+    if p.pipelines.is_empty() && devices.iter().any(|d| d.include) {
+        let free: Vec<Device> = devices.iter().map(|d| Device { include: false, ..d.clone() }).collect();
+        return plan_once(model, &free, links, opts);
+    }
+    p
+}
+
+fn plan_once(model: &Model, devices: &[Device], links: &Links, opts: &Options) -> Plan {
     let mut available: Vec<usize> = (0..devices.len()).collect();
     let mut pipelines = Vec::new();
     while let Some(p) = best_pipeline(model, devices, links, opts, &available) {
@@ -511,6 +531,25 @@ mod tests {
         let mut l = layers(&p.pipelines[0]);
         l.sort();
         assert_eq!(l, [(0, 10), (1, 30)]);
+    }
+
+    #[test]
+    fn a_device_the_owner_includes_gets_layers_even_when_slower() {
+        let devices = [dev("slow", 64, 100.0), dev("fast", 64, 400.0)];
+        let p = plan(&model(40), &devices, &net(2, 40.0), &Options::default());
+        assert_eq!(layers(&p.pipelines[0]), [(1, 40)], "alone, the fast device wins");
+        let mut forced = devices.clone();
+        forced[0].include = true;
+        let p = plan(&model(40), &forced, &net(2, 40.0), &Options::default());
+        let mut l = layers(&p.pipelines[0]);
+        l.sort();
+        assert_eq!(l, [(0, 1), (1, 39)], "the slow device takes one layer, no more");
+        assert!(p.unused.is_empty());
+        // One that cannot hold a layer is planned without.
+        let mut tiny = forced.clone();
+        tiny[0].mem_bytes = 0;
+        let p = plan(&model(40), &tiny, &net(2, 40.0), &Options::default());
+        assert_eq!(layers(&p.pipelines[0]), [(1, 40)]);
     }
 
     #[test]

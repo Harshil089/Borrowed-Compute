@@ -129,15 +129,16 @@ pub async fn probe_pairs(endpoint: &Endpoint, devices: &[MeshDevice]) -> Pairs {
 }
 
 pub fn plan_for<'a>(model: &Model, devices: &'a [MeshDevice], goal: Goal, tokens_per_pass: f64) -> (Plan, Vec<&'a MeshDevice>) {
-    plan_with(model, devices, &Vec::new(), goal, tokens_per_pass)
+    plan_with(model, devices, &Vec::new(), goal, tokens_per_pass, &[])
 }
 
 /// [`plan_for`] with measured device-to-device links. Pair indexes are into `devices`,
-/// which must all have answered.
-pub fn plan_with<'a>(model: &Model, devices: &'a [MeshDevice], pairs: &Pairs, goal: Goal, tokens_per_pass: f64) -> (Plan, Vec<&'a MeshDevice>) {
+/// which must all have answered. Devices named in `include` get layers even when the
+/// plan would be faster without them.
+pub fn plan_with<'a>(model: &Model, devices: &'a [MeshDevice], pairs: &Pairs, goal: Goal, tokens_per_pass: f64, include: &[String]) -> (Plan, Vec<&'a MeshDevice>) {
     let usable: Vec<&MeshDevice> = devices.iter().filter(|d| d.report.is_ok()).collect();
     let reports: Vec<&LinkReport> = usable.iter().map(|d| d.report.as_ref().unwrap()).collect();
-    let specs: Vec<Device> = usable.iter().zip(&reports).map(|(d, r)| Device { local: d.local, ..device_spec(&d.name, r) }).collect();
+    let specs: Vec<Device> = usable.iter().zip(&reports).map(|(d, r)| Device { local: d.local, include: include.contains(&d.name), ..device_spec(&d.name, r) }).collect();
     let mut links = Links::from_coordinator(&reports.iter().map(|r| Link { rtt_ms: r.rtt_ms, bw: r.up_bytes_s }).collect::<Vec<_>>());
     if usable.len() == devices.len() {
         for &((i, j), link) in pairs {
@@ -158,7 +159,7 @@ pub fn device_spec(name: &str, r: &LinkReport) -> Device {
         Some(g) => ((g.mem_bytes as f64 * 0.85) as u64, g.bw),
         None => (0, 0.0),
     };
-    Device { name: name.into(), mem_bytes, mem_bw: r.device.mem_bw, gpu_bytes, gpu_bw, local: false }
+    Device { name: name.into(), mem_bytes, mem_bw: r.device.mem_bw, gpu_bytes, gpu_bw, local: false, include: false }
 }
 
 pub fn find_model(name: &str) -> Option<Model> {
@@ -172,6 +173,8 @@ pub struct Session {
     pub url: String,
     pub spec: Model,
     pub goal: Goal,
+    /// Devices the owner wants used even when not needed.
+    pub include: Vec<String>,
     endpoint: Endpoint,
     /// Devices drafting for the swarm.
     pub drafter_names: Vec<String>,
@@ -228,8 +231,9 @@ fn gb(bytes: u64) -> String {
 
 impl Session {
     /// Probes the paired devices, plans the model over those that can run stages, and
-    /// starts the pipelines. `draft` is a model on this computer for speculative decoding.
-    pub async fn start(endpoint: Endpoint, targets: Vec<(String, EndpointAddr)>, model: &str, goal: Goal, draft: Option<&str>, status: impl Fn(&str) + Send + Sync) -> Result<Self> {
+    /// starts the pipelines. `draft` is a model on this computer for speculative decoding;
+    /// devices named in `include` get layers even when not needed.
+    pub async fn start(endpoint: Endpoint, targets: Vec<(String, EndpointAddr)>, model: &str, goal: Goal, draft: Option<&str>, include: Vec<String>, status: impl Fn(&str) + Send + Sync) -> Result<Self> {
         let (name, url, suggested) = resolve_model(model)?;
         status(&format!("Reading {name}…"));
         let header = Source::parse_remote(&url)?.header().await?;
@@ -260,7 +264,7 @@ impl Session {
         let owned: Vec<MeshDevice> = stage_devices(&devices).iter().map(|d| (*d).clone()).collect();
         status("Measuring the links between your devices…");
         let pairs = probe_pairs(&endpoint, &owned).await;
-        let plan = plan_with(&spec, &owned, &pairs, goal, tokens_per_pass).0;
+        let plan = plan_with(&spec, &owned, &pairs, goal, tokens_per_pass, &include).0;
         if plan.pipelines.is_empty() {
             let need = spec.layer_bytes * spec.layers as u64 + spec.extra_bytes;
             let free: u64 = owned.iter().filter_map(|d| d.report.as_ref().ok()).map(|r| (r.device.mem_available as f64 * MEMORY_SHARE) as u64).sum();
@@ -308,7 +312,7 @@ impl Session {
                 llm.set_drafters(drafters);
             }
         }
-        Ok(Session { llm, name, url, spec, goal, endpoint, drafter_names, state: tokio::sync::Mutex::new(SessionState { devices, pairs, plan }) })
+        Ok(Session { llm, name, url, spec, goal, include, endpoint, drafter_names, state: tokio::sync::Mutex::new(SessionState { devices, pairs, plan }) })
     }
 
     /// Stages and devices, for display: (device name, layers) per pipeline.
@@ -329,7 +333,7 @@ impl Session {
         let mut s = self.state.lock().await;
         let usable: Vec<MeshDevice> = stage_devices(&s.devices).iter().map(|d| (*d).clone()).collect();
         let reports: Vec<&LinkReport> = usable.iter().map(|d| d.report.as_ref().unwrap()).collect();
-        let mut specs: Vec<Device> = usable.iter().zip(&reports).map(|(d, r)| Device { local: d.local, ..device_spec(&d.name, r) }).collect();
+        let mut specs: Vec<Device> = usable.iter().zip(&reports).map(|(d, r)| Device { local: d.local, include: self.include.contains(&d.name), ..device_spec(&d.name, r) }).collect();
         for c in self.llm.replicas() {
             for (stage, ms) in c.plan.stages.iter().zip(c.stage_ms.lock().unwrap().iter()) {
                 let predicted = plan::stage_secs(&self.spec, &specs[stage.device], stage.layers.end - stage.layers.start) * 1000.0;
@@ -366,7 +370,7 @@ impl Session {
         let usable = stage_devices(&devices);
         let owned: Vec<MeshDevice> = usable.iter().map(|d| (*d).clone()).collect();
         let pairs = probe_pairs(&self.endpoint, &owned).await;
-        let (plan, _) = plan_with(&self.spec, &owned, &pairs, self.goal, 1.0);
+        let (plan, _) = plan_with(&self.spec, &owned, &pairs, self.goal, 1.0, &self.include);
         if plan.pipelines.is_empty() {
             bail!("the devices still reachable cannot hold {}", self.name);
         }

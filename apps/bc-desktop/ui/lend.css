@@ -167,6 +167,8 @@ div.setting { cursor: default; }
 .mesh-form select:focus { outline: none; box-shadow: inset 0 0 0 1px var(--ink-3), var(--focus); }
 .mesh-actions { display: flex; gap: 8px; margin-left: auto; }
 .mesh-dev, .mesh-stage { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 14px; align-items: center; padding: 11px 16px; border-top: 1px solid var(--border); }
+.mesh-pick { display: flex; align-items: center; gap: 12px; }
+.mesh-include { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-3); cursor: pointer; white-space: nowrap; }
 .mesh-dev:first-child, .mesh-stage:first-child, .board-head + .mesh-dev, .board-head + .mesh-stage { border-top: none; }
 .mesh-stage { grid-template-columns: 28px minmax(0, 1fr) auto; }
 .mesh-hosted-row { grid-template-columns: minmax(0, 1fr) auto; }

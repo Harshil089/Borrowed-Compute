@@ -63,7 +63,7 @@ async fn chats_through_an_openai_endpoint_backed_by_two_devices() {
         });
         targets.push((format!("device-{i}"), ep.addr()));
     }
-    let session = Arc::new(Session::start(coordinator, targets.clone(), &url, Goal::Throughput, Some("none"), |_| {}).await.unwrap());
+    let session = Arc::new(Session::start(coordinator, targets.clone(), &url, Goal::Throughput, Some("none"), Vec::new(), |_| {}).await.unwrap());
     assert!(!session.layout().await.is_empty());
     let t = targets.clone();
     let served = Arc::new(Served { session: session.clone(), targets: Arc::new(move || { let t = t.clone(); Box::pin(async move { Ok(t) }) }) });
