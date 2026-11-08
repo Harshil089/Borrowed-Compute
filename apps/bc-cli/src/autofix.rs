@@ -83,6 +83,11 @@ pub fn after_failure(project: &Path, argv: &[String], output: &str, os: Os) -> O
         }
     }
 
+    // Python: a package that would not build, most often for a Python newer than its wheels.
+    if let Some(fix) = wheel_failure(argv, output, os) {
+        return Some(fix);
+    }
+
     // Python: a module that is not installed.
     if let Some(module) = between(output, "No module named '", "'") {
         let top = module.split('.').next().unwrap_or(module);
@@ -126,6 +131,64 @@ pub fn after_failure(project: &Path, argv: &[String], output: &str, os: Os) -> O
         return Some(chain("Installing dependencies; a package was missing".into(), &[install.to_string()], argv, os));
     }
     None
+}
+
+/// The oldest Python a retry falls back to.
+const OLDEST_PYTHON: u32 = 9;
+/// Printed by a retry that found no older Python, followed by the package that failed.
+const NO_OLDER_PYTHON: &str = "bc: no older Python on this device for ";
+/// The requirements a retry installs without the package that failed to build.
+const RELAXED: &str = ".bc-requirements.txt";
+
+/// A package failed to build its wheel. First retry the virtualenv on each older Python
+/// the device has, newest first, below the one that failed; when none is left, install
+/// that package's newest release instead of the pinned one, which may have a wheel.
+// shortcut: Unix shells only, add the same steps with `py -3.N` once Windows needs them.
+fn wheel_failure(argv: &[String], output: &str, os: Os) -> Option<Fix> {
+    if os != Os::Unix {
+        return None;
+    }
+    let script = Os::shell_script(argv)?;
+    let mut steps: Vec<String> = script.split(" && ").map(str::to_string).collect();
+    let venv = steps.iter().position(|s| s.ends_with("-m venv .venv"))?;
+    // Package names go into the shell command, so only plain ones are used.
+    let plain = |p: &&str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
+
+    if let Some(package) = between(output, "Failed building wheel for ", "\n").map(str::trim).filter(plain) {
+        let minor = python_minor(output).filter(|m| *m > OLDEST_PYTHON)?;
+        let older: Vec<String> = (OLDEST_PYTHON..minor).rev().map(|v| v.to_string()).collect();
+        steps[venv] = format!(
+            // No " && " inside: the script is split on it.
+            "PY=$(for v in {}; do if command -v python3.$v; then break; fi; done); [ -n \"$PY\" ] || {{ echo \"{NO_OLDER_PYTHON}{package}\" >&2; exit 1; }}; \"$PY\" -m venv .venv",
+            older.join(" ")
+        );
+        return Some(Fix {
+            reason: format!("{package} would not build for Python 3.{minor}; trying an older Python"),
+            argv: os.shell(&steps.join(" && ")),
+        });
+    }
+
+    let package = between(output, NO_OLDER_PYTHON, "\n").map(str::trim).filter(plain)?;
+    if script.contains(RELAXED) {
+        return None;
+    }
+    let pip = steps.iter().position(|s| s.contains("pip install") && s.contains(" -r "))?;
+    let file = between(&steps[pip], " -r ", " ").or_else(|| steps[pip].split(" -r ").nth(1))?.to_string();
+    let bin = os.venv_bin();
+    steps[venv] = format!("{} -m venv .venv", os.python());
+    steps[pip] = format!("grep -iv '^{package}' {file} > {RELAXED}; {}", steps[pip].replacen(&format!("-r {file}"), &format!("-r {RELAXED}"), 1));
+    steps.insert(pip + 1, format!("{bin}pip install -q {package}"));
+    Some(Fix {
+        reason: format!("No older Python to try; installing the newest {package} instead of the pinned one"),
+        argv: os.shell(&steps.join(" && ")),
+    })
+}
+
+/// The Python minor version a failed build ran on: 15 for `cpython-315` or `python3.15`.
+fn python_minor(output: &str) -> Option<u32> {
+    let digits = |s: &str| s.bytes().take_while(u8::is_ascii_digit).map(char::from).collect::<String>().parse().ok();
+    output.find("cpython-3").and_then(|i| digits(&output[i + 9..]))
+        .or_else(|| output.find("python3.").and_then(|i| digits(&output[i + 8..])))
 }
 
 /// The build step a start command needs when its build output is missing: the command
@@ -307,6 +370,34 @@ mod tests {
         assert_eq!(fix.argv, argv(&["npx", "--yes", "tsx", "main.ts", "--fast"]));
 
         assert_eq!(after_failure(p.path(), &argv(&["node", "x.js"]), "SyntaxError: oops", Os::Unix), None);
+    }
+
+    #[test]
+    fn a_failed_wheel_tries_older_pythons_then_the_newest_package() {
+        let p = project(&[("requirements.txt", "psycopg2-binary==2.9.9\nflask")]);
+        let cmd = argv(&["sh", "-c", "python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt pytest && .venv/bin/python -m pytest"]);
+        let out = "creating build/lib.macosx-27.0-arm64-cpython-315/psycopg2\n  ERROR: Failed building wheel for psycopg2-binary\n";
+        let fix = after_failure(p.path(), &cmd, out, Os::Unix).unwrap();
+        assert!(line(&fix).starts_with("PY=$(for v in 14 13 12 11 10 9; do if command -v python3.$v; then break; fi; done);"), "{}", line(&fix));
+        assert!(line(&fix).ends_with("\"$PY\" -m venv .venv && .venv/bin/pip install -q -r requirements.txt pytest && .venv/bin/python -m pytest"));
+
+        // Python 3.12 fails too: the next round starts below it.
+        let out = "include/python3.12/Python.h\nFailed building wheel for psycopg2-binary\n";
+        let again = after_failure(p.path(), &fix.argv, out, Os::Unix).unwrap();
+        assert!(line(&again).starts_with("PY=$(for v in 11 10 9;"), "{}", line(&again));
+
+        // No older Python left: the newest release of the package instead of the pin.
+        let out = "bc: no older Python on this device for psycopg2-binary\n";
+        let last = after_failure(p.path(), &again.argv, out, Os::Unix).unwrap();
+        assert_eq!(
+            line(&last),
+            "python3 -m venv .venv && grep -iv '^psycopg2-binary' requirements.txt > .bc-requirements.txt; .venv/bin/pip install -q -r .bc-requirements.txt pytest && .venv/bin/pip install -q psycopg2-binary && .venv/bin/python -m pytest"
+        );
+        assert_eq!(after_failure(p.path(), &last.argv, out, Os::Unix), None, "nothing new left to try");
+
+        // Names that are not plain package names never reach the shell.
+        let out = "cpython-315\nFailed building wheel for x;rm -rf ~\n";
+        assert_eq!(after_failure(p.path(), &cmd, out, Os::Unix), None);
     }
 
     #[test]

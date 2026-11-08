@@ -125,7 +125,8 @@ pub async fn run_remote(
 /// With `project` (the folder being sent), the run also fixes what a fresh workspace
 /// lacks: [`autofix::preflight`] installs dependencies or builds first, and after a
 /// failed run [`autofix::after_failure`] reads the output and, when it recognizes a
-/// missing module, command or build file, runs once more with the fix.
+/// missing module, command, build file or a package that will not build, runs again
+/// with the fix, round after round while each failure suggests something new.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_on_mac(
     key: &SecretKey,
@@ -155,17 +156,32 @@ pub async fn run_on_mac(
         run_routed(key, net.clone(), mac.clone(), &spec, archive.clone(), &mut out, &mut err, cancel.as_mut(), memory, &notice)
             .await?
     };
-    let failed = matches!(outcome.exit, Exit::Code(c) if c != 0);
-    if let (true, Some(project)) = (failed, project) {
-        let output = String::from_utf8_lossy(&tail.lock().unwrap()).into_owned();
-        if let Some(fix) = autofix::after_failure(project, &spec.job.argv, &output, os) {
-            notice(&format!("Auto-fix: {}. Running again: {}", fix.reason, fix.argv.join(" ")));
-            spec.job.argv = fix.argv;
-            return run_routed(key, net, mac, &spec, archive, stdout, stderr, cancel.as_mut(), memory, &notice).await;
+    let Some(project) = project else { return Ok(outcome) };
+    // Each failure is read for a fix not tried yet; the run stops at success, at a
+    // failure with nothing new to try, or after MAX_FIXES retries.
+    let mut outcome = outcome;
+    let mut tried = vec![spec.job.argv.clone()];
+    for round in 1..=MAX_FIXES {
+        if !matches!(outcome.exit, Exit::Code(c) if c != 0) {
+            break;
         }
+        let output = String::from_utf8_lossy(&std::mem::take(&mut *tail.lock().unwrap())).into_owned();
+        let Some(fix) = autofix::after_failure(project, &spec.job.argv, &output, os).filter(|f| !tried.contains(&f.argv)) else {
+            break;
+        };
+        notice(&format!("Auto-fix {round}/{MAX_FIXES}: {}. Running again: {}", fix.reason, fix.argv.join(" ")));
+        spec.job.argv = fix.argv;
+        tried.push(spec.job.argv.clone());
+        let mut out = Tail { inner: &mut *stdout, tail: &tail };
+        let mut err = Tail { inner: &mut *stderr, tail: &tail };
+        outcome =
+            run_routed(key, net.clone(), mac.clone(), &spec, archive.clone(), &mut out, &mut err, cancel.as_mut(), memory, &notice).await?;
     }
     Ok(outcome)
 }
+
+/// Retries after failures, each with a different fix.
+const MAX_FIXES: usize = 6;
 
 /// Keeps the last [`TAIL_BYTES`] written, in memory only, while passing everything on.
 const TAIL_BYTES: usize = 64 * 1024;
