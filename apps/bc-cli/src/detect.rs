@@ -206,14 +206,23 @@ pub fn node_package_manager(root: &Path) -> Option<(&'static str, &'static str)>
 /// The virtualenv setup for a Python project with declared dependencies, run inside
 /// the job's workspace. `None` when it declares none.
 pub fn python_setup(root: &Path, os: Os) -> Option<String> {
-    let deps = if root.join("requirements.txt").is_file() {
-        "-r requirements.txt"
+    let deps = if let Some(r) = requirements(root) {
+        format!("-r {r}")
     } else if root.join("pyproject.toml").is_file() || root.join("setup.py").is_file() {
-        "."
+        ".".to_string()
     } else {
         return None;
     };
     Some(format!("{} -m venv .venv && {}pip install -q {deps}", os.python(), os.venv_bin()))
+}
+
+/// `requirements.txt`, else another `requirements*.txt` (`requirements-shared.txt`).
+fn requirements(root: &Path) -> Option<String> {
+    let f = RootFiles::read(root);
+    if f.has("requirements.txt") {
+        return Some("requirements.txt".into());
+    }
+    f.0.into_iter().find(|n| n.starts_with("requirements") && n.ends_with(".txt"))
 }
 
 fn node(root: &Path, f: &RootFiles, os: Os) -> Option<Detected> {
@@ -269,10 +278,10 @@ fn go(f: &RootFiles) -> Option<Detected> {
 
 fn python(root: &Path, f: &RootFiles, os: Os) -> Option<Detected> {
     let scripts: Vec<&String> = f.with_ext(".py").collect();
-    let reason = ["pyproject.toml", "requirements.txt", "setup.py"]
-        .into_iter()
-        .find(|n| f.has(n))
-        .map(str::to_string)
+    let reason = Some("pyproject.toml".to_string())
+        .filter(|n| f.has(n))
+        .or_else(|| requirements(root))
+        .or_else(|| Some("setup.py".to_string()).filter(|n| f.has(n)))
         .or_else(|| scripts.first().map(|n| n.to_string()))?;
 
     // Dependencies go into a virtualenv inside the workspace, never into the device's Python.
@@ -461,6 +470,13 @@ mod tests {
         assert_eq!(d.suggestions[0].label, "Run main.py");
         assert!(argv(&d, 0).contains("python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt"));
         assert!(d.suggestions.iter().any(|s| s.label == "Test"));
+    }
+
+    #[test]
+    fn python_with_other_requirements_name_is_found() {
+        let d = detect(project(&[("requirements-shared.txt", "flask"), ("tests/", "")]).path(), Os::Unix).unwrap();
+        assert_eq!(d.reason, "requirements-shared.txt");
+        assert!(argv(&d, 0).contains("pip install -q -r requirements-shared.txt pytest"));
     }
 
     #[test]

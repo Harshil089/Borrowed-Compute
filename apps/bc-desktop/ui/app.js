@@ -613,15 +613,18 @@ listen("update-progress", (event) => {
   meter.firstElementChild.style.transform = meterScale(p);
 });
 
+// Hotfix releases are 0.3.29-1 to the updater (semver) and 0.3.28.1 to people.
+const shownVersion = (v) => v.replace(/^(\d+)\.(\d+)\.(\d+)-(\d+)$/, (_, a, b, c, n) => `${a}.${b}.${c - 1}.${n}`);
+
 async function checkUpdate() {
   $("update-check").disabled = true;
   $("update-install").classList.add("hidden");
   updateMessage("", "Checking…");
   try {
     const u = await invoke("check_update");
-    $("update-version").textContent = `This is version ${u.current}.`;
+    $("update-version").textContent = `This is version ${shownVersion(u.current)}.`;
     if (u.available) {
-      updateMessage("warn", `Version ${u.available} is available.`);
+      updateMessage("warn", `Version ${shownVersion(u.available)} is available.`);
       $("update-install").classList.remove("hidden");
     } else {
       updateMessage("ok", "You have the latest version.");
@@ -665,7 +668,7 @@ async function updateOnStart() {
   }
   // Local builds are 0.1.0; replacing one with a release would undo the build under test.
   if (!u.available || u.current === "0.1.0") return;
-  $("update-version").textContent = `This is version ${u.current}.`;
+  $("update-version").textContent = `This is version ${shownVersion(u.current)}.`;
   $("update-install").classList.remove("hidden");
   $("update-dialog").classList.remove("hidden");
   installUpdate();

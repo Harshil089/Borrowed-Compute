@@ -8,9 +8,16 @@
 set -eu
 force=${1:-auto}
 
+# versionsort.suffix sorts 0.3.29-1 before 0.3.29, as the updater (semver) does.
 last_tag() {
-  git tag --list "$1-v*" --sort=-v:refname | head -n 1
+  git -c versionsort.suffix=- tag --list "$1-v*" --sort=-v:refname | head -n 1
 }
+
+# A push straight to main (no "(#N)" from a merged pull request) is a hotfix: it gets a
+# fourth number, 0.3.28.1, shown by the app and release titles. Semver has no fourth
+# number, so it is written 0.3.29-1: above 0.3.28 and below the next release, 0.3.29.
+hotfix=false
+if ! git log -1 --format=%s | grep -Eq '\(#[0-9]+\)$'; then hotfix=true; fi
 
 # The next patch version after the app's last tag. Apps start at 0.2.0, above the
 # 0.1.x versions they shared before, so installed apps see it as newer.
@@ -23,9 +30,14 @@ next_version() {
   v=${last#"$1-v"}
   # The merged app starts at 0.3.0 on both.
   case "$v" in
-    0.2.*) echo "0.3.0" ;;
-    *) echo "${v%.*}.$(( ${v##*.} + 1 ))" ;;
+    0.2.*) echo "0.3.0"; return ;;
   esac
+  base=${v%%-*}
+  case "$v" in
+    *-*) n=${v#*-}; next=$base ;;
+    *) n=0; next="${base%.*}.$(( ${base##*.} + 1 ))" ;;
+  esac
+  if [ "$hotfix" = true ]; then echo "$next-$(( n + 1 ))"; else echo "$next"; fi
 }
 
 # True if any of the paths changed since the app's last tag (or it was never released).

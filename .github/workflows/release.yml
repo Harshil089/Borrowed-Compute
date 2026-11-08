@@ -228,15 +228,17 @@ jobs:
       - name: Publish releases
         run: |
           short=${GITHUB_SHA::7}
+          # 0.3.29-1 (a hotfix after 0.3.28) is shown as 0.3.28.1.
+          shown() { echo "$1" | awk -F'[.-]' 'NF==4 { print $1 "." $2 "." $3-1 "." $4; next } { print }'; }
           if [ "$AGENT" = true ]; then
             gh release create "agent-v$AGENT_VERSION" --repo "$RELEASES_REPO" \
-              --title "Borrowed Compute $AGENT_VERSION (Mac)" \
+              --title "Borrowed Compute $(shown "$AGENT_VERSION") (Mac)" \
               --notes "Mac app, built from $short. Install BorrowedComputeAgent.dmg; installed apps update themselves. BorrowedCompute-setup.exe is the current Windows app." \
               dist/BorrowedComputeAgent.dmg dist/BorrowedComputeAgent.app.tar.gz dist/BorrowedCompute-setup.exe dist/agent.json dist/client.json
           fi
           if [ "$CLIENT" = true ]; then
             gh release create "client-v$CLIENT_VERSION" --repo "$RELEASES_REPO" \
-              --title "Borrowed Compute $CLIENT_VERSION (Windows)" \
+              --title "Borrowed Compute $(shown "$CLIENT_VERSION") (Windows)" \
               --notes "Windows app, built from $short. Install BorrowedCompute-setup.exe; installed apps update themselves. BorrowedComputeAgent.dmg is the current Mac app." \
               dist/BorrowedCompute-setup.exe dist/BorrowedComputeAgent.dmg dist/agent.json dist/client.json
           fi
