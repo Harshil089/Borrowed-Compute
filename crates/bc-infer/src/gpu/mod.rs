@@ -34,10 +34,20 @@ const NB: u32 = 8;
 /// Weight rows per matrix-product thread group (`ROWS_PER_GROUP`).
 const ROWS_PER_GROUP: u32 = 4;
 const MAX_HEAD: usize = 256;
+/// Input rows from which a product runs on the matrix units (`k_matmul_mm`): 3 to 4
+/// times faster for batches than `k_matmul`, but it sums in a different order, so a
+/// batch row is within rounding of a one-row pass, not bit for bit.
+const MM_FROM: usize = 2;
+/// Weight rows per `k_matmul_mm` thread group (`BM`).
+const MM_ROWS: u32 = 128;
+/// Input rows per `k_matmul_mm` thread group (`BN`).
+const MM_BATCH: u32 = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum K {
     Matmul,
+    /// The batched product on Apple's matrix units (Metal only).
+    MatmulMm,
     RmsNorm,
     Rope,
     Attention,
@@ -54,6 +64,7 @@ impl K {
     fn name(self) -> &'static str {
         match self {
             K::Matmul => "k_matmul",
+            K::MatmulMm => "k_matmul_mm",
             K::RmsNorm => "k_rms_norm",
             K::Rope => "k_rope",
             K::Attention => "k_attention",
@@ -137,11 +148,15 @@ impl Gpu {
     }
 
     fn matmul<'a>(&self, w: &'a W, x: &'a Buf, out: &'a Buf, n: usize) -> Cmd<'a> {
+        let args = vec![Arg::B(&w.buf), Arg::B(x), Arg::B(out), Arg::U(w.ty), Arg::U(w.rows), Arg::U(w.cols), Arg::U(n as u32), Arg::U(w.row_bytes)];
+        if cfg!(target_os = "macos") && n >= MM_FROM {
+            return Cmd { k: K::MatmulMm, grid: (w.rows.div_ceil(MM_ROWS), (n as u32).div_ceil(MM_BATCH)), threads: 128, args };
+        }
         Cmd {
             k: K::Matmul,
             grid: (w.rows.div_ceil(ROWS_PER_GROUP), (n as u32).div_ceil(NB)),
             threads: 32 * ROWS_PER_GROUP,
-            args: vec![Arg::B(&w.buf), Arg::B(x), Arg::B(out), Arg::U(w.ty), Arg::U(w.rows), Arg::U(w.cols), Arg::U(n as u32), Arg::U(w.row_bytes)],
+            args,
         }
     }
 
@@ -384,8 +399,8 @@ impl Layers {
 
     /// Runs the GPU's layers on `rows` hidden states at positions `pos..`, in place.
     /// One row per entry of `positions`, row i at `positions[i]`; with `masks`, a tree
-    /// (see `Part::forward_tree`).
-    pub fn forward(&self, cfg: &Config, x: &mut [f32], pos: usize, positions: &[u32], masks: Option<&[u64]>, cache: &mut Cache) -> Result<()> {
+    /// (see `Part::forward_tree`) whose slots start at the first of the pair.
+    pub fn forward(&self, cfg: &Config, x: &mut [f32], pos: usize, positions: &[u32], masks: Option<(usize, &[u64])>, cache: &mut Cache) -> Result<()> {
         let rows = positions.len();
         self.reserve(cfg, cache, pos + rows, pos)?;
         let b = &self.gpu.backend;
@@ -395,9 +410,11 @@ impl Layers {
         let bx = b.upload(x)?;
         // Integers ride in float buffers bit for bit; the kernels read them as uint.
         let bpos = b.upload(&positions.iter().map(|&p| f32::from_bits(p)).collect::<Vec<_>>())?;
-        let bits: Vec<f32> = masks.unwrap_or(&[0]).iter().flat_map(|&m| [f32::from_bits(m as u32), f32::from_bits((m >> 32) as u32)]).collect();
+        let bits: Vec<f32> = masks.map_or(&[0][..], |m| m.1).iter().flat_map(|&m| [f32::from_bits(m as u32), f32::from_bits((m >> 32) as u32)]).collect();
         let bmask = b.upload(&bits)?;
         let tree = masks.is_some() as usize;
+        // For a tree the attention kernel's position is where the tree's slots start.
+        let seen = masks.map_or(pos, |m| m.0);
         // Every kernel writes all of its output, so reused buffers need no clearing.
         let mut held = self.scratch.lock().unwrap();
         if held.as_ref().is_none_or(|s| s.rows < rows) {
@@ -435,7 +452,7 @@ impl Layers {
                 k: K::Attention,
                 grid: (nh as u32, rows as u32),
                 threads: 32,
-                args: vec![Arg::B(bq), Arg::B(kc), Arg::B(vc), Arg::B(ba), Arg::B(&bmask), u(tree), u(nh), u(nkv), u(hd), u(pos), Arg::F(1.0 / (hd as f32).sqrt())],
+                args: vec![Arg::B(bq), Arg::B(kc), Arg::B(vc), Arg::B(ba), Arg::B(&bmask), u(tree), u(nh), u(nkv), u(hd), u(seen), Arg::F(1.0 / (hd as f32).sqrt())],
             });
             cmds.push(self.gpu.matmul(&l.wo, ba, bo, rows));
             cmds.push(Cmd { k: K::Add, grid: ew(rows * e), threads: 256, args: vec![Arg::B(&bx), Arg::B(bo), u(rows * e)] });

@@ -213,8 +213,8 @@ async fn speculative_decoding_writes_the_same_text_in_fewer_passes() {
         passes.push(stats.passes);
     }
     if want.len() > 5 {
-        assert!(passes[2] * 4 <= want.len() + 4, "tree: {} passes for {} tokens", passes[2], want.len());
-        assert!(passes[2] <= passes[1] && passes[1] < passes[0], "plain, chain, tree: {passes:?}");
+        assert!(passes[2] * 3 <= want.len() + 3, "tree: {} passes for {} tokens", passes[2], want.len());
+        assert!(passes[2] < passes[0] && passes[1] < passes[0], "plain, chain, tree: {passes:?}");
     }
 
     // A different, smaller draft: guesses are sometimes wrong, the text never is.

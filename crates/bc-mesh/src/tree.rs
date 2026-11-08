@@ -7,7 +7,10 @@ use bc_infer::{Kv, Part, ROOT};
 
 /// Guesses per pass at most, how deep, how many children a guess may have at the root
 /// and below, and how many guesses each level keeps.
-pub const TREE_NODES: usize = 40;
+// shortcut: 15 guesses (16 rows, one tile of the batched GPU product) is what pays on an
+// M2, where a 41-row check costs 6 one-row passes; size it per GPU once CUDA's tensor
+// cores are measured.
+pub const TREE_NODES: usize = 15;
 pub const TREE_DEPTH: usize = 6;
 pub const TREE_ROOT_K: usize = 4;
 pub const TREE_CHILD_K: usize = 3;
@@ -31,39 +34,33 @@ pub fn top_k(scores: &[f32], k: usize) -> Vec<(u32, f32)> {
 /// Grows a tree of guesses after the draft's cached text (`pos` tokens), starting from
 /// `roots` (first tokens with their log-probabilities): level by level, each guess on the
 /// frontier proposes its likeliest next tokens, and the level keeps those whose whole
-/// path is likeliest. Each level is one tree pass of the draft over every guess so far.
-/// Returns (token, parent) per guess, roots first; parents index earlier guesses, or
-/// `ROOT` for the roots.
+/// path is likeliest. Each level is one pass of the draft over that level's guesses
+/// alone: the earlier levels are already in its cache. Returns (token, parent) per
+/// guess, roots first; parents index earlier guesses, or `ROOT` for the roots.
 pub fn grow(part: &Part, kv: &mut Kv, pos: usize, roots: Vec<(u32, f32)>, budget: usize) -> Result<Vec<(u32, u32)>> {
     let vocab = part.cfg.vocab;
     let mut nodes: Vec<(u32, u32, f32)> = roots.into_iter().take(budget).map(|(t, lp)| (t, ROOT, lp)).collect();
-    let mut frontier: Vec<usize> = (0..nodes.len()).collect();
+    // Guesses already run through the draft; the rest are the frontier.
+    let mut done = 0;
     for _ in 1..TREE_DEPTH {
-        if frontier.is_empty() || nodes.len() >= budget {
+        if done == nodes.len() || nodes.len() >= budget {
             break;
         }
-        let tokens: Vec<u32> = nodes.iter().map(|n| n.0).collect();
+        let tokens: Vec<u32> = nodes[done..].iter().map(|n| n.0).collect();
         let parents: Vec<u32> = nodes.iter().map(|n| n.1).collect();
         let mut x = part.embed(&tokens)?;
-        part.forward_tree(&mut x, tokens.len(), pos, Some(&parents), kv)?;
-        // Scores only for the newest level: the output head over the whole vocabulary is
-        // the dearest product of a small draft model.
-        let width = part.cfg.n_embd;
-        let rows: Vec<f32> = frontier.iter().flat_map(|&f| x[f * width..(f + 1) * width].iter().copied()).collect();
-        let scores = part.logits(&rows, frontier.len())?;
+        part.forward_tree(&mut x, tokens.len(), pos + done, Some(&parents), kv)?;
+        let scores = part.logits(&x, tokens.len())?;
         let mut next: Vec<(f32, u32, usize)> = Vec::new();
-        for (i, &f) in frontier.iter().enumerate() {
+        for (i, f) in (done..nodes.len()).enumerate() {
             for (t, lp) in top_k(&scores[i * vocab..(i + 1) * vocab], TREE_CHILD_K) {
                 next.push((nodes[f].2 + lp, t, f));
             }
         }
+        done = nodes.len();
         next.sort_by(|a, b| b.0.total_cmp(&a.0));
         next.truncate(TREE_WIDTH.min(budget - nodes.len()));
-        frontier.clear();
-        for (lp, t, f) in next {
-            frontier.push(nodes.len());
-            nodes.push((t, f as u32, lp));
-        }
+        nodes.extend(next.into_iter().map(|(lp, t, f)| (t, f as u32, lp)));
     }
     Ok(nodes.into_iter().map(|(t, p, _)| (t, p)).collect())
 }

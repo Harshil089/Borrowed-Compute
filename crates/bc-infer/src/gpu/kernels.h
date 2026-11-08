@@ -262,9 +262,10 @@ DEVFN uint nth_bit(uint lo, uint hi, uint k) {
     return 0u;
 }
 
-// For a tree (masks != 0), row r sees the cache before pos and the batch rows its mask
-// (two words per row) names, walked in the same order as a line would walk them: list
-// index k is cache slot k below pos, then the (k - pos)-th visible row. So a tree row is
+// For a tree (masks != 0), pos is the tree's first slot: row r sees the cache before it
+// and the tree slots its mask (two words per row, bit j is slot pos + j) names, walked in
+// the same order as a line would walk them: list index k is cache slot k below pos, then
+// the (k - pos)-th visible slot. So a tree row is
 // summed in exactly the order a one-path pass would sum it, bit for bit.
 DEVFN void attention(GLOBAL const float* q, GLOBAL const float* kc, GLOBAL const float* vc, GLOBAL float* out, LOCAL float* sh,
                      GLOBAL const uint* masks, uint tree,
