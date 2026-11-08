@@ -353,13 +353,20 @@ impl Part {
 
     /// Next-token scores for each row (rows × vocab).
     pub fn logits(&self, x: &[f32], rows: usize) -> Result<Vec<f32>> {
+        self.logits_upto(x, rows, self.cfg.vocab)
+    }
+
+    /// [`Part::logits`] for the first `upto` tokens of the vocabulary only: `rows` x
+    /// `min(upto, vocab)` scores, for a draft model that guesses only common tokens.
+    pub fn logits_upto(&self, x: &[f32], rows: usize, upto: usize) -> Result<Vec<f32>> {
         let (norm, out) = self.head.as_ref().context("this part has no output head")?;
-        if let Some(scores) = self.gpu.as_ref().map(|g| g.logits(&self.cfg, x, rows)).transpose()?.flatten() {
+        let upto = upto.min(out.rows);
+        if let Some(scores) = self.gpu.as_ref().map(|g| g.logits(&self.cfg, x, rows, upto)).transpose()?.flatten() {
             return Ok(scores);
         }
         let n = rms_norm(x, norm, self.cfg.eps);
         debug_assert_eq!(n.len(), rows * self.cfg.n_embd);
-        Ok(out.matmul(&n, rows))
+        Ok(out.matmul_rows(&n, rows, upto))
     }
 }
 

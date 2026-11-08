@@ -148,13 +148,18 @@ impl Gpu {
     }
 
     fn matmul<'a>(&self, w: &'a W, x: &'a Buf, out: &'a Buf, n: usize) -> Cmd<'a> {
-        let args = vec![Arg::B(&w.buf), Arg::B(x), Arg::B(out), Arg::U(w.ty), Arg::U(w.rows), Arg::U(w.cols), Arg::U(n as u32), Arg::U(w.row_bytes)];
+        self.matmul_rows(w, x, out, n, w.rows)
+    }
+
+    /// [`Gpu::matmul`] against the first `rows` weight rows only.
+    fn matmul_rows<'a>(&self, w: &'a W, x: &'a Buf, out: &'a Buf, n: usize, rows: u32) -> Cmd<'a> {
+        let args = vec![Arg::B(&w.buf), Arg::B(x), Arg::B(out), Arg::U(w.ty), Arg::U(rows), Arg::U(w.cols), Arg::U(n as u32), Arg::U(w.row_bytes)];
         if cfg!(target_os = "macos") && n >= MM_FROM {
-            return Cmd { k: K::MatmulMm, grid: (w.rows.div_ceil(MM_ROWS), (n as u32).div_ceil(MM_BATCH)), threads: 128, args };
+            return Cmd { k: K::MatmulMm, grid: (rows.div_ceil(MM_ROWS), (n as u32).div_ceil(MM_BATCH)), threads: 128, args };
         }
         Cmd {
             k: K::Matmul,
-            grid: (w.rows.div_ceil(ROWS_PER_GROUP), (n as u32).div_ceil(NB)),
+            grid: (rows.div_ceil(ROWS_PER_GROUP), (n as u32).div_ceil(NB)),
             threads: 32 * ROWS_PER_GROUP,
             args,
         }
@@ -468,16 +473,17 @@ impl Layers {
         Ok(())
     }
 
-    /// Next-token scores for each row, if the head is on the GPU.
-    pub fn logits(&self, cfg: &Config, x: &[f32], rows: usize) -> Result<Option<Vec<f32>>> {
+    /// Next-token scores for the first `upto` tokens (at most the vocabulary), if the
+    /// head is on the GPU.
+    pub fn logits(&self, cfg: &Config, x: &[f32], rows: usize, upto: usize) -> Result<Option<Vec<f32>>> {
         let Some((norm, out)) = &self.head else { return Ok(None) };
         let b = &self.gpu.backend;
-        let (bx, bn, bl) = (b.upload(x)?, b.zeros(rows * cfg.n_embd)?, b.zeros(rows * out.rows as usize)?);
+        let (bx, bn, bl) = (b.upload(x)?, b.zeros(rows * cfg.n_embd)?, b.zeros(rows * upto)?);
         self.gpu.run(&[
             Cmd { k: K::RmsNorm, grid: (rows as u32, 1), threads: 32, args: vec![Arg::B(&bx), Arg::B(norm), Arg::B(&bn), Arg::U(cfg.n_embd as u32), Arg::F(cfg.eps)] },
-            self.gpu.matmul(out, &bn, &bl, rows),
+            self.gpu.matmul_rows(out, &bn, &bl, rows, upto.min(out.rows as usize) as u32),
         ])?;
-        Ok(Some(b.read(&bl, rows * out.rows as usize)?))
+        Ok(Some(b.read(&bl, rows * upto.min(out.rows as usize))?))
     }
 }
 

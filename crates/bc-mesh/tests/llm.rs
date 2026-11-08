@@ -189,6 +189,29 @@ async fn three_devices_write_what_one_computer_writes() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn without_a_draft_model_the_text_itself_supplies_guesses() {
+    let file = bc_infer::fixtures::tiny_model(4, false);
+    let (url, _) = serve(file.clone()).await;
+    let m = mesh(2).await;
+    let addrs: Vec<_> = m.devices.iter().map(|d| d.addr()).collect();
+    let header = Source::parse_remote(&url).unwrap().header().await.unwrap();
+    // A prompt that repeats itself, as code and edits do.
+    let prompt: Vec<u32> = [1, 50, 51, 52, 53, 54, 55, 56, 57].iter().cycle().take(40).copied().collect();
+    let want = local_text(&file, &prompt, 24).await;
+    let client = Client::open(&m.coordinator, &url, plan(&[(0, 0..2), (1, 2..4)]), &addrs, &|_, _, _| {}).await.unwrap();
+    let llm = Llm::new(&header, vec![client], None).unwrap();
+    // Plain first, then the tree (no chain without a draft): the same text in fewer passes.
+    let mut passes = Vec::new();
+    for _ in 0..2 {
+        let (got, stats) = llm.generate(&prompt, 24, Sampling::default(), |_| {}).await.unwrap();
+        assert_eq!(got, want);
+        passes.push(stats.passes);
+    }
+    assert!(passes[1] < passes[0], "plain, tree: {passes:?}");
+    eprintln!("plain, lookup tree passes: {passes:?} for {} tokens", want.len());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn speculative_decoding_writes_the_same_text_in_fewer_passes() {
     let file = bc_infer::fixtures::tiny_model(4, false);
     let (url, _) = serve(file.clone()).await;
@@ -204,17 +227,17 @@ async fn speculative_decoding_writes_the_same_text_in_fewer_passes() {
     let same = Local::load(&Source::File(dir.join("d.gguf"))).await.unwrap();
     let client = Client::open(&m.coordinator, &url, plan(&[(0, 0..2), (1, 2..4)]), &addrs, &|_, _, _| {}).await.unwrap();
     let llm = Llm::new(&header, vec![client], Some(same)).unwrap();
-    // Plain, then chain, then tree (each is tried once): every way writes the same text,
-    // and the tree takes the fewest passes when every guess is right.
+    // Plain, lookup, chain, then tree (each is tried once): every way writes the same
+    // text, and the tree takes few passes when every guess is right.
     let mut passes = Vec::new();
-    for _ in 0..3 {
+    for _ in 0..4 {
         let (got, stats) = llm.generate(&prompt, 24, Sampling::default(), |_| {}).await.unwrap();
         assert_eq!(got, want);
         passes.push(stats.passes);
     }
     if want.len() > 5 {
-        assert!(passes[2] * 3 <= want.len() + 3, "tree: {} passes for {} tokens", passes[2], want.len());
-        assert!(passes[2] < passes[0] && passes[1] < passes[0], "plain, chain, tree: {passes:?}");
+        assert!(passes[3] * 3 <= want.len() + 3, "tree: {} passes for {} tokens", passes[3], want.len());
+        assert!(passes[3] < passes[0] && passes[2] < passes[0], "plain, lookup, chain, tree: {passes:?}");
     }
 
     // A different, smaller draft: guesses are sometimes wrong, the text never is.
@@ -223,7 +246,7 @@ async fn speculative_decoding_writes_the_same_text_in_fewer_passes() {
     let _ = std::fs::remove_dir_all(&dir);
     let client = Client::open(&m.coordinator, &url, plan(&[(1, 0..1), (0, 1..4)]), &addrs, &|_, _, _| {}).await.unwrap();
     let llm = Llm::new(&header, vec![client], Some(other)).unwrap();
-    for _ in 0..3 {
+    for _ in 0..4 {
         let (got, _) = llm.generate(&prompt, 24, Sampling::default(), |_| {}).await.unwrap();
         assert_eq!(got, want);
     }
@@ -245,7 +268,7 @@ async fn one_conversation_keeps_every_stage_busy() {
     let _ = std::fs::remove_dir_all(&dir);
     let client = Client::open(&m.coordinator, &url, plan(&[(0, 0..1), (1, 1..2), (2, 2..3)]), &addrs, &|_, _, _| {}).await.unwrap();
     // This test is about the pipelined chain: measured as the fastest way here.
-    client.speed.lock().unwrap().ms = [100.0, 1.0, 100.0];
+    client.speed.lock().unwrap().ms = [100.0, 1.0, 100.0, 100.0];
     let llm = Llm::new(&header, vec![client], Some(same)).unwrap();
     let prompt: Vec<u32> = vec![1, 60, 61, 62];
     let want = local_text(&file, &prompt, 40).await;
@@ -342,7 +365,7 @@ async fn a_swarm_drafter_grows_part_of_the_tree() {
     llm.set_drafters(vec![drafter.clone()]);
     assert_eq!(llm.drafters(), 1);
     // Tree decoding, as measured fastest here: the drafter's subtrees join it.
-    target.speed.lock().unwrap().ms = [100.0, 100.0, 1.0];
+    target.speed.lock().unwrap().ms = [100.0, 100.0, 1.0, 100.0];
     let (got, stats) = llm.generate(&prompt, 24, Sampling::default(), |_| {}).await.unwrap();
     assert_eq!(got, want, "a tree grown by two devices still writes exactly the target's text");
     assert!(stats.passes >= 1);
@@ -385,14 +408,29 @@ async fn real_model_over_three_devices() {
     let want = local_text(&file, &prompt, ids.len()).await;
     assert_eq!(ids, want, "the split model writes exactly what the whole one does");
     println!("matches one computer for all {} tokens", ids.len());
-    // With a draft, every way of decoding is tried in turn (plain, chain, tree): same text,
+    // With a draft, every way of decoding is tried in turn (plain, lookup, chain, tree): same text,
     // and how many tokens each pass through the pipeline yields.
     if llm.has_draft() {
-        for _ in 0..3 {
+        for _ in 0..4 {
             let (again, s) = llm.generate(&prompt, 96, Sampling::default(), |_| {}).await.unwrap();
             assert_eq!(again, ids);
             let secs = ((s.total_ms - s.first_token_ms) / 1000.0).max(1e-3);
             println!("{} tokens in {} passes ({:.2} a pass), {:.1} tokens/s", s.generated, s.passes, s.generated as f64 / s.passes.max(1) as f64, s.generated.saturating_sub(1) as f64 / secs);
         }
+    }
+    // An edit, which repeats its input: each way on a fresh pipeline speed record, so the
+    // order is plain, lookup, then chain and tree (with a draft).
+    let code = "fn area(width: f64, height: f64) -> f64 {\n    let result = width * height;\n    println!(\"area is {}\", result);\n    result\n}\n";
+    let ask = format!("Rename the variable `result` to `total` in this Rust function. Reply with only the code.\n\n{code}");
+    let prompt = llm.tokenizer.encode(&llm.tokenizer.chat_prompt(&[("user".into(), ask)]));
+    for client in llm.replicas() {
+        *client.speed.lock().unwrap() = Default::default();
+    }
+    let mut first = None;
+    for _ in 0..if llm.has_draft() { 4 } else { 2 } {
+        let (got, s) = llm.generate(&prompt, 96, Sampling::default(), |_| {}).await.unwrap();
+        assert_eq!(first.get_or_insert_with(|| got.clone()), &got);
+        let secs = ((s.total_ms - s.first_token_ms) / 1000.0).max(1e-3);
+        println!("edit: {} tokens in {} passes ({:.2} a pass), {:.1} tokens/s", s.generated, s.passes, s.generated as f64 / s.passes.max(1) as f64, s.generated.saturating_sub(1) as f64 / secs);
     }
 }

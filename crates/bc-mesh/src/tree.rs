@@ -16,6 +16,50 @@ pub const TREE_ROOT_K: usize = 4;
 pub const TREE_CHILD_K: usize = 3;
 pub const TREE_WIDTH: usize = 8;
 
+/// Tokens the draft model scores: the first ids of the vocabulary. Byte-pair vocabularies
+/// number tokens by how early (so how often) they were merged, and the output head over
+/// all ~150k is about a quarter of a small draft's work. The target still checks every
+/// token, so a rarer one only goes unguessed.
+// shortcut: id order as frequency, true of byte-pair vocabularies; count real use if a
+// model's vocabulary is ordered otherwise.
+pub const DRAFT_VOCAB: usize = 32768;
+/// Guesses read from the text itself at most, and the longest repeat they key on.
+pub const LOOKUP_TOKENS: usize = 8;
+const LOOKUP_KEY: usize = 4;
+
+/// Guesses that cost nothing (prompt lookup): where the text's last few tokens appeared
+/// before, the tokens that followed them then. Code, edits and summaries repeat their
+/// input a lot. Tries the longest key first (4 tokens, down to 2) and the latest place.
+pub fn lookup(text: &[u32], max: usize) -> Vec<u32> {
+    for n in (2..=LOOKUP_KEY).rev() {
+        if text.len() <= n {
+            continue;
+        }
+        let key = &text[text.len() - n..];
+        if let Some(at) = text[..text.len() - 1].windows(n).rposition(|w| w == key) {
+            let from = at + n;
+            return text[from..(from + max).min(text.len())].to_vec();
+        }
+    }
+    Vec::new()
+}
+
+/// Adds `chain` (guesses in order after the confirmed text) to a tree, sharing the
+/// nodes it already has, until the tree holds `max` nodes.
+pub fn add_chain(nodes: &mut Vec<(u32, u32)>, chain: &[u32], max: usize) {
+    let mut parent = ROOT;
+    for &t in chain {
+        parent = match nodes.iter().position(|&n| n == (t, parent)) {
+            Some(i) => i as u32,
+            None if nodes.len() < max => {
+                nodes.push((t, parent));
+                nodes.len() as u32 - 1
+            }
+            None => return,
+        };
+    }
+}
+
 /// The `k` likeliest tokens of `scores` with their log-probabilities, likeliest first.
 pub fn top_k(scores: &[f32], k: usize) -> Vec<(u32, f32)> {
     let max = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
@@ -38,7 +82,6 @@ pub fn top_k(scores: &[f32], k: usize) -> Vec<(u32, f32)> {
 /// alone: the earlier levels are already in its cache. Returns (token, parent) per
 /// guess, roots first; parents index earlier guesses, or `ROOT` for the roots.
 pub fn grow(part: &Part, kv: &mut Kv, pos: usize, roots: Vec<(u32, f32)>, budget: usize) -> Result<Vec<(u32, u32)>> {
-    let vocab = part.cfg.vocab;
     let mut nodes: Vec<(u32, u32, f32)> = roots.into_iter().take(budget).map(|(t, lp)| (t, ROOT, lp)).collect();
     // Guesses already run through the draft; the rest are the frontier.
     let mut done = 0;
@@ -50,7 +93,8 @@ pub fn grow(part: &Part, kv: &mut Kv, pos: usize, roots: Vec<(u32, f32)>, budget
         let parents: Vec<u32> = nodes.iter().map(|n| n.1).collect();
         let mut x = part.embed(&tokens)?;
         part.forward_tree(&mut x, tokens.len(), pos + done, Some(&parents), kv)?;
-        let scores = part.logits(&x, tokens.len())?;
+        let scores = part.logits_upto(&x, tokens.len(), DRAFT_VOCAB)?;
+        let vocab = scores.len() / tokens.len();
         let mut next: Vec<(f32, u32, usize)> = Vec::new();
         for (i, f) in (done..nodes.len()).enumerate() {
             for (t, lp) in top_k(&scores[i * vocab..(i + 1) * vocab], TREE_CHILD_K) {
@@ -68,6 +112,30 @@ pub fn grow(part: &Part, kv: &mut Kv, pos: usize, roots: Vec<(u32, f32)>, budget
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lookup_continues_where_the_text_repeated() {
+        // "1 2 3 4 5 ... 1 2 3" goes on with "4 5 9" as before.
+        let text = [1, 2, 3, 4, 5, 9, 7, 1, 2, 3];
+        assert_eq!(lookup(&text, 3), [4, 5, 9]);
+        assert_eq!(lookup(&text, 20), [4, 5, 9, 7, 1, 2, 3]);
+        // The longest key wins over a later, shorter match; nothing repeated, nothing.
+        assert_eq!(lookup(&[8, 2, 3, 6, 9, 3, 2, 3], 2), [6, 9]);
+        assert!(lookup(&[1, 2, 3, 4], 4).is_empty());
+        assert!(lookup(&[], 4).is_empty());
+    }
+
+    #[test]
+    fn a_chain_joins_the_tree_where_they_agree() {
+        let mut nodes = vec![(10, ROOT), (11, 0), (12, ROOT)];
+        add_chain(&mut nodes, &[10, 11, 13, 14], 5);
+        assert_eq!(nodes, [(10, ROOT), (11, 0), (12, ROOT), (13, 1), (14, 3)]);
+        add_chain(&mut nodes, &[12, 15], 5);
+        assert_eq!(nodes.len(), 5, "the tree is full");
+        let mut empty = Vec::new();
+        add_chain(&mut empty, &[7, 7], 9);
+        assert_eq!(empty, [(7, ROOT), (7, 0)]);
+    }
 
     #[test]
     fn top_k_is_the_likeliest_in_order_with_log_probabilities() {
