@@ -15,5 +15,6 @@ pub mod plan;
 pub mod probe;
 pub mod stage;
 pub mod ticket;
+pub mod tree;
 
 pub use bc_net::MESH_ALPN;

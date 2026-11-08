@@ -43,64 +43,14 @@ async fn draft_run(d: (Arc<Part>, Kv), tokens: Vec<u32>, pos: usize) -> Result<(
 
 use crate::msg::{Activation, Meta, StageSetup};
 
-/// Tree speculation (SpecInfer; EAGLE-2's growth by cumulative probability): guesses per
-/// pass at most, how deep, how many children each guess may have at the root and below,
-/// and how many guesses each level keeps.
-const TREE_NODES: usize = 40;
-const TREE_DEPTH: usize = 6;
-const TREE_ROOT_K: usize = 4;
-const TREE_CHILD_K: usize = 3;
-const TREE_WIDTH: usize = 8;
+use crate::tree::{grow, top_k, TREE_NODES, TREE_ROOT_K};
 
-/// The `k` likeliest tokens of `scores` with their log-probabilities, likeliest first.
-fn top_k(scores: &[f32], k: usize) -> Vec<(u32, f32)> {
-    let max = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let lse = max + scores.iter().map(|s| (s - max).exp()).sum::<f32>().ln();
-    let mut best: Vec<(u32, f32)> = Vec::with_capacity(k + 1);
-    for (t, &s) in scores.iter().enumerate() {
-        if best.len() < k || s > best[best.len() - 1].1 {
-            let at = best.partition_point(|b| b.1 >= s);
-            best.insert(at, (t as u32, s));
-            best.truncate(k);
-        }
-    }
-    best.into_iter().map(|(t, s)| (t, s - lse)).collect()
-}
-
-/// Grows a tree of guesses after the draft's cached text (`pos` tokens), from the draft's
-/// scores for the next token: level by level, each guess on the frontier proposes its
-/// likeliest next tokens, and the level keeps those whose whole path is likeliest. Each
-/// level is one tree pass of the draft over every guess so far. Returns (token, parent)
-/// per guess; parents index earlier guesses, or `ROOT`.
-async fn grow_tree(d: (Arc<Part>, Kv), root: Vec<f32>, pos: usize, budget: usize, vocab: usize) -> Result<((Arc<Part>, Kv), Vec<(u32, u32)>)> {
+/// [`grow`] off the async threads, under the likeliest first tokens from `root`.
+async fn grow_tree(d: (Arc<Part>, Kv), roots: Vec<(u32, f32)>, pos: usize, budget: usize) -> Result<((Arc<Part>, Kv), Vec<(u32, u32)>)> {
     tokio::task::spawn_blocking(move || {
         let (part, mut kv) = d;
-        let mut nodes: Vec<(u32, u32, f32)> = top_k(&root, TREE_ROOT_K.min(budget)).into_iter().map(|(t, lp)| (t, ROOT, lp)).collect();
-        let mut frontier: Vec<usize> = (0..nodes.len()).collect();
-        for _ in 1..TREE_DEPTH {
-            if frontier.is_empty() || nodes.len() >= budget {
-                break;
-            }
-            let tokens: Vec<u32> = nodes.iter().map(|n| n.0).collect();
-            let parents: Vec<u32> = nodes.iter().map(|n| n.1).collect();
-            let mut x = part.embed(&tokens)?;
-            part.forward_tree(&mut x, tokens.len(), pos, Some(&parents), &mut kv)?;
-            let scores = part.logits(&x, tokens.len())?;
-            let mut next: Vec<(f32, u32, usize)> = Vec::new();
-            for &f in &frontier {
-                for (t, lp) in top_k(&scores[f * vocab..(f + 1) * vocab], TREE_CHILD_K) {
-                    next.push((nodes[f].2 + lp, t, f));
-                }
-            }
-            next.sort_by(|a, b| b.0.total_cmp(&a.0));
-            next.truncate(TREE_WIDTH.min(budget - nodes.len()));
-            frontier.clear();
-            for (lp, t, f) in next {
-                frontier.push(nodes.len());
-                nodes.push((t, f as u32, lp));
-            }
-        }
-        Ok(((part, kv), nodes.into_iter().map(|(t, p, _)| (t, p)).collect()))
+        let nodes = grow(&part, &mut kv, pos, roots, budget)?;
+        Ok(((part, kv), nodes))
     })
     .await?
 }
@@ -153,7 +103,9 @@ pub struct Speed {
 }
 
 const EXPLORE: u64 = 8;
-const MODES: [Mode; 3] = [Mode::Tree, Mode::Chain, Mode::Plain];
+/// Untried ways go in this order, so a new pipeline's first answer is never the costly
+/// experiment.
+const MODES: [Mode; 3] = [Mode::Plain, Mode::Chain, Mode::Tree];
 
 impl Speed {
     fn choose(&mut self) -> Mode {
@@ -374,6 +326,9 @@ pub struct Llm {
     replicas: StdMutex<Vec<Arc<Client>>>,
     /// Shared by every request: each keeps its own cache, so drafts run side by side.
     draft: Option<Arc<Part>>,
+    /// The swarm: whole draft models on other devices, each growing its own branch of
+    /// the tree while this computer grows the rest (one-stage pipelines).
+    drafters: StdMutex<Vec<Arc<Client>>>,
 }
 
 impl Llm {
@@ -384,7 +339,20 @@ impl Llm {
                 bail!("the draft model's vocabulary ({}) differs from the model's ({})", d.tokenizer.vocab(), tokenizer.vocab());
             }
         }
-        Ok(Llm { tokenizer, cfg: Config::from_header(header)?, replicas: StdMutex::new(replicas), draft: draft.map(|d| Arc::new(d.part)) })
+        Ok(Llm { tokenizer, cfg: Config::from_header(header)?, replicas: StdMutex::new(replicas), draft: draft.map(|d| Arc::new(d.part)), drafters: StdMutex::default() })
+    }
+
+    /// Devices that draft for tree speculation alongside this computer.
+    pub fn set_drafters(&self, drafters: Vec<Arc<Client>>) {
+        *self.drafters.lock().unwrap() = drafters;
+    }
+
+    pub fn drafters(&self) -> usize {
+        self.drafters.lock().unwrap().iter().filter(|d| d.alive()).count()
+    }
+
+    pub fn has_draft(&self) -> bool {
+        self.draft.is_some()
     }
 
     pub fn replicas(&self) -> Vec<Arc<Client>> {
@@ -434,6 +402,9 @@ impl Llm {
         let (mut d, _) = draft_run((draft.clone(), draft.new_kv()), prompt.to_vec(), 0).await?;
         let mut draft_len = prompt.len();
         let mut keep: Option<(u32, Vec<u32>)> = None;
+        let drafters: Vec<Arc<Client>> = self.drafters.lock().unwrap().iter().filter(|d| d.alive()).cloned().collect();
+        // Confirmed tokens each drafter has seen.
+        let mut drafted = vec![0usize; drafters.len()];
         while out.len() < max_tokens {
             // The draft catches up on the confirmed text; its last scores seed the tree.
             let feed = seq[draft_len..].to_vec();
@@ -441,8 +412,35 @@ impl Llm {
             draft_len = seq.len();
             let real = seq.len() - *target_len;
             let budget = TREE_NODES.min(MAX_TREE - real);
-            let (back, nodes) = grow_tree(back, scores[(feed.len() - 1) * vocab..].to_vec(), draft_len, budget, vocab).await?;
+            // The likeliest first tokens: the second, third… each go to a drafter of the
+            // swarm, which grows the subtree below it; this computer grows the rest.
+            let mut roots = top_k(&scores[(feed.len() - 1) * vocab..], TREE_ROOT_K + drafters.len());
+            let swarm = drafters.len().min(roots.len().saturating_sub(1));
+            let share = budget / (swarm + 1);
+            let mut asks = Vec::with_capacity(swarm);
+            for (i, (root, _)) in roots.drain(1..1 + swarm).enumerate() {
+                let mut tokens = seq[drafted[i]..].to_vec();
+                tokens.push(root);
+                let m = Meta { grow: Some(share.saturating_sub(1) as u32), ..meta(drafted[i], false) };
+                drafted[i] = seq.len();
+                asks.push((root, drafters[i].submit(m, Activation::Tokens(tokens)).await));
+            }
+            let mine = Instant::now();
+            let (back, mut nodes) = grow_tree(back, roots, draft_len, budget - swarm * share).await?;
             d = back;
+            // Subtrees that arrive while this computer's part takes as long again join the
+            // tree; later ones are left out of this pass.
+            let wait = mine.elapsed().max(std::time::Duration::from_millis(20));
+            for (root, ask) in asks {
+                let Ok(rx) = ask else { continue };
+                let Ok(Ok(Ok((_, Activation::Tokens(flat))))) = tokio::time::timeout(wait, rx).await else { continue };
+                let at = nodes.len() as u32;
+                nodes.push((root, ROOT));
+                for pair in flat.chunks_exact(2).take(share.saturating_sub(1)) {
+                    nodes.push((pair[0], if pair[1] == ROOT { at } else { at + 1 + pair[1] }));
+                }
+            }
+            nodes.truncate(budget);
             let mut tokens: Vec<u32> = seq[*target_len..].to_vec();
             let mut parents: Vec<u32> = (0..real as u32).map(|i| if i == 0 { ROOT } else { i - 1 }).collect();
             for &(t, p) in &nodes {
@@ -680,13 +678,13 @@ mod tests {
     fn decoding_takes_the_fastest_way_and_rechecks_the_others() {
         use super::Mode::*;
         let mut s = Speed::default();
-        // Each way is tried once first.
-        assert_eq!(s.choose(), Tree);
-        s.record(Tree, 10.0);
-        assert_eq!(s.choose(), Chain);
-        s.record(Chain, 30.0);
+        // Each way is tried once first, plain first.
         assert_eq!(s.choose(), Plain);
         s.record(Plain, 20.0);
+        assert_eq!(s.choose(), Chain);
+        s.record(Chain, 30.0);
+        assert_eq!(s.choose(), Tree);
+        s.record(Tree, 10.0);
         // Then the fastest, with an occasional recheck of another.
         let picks: Vec<_> = (0..24).map(|_| s.choose()).collect();
         let others = picks.iter().filter(|&&m| m != Tree).count();

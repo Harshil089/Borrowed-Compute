@@ -123,6 +123,12 @@ pub struct Meta {
     /// only `.1` (the accepted path), in order (`Kv::keep`).
     #[serde(default)]
     pub keep: Option<(u32, Vec<u32>)>,
+    /// Asks a swarm drafter (a stage holding a whole draft model) to grow a subtree of up
+    /// to this many guesses below the batch's last token, after feeding the batch. The
+    /// answer is the guesses as (token, parent) pairs, flattened; parent `ROOT` means a
+    /// child of that last token.
+    #[serde(default)]
+    pub grow: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

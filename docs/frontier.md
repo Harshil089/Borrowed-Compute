@@ -11,7 +11,7 @@ does a lot of work between network trips. Three steps, built in this order:
 
 | Phase | Idea | Tokens per weight pass | Status |
 |---|---|---|---|
-| 1. Swarm tree speculation | Many devices draft a tree of continuations; the target checks the whole tree in one pass | 3 to 8 | Building |
+| 1. Swarm tree speculation | Many devices draft a tree of continuations; the target checks the whole tree in one pass | 3 to 8 (3.9 measured) | Algorithm done; batched GPU kernel next |
 | 2. Experts across the internet | Mixture-of-experts models: each token touches a few experts; experts live on different devices | (bytes per token ÷ 10 to 20) | Planned |
 | 3. Distributed diffusion LMs | Text written a block at a time, refined over a few steps, compute-bound and split across devices | 10 to 50 | Planned |
 
@@ -45,6 +45,34 @@ is wider than one computer could draft in time, and the pipelined batches from
    sends whatever arrived. Exit: measured tokens per pass rising with drafter count.
 4. **Planner and the measured switch.** The pipeline's measured speed (`llm::Speed`)
    already picks plain or speculative decoding; it learns tree width too.
+
+### Where phase 1 stands
+
+Built: tree passes on CPU, Metal and CUDA (exact: a tree row scores bit for bit what its
+path alone scores), cache keeping, tree drafting, acceptance, swarm drafters on idle
+devices (`Meta.grow`, `tree.rs`), and the measured choice between plain, chain and tree.
+
+Measured on one M2, Qwen2.5 1.5B with the 0.5B as draft, 43 tokens, same text every way:
+
+| Way | Passes | Tokens a pass | Tokens a second |
+|---|---|---|---|
+| Plain | 43 | 1.0 | 10 to 17 |
+| Chain | 25 | 1.7 | 6 to 8 |
+| Tree | 11 | 3.9 | 2.4 |
+
+Tree confirms 3.9 tokens a pass, but a 41-row pass costs about 25 times a one-row pass
+on this GPU (1.5 s against 60 ms), and drafting the tree about 1 s. A batched kernel would
+check 41 rows in roughly 40 to 60 ms. So the next steps are:
+
+1. **Batched products on the GPU's matrix units** (Metal `simdgroup_matrix`, CUDA tensor
+   cores via `mma`): rows 2 to 64 for little more than one. This is what turns 3.9 tokens
+   a pass into 3 to 4 times the speed.
+2. **Incremental drafting**: keep earlier tree levels in the draft's cache instead of
+   running the whole tree again at each level (cuts drafting about 3 times).
+3. Measure the swarm with real devices (drafters on idle computers).
+
+Until then the measured choice keeps plain decoding where it is faster, so nobody is
+slowed down; it tries plain first on a new pipeline.
 
 ## Phase 2: experts across the internet
 
