@@ -46,6 +46,62 @@ const ENTRIES: &str = r#"
 kernel void k_matmul(device const uchar* w [[buffer(0)]], device const float* x [[buffer(1)]], device float* out [[buffer(2)]],
     constant uint& ty [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& n [[buffer(6)]],
     constant uint& rb [[buffer(7)]], G) { matmul(w, x, out, ty, rows, cols, n, rb, g.x * ROWS_PER_GROUP + sg, g.y * NB, lane); }
+// Batched product on the matrix units, for batches of a few rows to 64 (a tree of
+// guesses). A thread group of 4 SIMD groups computes BM weight rows x BN input rows, 32
+// columns (one weight group) at a time: the 128 threads decode the weights and load the
+// inputs into threadgroup memory, then each SIMD group multiplies its BM / 4 rows by the
+// BN inputs with 8 x 8 matrix products. Out of range rows read zeros. Loops over the
+// accumulators are unrolled: an array indexed in a loop that is not lives in slow
+// per-thread memory.
+#define UNROLL _Pragma("unroll")
+// Tile row stride: 32 columns plus 4, so the threads writing one column each of
+// 32 rows hit different memory banks.
+#define SA 36u
+#define MM_KERNEL(NAME, BM, BN)                                                                                      \
+kernel void NAME(device const uchar* w [[buffer(0)]], device const float* x [[buffer(1)]], device float* out [[buffer(2)]], \
+    constant uint& ty [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& n [[buffer(6)]], \
+    constant uint& rb [[buffer(7)]], uint3 g [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]]) { \
+    const uint MR = BM / 32u, MB = BN / 8u, WT = BM * 32u / 128u;                                                    \
+    threadgroup float sa[BM * SA], sb[BN * SA];                                                                   \
+    uint r0 = g.x * BM, i0 = g.y * BN;                                                                               \
+    uint tr = t / (32u / WT), tc = (t % (32u / WT)) * WT;                                                            \
+    uint wr = r0 + tr;                                                                                               \
+    device const uchar* row = w + (ulong)(wr < rows ? wr : 0u) * rb;                                                 \
+    uint mr = sg * (BM / 4u);                                                                                        \
+    simdgroup_float8x8 c[MR][MB];                                                                                    \
+    UNROLL for (uint a = 0; a < MR; a++) { UNROLL for (uint b = 0; b < MB; b++) c[a][b] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f); } \
+    for (uint gr = 0; gr < cols / 32u; gr++) {                                                                       \
+        if (WT == 32u) {                                                                                             \
+            float4 wv[8];                                                                                            \
+            if (wr < rows) group4(row, ty, gr, wv); else { UNROLL for (uint k = 0; k < 8u; k++) wv[k] = float4(0.0f); } \
+            UNROLL for (uint k = 0; k < 8u; k++) *(threadgroup float4*)(sa + tr * SA + k * 4u) = wv[k];             \
+        } else {                                                                                                     \
+            UNROLL for (uint q = 0; q < WT; q += 4u)                                                                  \
+                *(threadgroup float4*)(sa + tr * SA + tc + q) = wr < rows ? four(row, ty, gr, (tc + q) / 4u) : float4(0.0f); \
+        }                                                                                                            \
+        UNROLL for (uint e = t; e < BN * 8u; e += 128u) {                                                            \
+            uint i = e / 8u, q = (e % 8u) * 4u;                                                                      \
+            *(threadgroup float4*)(sb + i * SA + q) = i0 + i < n ? *(device const float4*)(x + (ulong)(i0 + i) * cols + gr * 32u + q) : float4(0.0f); \
+        }                                                                                                            \
+        threadgroup_barrier(mem_flags::mem_threadgroup);                                                            \
+        UNROLL for (uint kk = 0; kk < 32u; kk += 8u) {                                                               \
+            simdgroup_float8x8 ma[MR], mb[MB];                                                                       \
+            UNROLL for (uint a = 0; a < MR; a++) simdgroup_load(ma[a], sa, SA, ulong2(kk, mr + a * 8u));             \
+            UNROLL for (uint b = 0; b < MB; b++) simdgroup_load(mb[b], sb, SA, ulong2(kk, b * 8u), true);            \
+            UNROLL for (uint a = 0; a < MR; a++) { UNROLL for (uint b = 0; b < MB; b++) simdgroup_multiply_accumulate(c[a][b], ma[a], mb[b], c[a][b]); } \
+        }                                                                                                            \
+        threadgroup_barrier(mem_flags::mem_threadgroup);                                                            \
+    }                                                                                                                \
+    /* Each SIMD group stores its corner (BM / 4 x BN) through sa, so edge tiles write only what is in range. */   \
+    threadgroup float* sc = sa + sg * (BM / 4u) * BN;                                                                \
+    UNROLL for (uint a = 0; a < MR; a++) { UNROLL for (uint b = 0; b < MB; b++) simdgroup_store(c[a][b], sc, BN, ulong2(b * 8u, a * 8u)); } \
+    simdgroup_barrier(mem_flags::mem_threadgroup);                                                                  \
+    for (uint e = t % 32u; e < (BM / 4u) * BN; e += 32u) {                                                           \
+        uint r = mr + e / BN, i = e % BN;                                                                            \
+        if (r0 + r < rows && i0 + i < n) out[(ulong)(i0 + i) * rows + r0 + r] = sc[e];                               \
+    }                                                                                                                \
+}
+MM_KERNEL(k_matmul_mm, 128u, 16u)
 kernel void k_rms_norm(device const float* x [[buffer(0)]], device const float* w [[buffer(1)]], device float* out [[buffer(2)]],
     constant uint& cols [[buffer(3)]], constant float& eps [[buffer(4)]], G) { rms_norm(x, w, out, cols, eps, g.x, lane); }
 kernel void k_rope(device float* x [[buffer(0)]], device const float* f [[buffer(1)]], device const uint* positions [[buffer(2)]],
@@ -76,7 +132,7 @@ impl Backend {
         let src = format!("{PRELUDE}{}{ENTRIES}", include_str!("kernels.h"));
         let lib = device.new_library_with_source(&src, &opts).map_err(|e| anyhow!("compiling the Metal kernels: {e}"))?;
         let mut kernels = HashMap::new();
-        for k in K::ALL {
+        for k in K::ALL.into_iter().chain([K::MatmulMm]) {
             let f = lib.get_function(k.name(), None).map_err(|e| anyhow!("{}: {e}", k.name()))?;
             let p = device.new_compute_pipeline_state_with_function(&f).map_err(|e| anyhow!("{}: {e}", k.name()))?;
             kernels.insert(k, p);

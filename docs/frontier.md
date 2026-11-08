@@ -11,7 +11,7 @@ does a lot of work between network trips. Three steps, built in this order:
 
 | Phase | Idea | Tokens per weight pass | Status |
 |---|---|---|---|
-| 1. Swarm tree speculation | Many devices draft a tree of continuations; the target checks the whole tree in one pass | 3 to 8 (3.9 measured) | Algorithm done; batched GPU kernel next |
+| 1. Swarm tree speculation | Many devices draft a tree of continuations; the target checks the whole tree in one pass | 3 to 8 (3.9 measured) | Built; pays with a big target and a small draft |
 | 2. Experts across the internet | Mixture-of-experts models: each token touches a few experts; experts live on different devices | (bytes per token ÷ 10 to 20) | Planned |
 | 3. Distributed diffusion LMs | Text written a block at a time, refined over a few steps, compute-bound and split across devices | 10 to 50 | Planned |
 
@@ -48,28 +48,45 @@ is wider than one computer could draft in time, and the pipelined batches from
 
 ### Where phase 1 stands
 
-Built: tree passes on CPU, Metal and CUDA (exact: a tree row scores bit for bit what its
-path alone scores), cache keeping, tree drafting, acceptance, swarm drafters on idle
-devices (`Meta.grow`, `tree.rs`), and the measured choice between plain, chain and tree.
+Built: tree passes on CPU, Metal and CUDA, cache keeping, tree drafting (a level at a
+time, earlier levels kept in the draft's cache), acceptance, swarm drafters on idle
+devices (`Meta.grow`, `tree.rs`), the measured choice between plain, chain and tree, and
+batched products on Apple's matrix units (`k_matmul_mm`, `simdgroup_matrix`).
 
-Measured on one M2, Qwen2.5 1.5B with the 0.5B as draft, 43 tokens, same text every way:
+Batched products, 8192 x 8192 Q4_0 on an M2, GB/s of weights (higher is faster):
 
-| Way | Passes | Tokens a pass | Tokens a second |
+| Rows | 1 | 2 | 8 | 16 | 41 | 64 |
+|---|---|---|---|---|---|---|
+| `k_matmul` (before) | 38 | | 6.2 | 3.4 | 1.3 | 0.9 |
+| `k_matmul_mm` | 35 to 38 (one row stays on `k_matmul`) | 12 | 12 | 11 to 14 | 4.5 to 5.5 | 3.5 to 4.4 |
+
+The matrix units sum in their own order, so a batch row is now within float rounding of
+a one-row pass (1e-7), not bit for bit: tree and chain write plain decoding's text
+unless two tokens tie within rounding. Half-precision tiles are 30 to 50% faster again
+but miss the engine's accuracy check, so they are not used.
+
+Qwen2.5 1.5B with the 0.5B as draft, 43 tokens, one M2, same text every way:
+
+| Way | Tokens a pass | Tokens a second (before the kernel) | Now |
 |---|---|---|---|
-| Plain | 43 | 1.0 | 10 to 17 |
-| Chain | 25 | 1.7 | 6 to 8 |
-| Tree | 11 | 3.9 | 2.4 |
+| Plain | 1.0 | 10 to 17 | 16 to 17 |
+| Chain (4 guesses) | 1.7 | 6 to 8 | 7.2 |
+| Tree, 40 guesses | 3.9 | 2.4 | 4.8 |
+| Tree, 15 guesses | 2.9 | | 7.8 |
 
-Tree confirms 3.9 tokens a pass, but a 41-row pass costs about 25 times a one-row pass
-on this GPU (1.5 s against 60 ms), and drafting the tree about 1 s. A batched kernel would
-check 41 rows in roughly 40 to 60 ms. So the next steps are:
+A 15-guess round is now about 360 ms: the check (16 rows) 155 ms, 2.6 one-row passes,
+and drafting 200 ms. What still holds it back on this pair, and next:
 
-1. **Batched products on the GPU's matrix units** (Metal `simdgroup_matrix`, CUDA tensor
-   cores via `mma`): rows 2 to 64 for little more than one. This is what turns 3.9 tokens
-   a pass into 3 to 4 times the speed.
-2. **Incremental drafting**: keep earlier tree levels in the draft's cache instead of
-   running the whole tree again at each level (cuts drafting about 3 times).
-3. Measure the swarm with real devices (drafters on idle computers).
+1. **The draft is a third of the target.** The 0.5B costs a third of the 1.5B a pass
+   (its 151k-word output head is a quarter of it). Speculation pays with a big target
+   and a small draft: a 7B to 32B target with the 0.5B, where a target pass is 5 to 20
+   times a draft pass. Measure that next.
+2. **The M2's matrix units are the ceiling**, about 1 TFLOPS achieved in fp32: a 16-row
+   check can never be much under 2 one-row passes there. NVIDIA tensor cores have 30 to
+   100 times the arithmetic per byte read, so trees of 40 to 60 should pay there; size the
+   tree per GPU once measured (CUDA still runs batches on `k_matmul`).
+3. Measure the swarm with real devices: drafters on idle computers take drafting off
+   the coordinator, which is now half of each round.
 
 Until then the measured choice keeps plain decoding where it is faster, so nobody is
 slowed down; it tries plain first on a new pipeline.

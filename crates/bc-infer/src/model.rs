@@ -286,11 +286,14 @@ impl Part {
         self.forward_tree(x, rows, pos, None, kv)
     }
 
-    /// [`Part::forward`] for a tree of rows: `tree[i]` is row i's parent row, or [`ROOT`]
-    /// for a row that follows the cached text directly. Row i sits at position
-    /// `pos + depth(i)` and sees the cache before `pos` plus its own ancestors, so each
-    /// row is scored exactly as if its path alone had been fed. Its keys and values go to
-    /// slot `pos + i`; [`Kv::keep`] then keeps the accepted path. `None` is a line.
+    /// [`Part::forward`] for a tree of rows: `tree[i]` is node i's parent node, or [`ROOT`]
+    /// for a node that follows the cached text directly. The tree's nodes take slots
+    /// `base..pos + rows`, `base = pos + rows - tree.len()`: the batch is its last `rows`
+    /// nodes, the ones before it were run by earlier calls with the same tree so far (a
+    /// tree grown a level at a time). Node i sits at position `base + depth(i)` and sees
+    /// the cache before `base` plus its own ancestors, so each row is scored exactly as if
+    /// its path alone had been fed. [`Kv::keep`] then keeps the accepted path. `None` is a
+    /// line.
     pub fn forward_tree(&self, x: &mut [f32], rows: usize, pos: usize, tree: Option<&[u32]>, kv: &mut Kv) -> Result<()> {
         let c = &self.cfg;
         let shape = Shape::new(rows, pos, tree)?;
@@ -308,7 +311,7 @@ impl Part {
         let on_gpu = match (&self.gpu, kv.gpu.as_mut()) {
             (Some(g), Some(cache)) => {
                 let positions: Vec<u32> = shape.positions.iter().map(|&p| p as u32).collect();
-                g.forward(c, x, pos, &positions, shape.visible.as_deref(), cache)?;
+                g.forward(c, x, pos, &positions, shape.visible.as_deref().map(|v| (shape.base, v)), cache)?;
                 g.len()
             }
             _ => 0,
@@ -330,7 +333,7 @@ impl Part {
             }
             kc.extend_from_slice(&k);
             vc.extend_from_slice(&v);
-            let att = attention(c, &q, kc, vc, rows, pos, shape.visible.as_deref());
+            let att = attention(c, &q, kc, vc, rows, pos, shape.visible.as_deref().map(|v| (shape.base, v)));
             let o = b.wo.matmul(&att, rows);
             x.iter_mut().zip(&o).for_each(|(a, b)| *a += b);
 
@@ -401,36 +404,41 @@ pub const MAX_TREE: usize = 64;
 struct Shape {
     /// RoPE position of each row.
     positions: Vec<usize>,
-    /// For a tree, the batch rows each row sees (its ancestors and itself), as bits.
+    /// For a tree, the tree nodes each row sees (its ancestors and itself), as bits: bit
+    /// j is slot `base + j`.
     visible: Option<Vec<u64>>,
+    /// The tree's first slot.
+    base: usize,
 }
 
 impl Shape {
     fn new(rows: usize, pos: usize, tree: Option<&[u32]>) -> Result<Self> {
         let Some(parents) = tree else {
-            return Ok(Shape { positions: (pos..pos + rows).collect(), visible: None });
+            return Ok(Shape { positions: (pos..pos + rows).collect(), visible: None, base: pos });
         };
-        if parents.len() != rows || rows > MAX_TREE {
-            bail!("a tree of {} parents for {rows} rows (at most {MAX_TREE})", parents.len());
+        if parents.len() < rows || parents.len() > MAX_TREE || parents.len() - rows > pos {
+            bail!("a tree of {} nodes for {rows} rows at {pos} (at most {MAX_TREE})", parents.len());
         }
+        let base = pos + rows - parents.len();
         let (mut positions, mut visible) = (Vec::with_capacity(rows), Vec::<u64>::with_capacity(rows));
         for (i, &p) in parents.iter().enumerate() {
             let (depth, seen) = match p {
                 ROOT => (0, 0),
-                p if (p as usize) < i => (positions[p as usize] - pos + 1, visible[p as usize]),
-                p => bail!("row {i}'s parent {p} does not come before it"),
+                p if (p as usize) < i => (positions[p as usize] - base + 1, visible[p as usize]),
+                p => bail!("node {i}'s parent {p} does not come before it"),
             };
-            positions.push(pos + depth);
+            positions.push(base + depth);
             visible.push(seen | 1 << i);
         }
-        Ok(Shape { positions, visible: Some(visible) })
+        let skip = parents.len() - rows;
+        Ok(Shape { positions: positions.split_off(skip), visible: Some(visible.split_off(skip)), base })
     }
 }
 
 /// Causal grouped-query attention for `rows` new tokens at `pos..`, against the cache.
-/// With `visible`, row i sees the cache before `pos` and only the batch rows its bits
-/// name (a tree); without, every earlier row (a line).
-fn attention(c: &Config, q: &[f32], kc: &[f32], vc: &[f32], rows: usize, pos: usize, visible: Option<&[u64]>) -> Vec<f32> {
+/// With `visible` (a tree from slot `base`), row i sees the cache before `base` and only
+/// the tree slots its bits name; without, every earlier row (a line).
+fn attention(c: &Config, q: &[f32], kc: &[f32], vc: &[f32], rows: usize, pos: usize, visible: Option<(usize, &[u64])>) -> Vec<f32> {
     let (hd, kvd) = (c.head_dim, c.kv_dim());
     let group = c.n_head / c.n_head_kv.max(1);
     let scale = 1.0 / (hd as f32).sqrt();
@@ -441,7 +449,7 @@ fn attention(c: &Config, q: &[f32], kc: &[f32], vc: &[f32], rows: usize, pos: us
         slots.clear();
         match visible {
             None => slots.extend(0..pos + i + 1),
-            Some(v) => slots.extend((0..pos).chain((0..rows).filter(|&j| v[i] >> j & 1 == 1).map(|j| pos + j))),
+            Some((base, v)) => slots.extend((0..base).chain((0..pos + rows - base).filter(|&j| v[i] >> j & 1 == 1).map(|j| base + j))),
         }
         for h in 0..c.n_head {
             let qh = &q[(i * c.n_head + h) * hd..(i * c.n_head + h + 1) * hd];
@@ -522,7 +530,17 @@ pub(crate) mod tests {
 
     #[test]
     fn a_tree_pass_scores_every_path_as_if_fed_alone() {
-        // On the CPU, and on the GPU when there is one: each must match itself exactly.
+        // On the CPU, and on the GPU when there is one: each must match itself exactly,
+        // except that the GPU's one-row products round differently from its batched ones
+        // (`gpu::MM_FROM`), so a lone row there is only within rounding of a batch.
+        let same = |a: &[f32], b: &[f32], exact: bool, what: &str| {
+            if exact {
+                assert_eq!(a, b, "{what}");
+            } else {
+                let err = a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0f32, f32::max);
+                assert!(err <= 1e-4 * (1.0 + b.iter().fold(0f32, |m, v| m.max(v.abs()))), "{what}: max error {err}");
+            }
+        };
         let gpu = crate::gpu::get().is_some();
         for (neox, on_gpu) in [(false, false), (true, false), (false, true), (true, true)] {
             if on_gpu && !gpu {
@@ -552,13 +570,28 @@ pub(crate) mod tests {
                 let want = run(&[&part], std::slice::from_mut(&mut alone), &line, 0);
                 assert_eq!(&scores[row * v..(row + 1) * v], &want[(line.len() - 1) * v..], "row {row}, path {path:?}");
             }
+            // The same tree a level at a time (40 and 44, then 41 and 42, then 43) scores
+            // every node the same.
+            let mut grown = part.new_kv();
+            run(&[&part], std::slice::from_mut(&mut grown), &prefix, 0);
+            let order = [40u32, 44, 41, 42, 43];
+            let parents = [ROOT, ROOT, 0, 0, 2];
+            let mut rows_seen = Vec::new();
+            for (from, to) in [(0, 2), (2, 4), (4, 5)] {
+                let mut x = part.embed(&order[from..to]).unwrap();
+                part.forward_tree(&mut x, to - from, prefix.len() + from, Some(&parents[..to]), &mut grown).unwrap();
+                rows_seen.extend(part.logits(&x, to - from).unwrap());
+            }
+            for (node, row) in [(0, 0), (1, 4), (2, 1), (3, 2), (4, 3)] {
+                same(&rows_seen[node * v..(node + 1) * v], &scores[row * v..(row + 1) * v], !on_gpu || node < 4, &format!("node {node}"));
+            }
             // Accept 40 → 41 → 43 (rows 0, 1, 3): the cache then holds exactly that text.
             kv.keep(prefix.len(), &[0, 1, 3]).unwrap();
             assert_eq!(kv.len, 6);
             let next = run(&[&part], std::slice::from_mut(&mut kv), &[50], 6);
             let mut fresh = part.new_kv();
             let want = run(&[&part], std::slice::from_mut(&mut fresh), &[5, 9, 13, 40, 41, 43, 50], 0);
-            assert_eq!(next, &want[6 * v..]);
+            same(&next, &want[6 * v..], !on_gpu, "after keep");
         }
         // Parents must come first, and a path must ascend.
         assert!(Shape::new(2, 0, Some(&[1, ROOT])).is_err());
@@ -590,14 +623,16 @@ pub(crate) mod tests {
             };
             close(&run(&[&gpu], &mut kg, &prompt, 0), &run(&[&cpu], &mut kc, &prompt, 0));
             close(&run(&[&gpu], &mut kg, &[40], 6), &run(&[&cpu], &mut kc, &[40], 6));
-            // On the GPU itself, results are exact: a batch scores each row as a
-            // one-token pass would, and a split model matches the whole one bit for bit.
+            // On the GPU itself a batch scores each row as a one-token pass would, within
+            // rounding (one row and a batch use different products), and a split model
+            // matches the whole one bit for bit.
             let mut fresh = [gpu.new_kv()];
             let all = run(&[&gpu], &mut fresh, &[5, 9, 13, 2, 7, 1, 40], 0);
             let mut steps = [gpu.new_kv()];
             run(&[&gpu], &mut steps, &prompt, 0);
             let one = run(&[&gpu], &mut steps, &[40], 6);
-            assert_eq!(&all[6 * gpu.cfg.vocab..], &one[..]);
+            let err = all[6 * gpu.cfg.vocab..].iter().zip(&one).map(|(x, y)| (x - y).abs()).fold(0f32, f32::max);
+            assert!(err < 1e-4, "a batch row against a one-token pass: {err}");
             let a = load_all(&file, 0..1, true, false);
             let b = load_all(&file, 1..4, false, true);
             let mut ks = [a.new_kv(), b.new_kv()];
