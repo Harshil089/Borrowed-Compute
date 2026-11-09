@@ -135,7 +135,7 @@ async fn endpoint(state: &AppState) -> CmdResult<iroh::Endpoint> {
 
 /// Measures every paired device at once and, for `model`, plans it over them.
 #[tauri::command]
-pub async fn mesh_probe(state: State<'_, AppState>, model: Option<String>, throughput: bool) -> CmdResult<Probe> {
+pub async fn mesh_probe(state: State<'_, AppState>, model: Option<String>, throughput: bool, include: Vec<String>) -> CmdResult<Probe> {
     let targets = targets(&state).await?;
     let ep = endpoint(&state).await?;
     let mut devices = probe_all(&ep, targets).await;
@@ -146,7 +146,7 @@ pub async fn mesh_probe(state: State<'_, AppState>, model: Option<String>, throu
     bc_net::release(ep).await;
     if let Some(m) = model.as_deref().and_then(bc_cli::mesh::find_model) {
         let goal = if throughput { Goal::Throughput } else { Goal::Latency };
-        let (plan, names) = plan_with(&m, &usable, &pairs, goal, 1.0);
+        let (plan, names) = plan_with(&m, &usable, &pairs, goal, 1.0, &include);
         out.pipelines = plan
             .pipelines
             .iter()
@@ -202,7 +202,7 @@ pub async fn mesh_status(mesh: State<'_, MeshState>) -> CmdResult<MeshStatus> {
 /// Starts `model` across the paired devices and serves it on `port`. Sends `mesh-phase`
 /// events while it starts.
 #[tauri::command]
-pub async fn mesh_start(app: AppHandle, state: State<'_, AppState>, mesh: State<'_, MeshState>, model: String, throughput: bool, port: u16) -> CmdResult<MeshStatus> {
+pub async fn mesh_start(app: AppHandle, state: State<'_, AppState>, mesh: State<'_, MeshState>, model: String, throughput: bool, include: Vec<String>, port: u16) -> CmdResult<MeshStatus> {
     let mut running = mesh.running.lock().await;
     if running.is_some() {
         return Err("a model is already running; stop it first".into());
@@ -215,7 +215,7 @@ pub async fn mesh_start(app: AppHandle, state: State<'_, AppState>, mesh: State<
     *mesh.starting.lock().unwrap() = Some(cancel);
     // Dropping the start closes its connections, and the devices stop downloading.
     let started = tokio::select! {
-        s = Session::start(ep, targets, &model, goal, None, move |s| {
+        s = Session::start(ep, targets, &model, goal, None, include, move |s| {
             let _ = phase.emit("mesh-phase", s.to_string());
         }) => s.map_err(err_chain),
         _ = cancelled => Err("Stopped before it finished starting.".to_string()),

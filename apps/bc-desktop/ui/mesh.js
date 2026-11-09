@@ -14,6 +14,9 @@ const PORT = 8484;
 let goal = "latency";
 let running = null;
 let models = [];
+// Devices the owner wants used even when the plan would be faster without them.
+let include = [];
+try { include = JSON.parse(localStorage.getItem("mesh-include")) || []; } catch {}
 
 function message(text, kind = "bad") {
   $("mesh-msg").className = `banner ${kind}${text ? "" : " hidden"}`;
@@ -38,7 +41,9 @@ function renderDevices(devices) {
     if (d.error) {
       return `<div class="mesh-dev"><span class="dep-main"><span class="dep-cmd">${esc(d.name)}</span><span class="dep-sub">${esc(d.error)}</span></span><span class="pill ${d.shared ? "warn" : "bad"}">${d.shared ? "Not allowed" : "Unreachable"}</span></div>`;
     }
-    const pill = d.engine ? `<span class="pill ok">Ready</span>` : `<span class="pill warn">Update needed</span>`;
+    const pill = d.engine
+      ? `<span class="mesh-pick"><label class="mesh-include" title="Give it layers even when the model would run faster without it"><span class="switch"><input type="checkbox" data-include="${esc(d.name)}"${include.includes(d.name) ? " checked" : ""}><span></span></span>Always use</label><span class="pill ok">Ready</span></span>`
+      : `<span class="pill warn">Update needed</span>`;
     return `
       <div class="mesh-dev">
         <span class="dep-main">
@@ -78,7 +83,7 @@ function renderPlan(pipelines, unused = [], drafters = []) {
     return head + stages + sum;
   }).join("") + (drafters.length
     ? `<div class="mesh-sum">Swarm: ${drafters.map(esc).join(", ")} ${drafters.length === 1 ? "drafts" : "draft"} guesses for this model, so each pass can confirm several tokens.</div>`
-    : unused.length ? `<div class="mesh-sum">Not used: one conversation is fastest without ${unused.map(esc).join(", ")}. Choose Many requests to use every device.</div>` : "");
+    : unused.length ? `<div class="mesh-sum">Not used: one conversation is fastest without ${unused.map(esc).join(", ")}. Turn on Always use for a device to add it anyway, or choose Many requests to use every device.</div>` : "");
 }
 
 function renderRunning(s) {
@@ -99,7 +104,7 @@ async function measure() {
   message("");
   busy("Measuring your devices at once…");
   try {
-    const r = await invoke("mesh_probe", { model: $("mesh-model").value, throughput: goal === "throughput" });
+    const r = await invoke("mesh_probe", { model: $("mesh-model").value, throughput: goal === "throughput", include });
     renderDevices(r.devices);
     renderPlan(r.pipelines, r.unused);
     if (!r.pipelines.length && r.devices.some((d) => d.engine)) message(`${$("mesh-model").value} does not fit in the free memory of your devices together, this computer included. Pick a smaller model or free memory on them.`, "warn");
@@ -119,7 +124,7 @@ async function start() {
   message("");
   busy("Starting…");
   try {
-    renderRunning(await invoke("mesh_start", { model: $("mesh-model").value, throughput: goal === "throughput", port: PORT }));
+    renderRunning(await invoke("mesh_start", { model: $("mesh-model").value, throughput: goal === "throughput", include, port: PORT }));
   } catch (e) {
     message(String(e));
   } finally {
@@ -132,6 +137,13 @@ listen("mesh-phase", (e) => {
 });
 
 $("mesh-measure").addEventListener("click", measure);
+$("mesh-devices").addEventListener("change", (e) => {
+  const name = e.target.dataset.include;
+  if (name === undefined) return;
+  include = e.target.checked ? [...new Set([...include, name])] : include.filter((n) => n !== name);
+  try { localStorage.setItem("mesh-include", JSON.stringify(include)); } catch {}
+  if (!running) measure();
+});
 $("mesh-cancel").addEventListener("click", () => invoke("mesh_stop").catch((e) => message(String(e))));
 $("mesh-run").addEventListener("click", start);
 $("mesh-stop").addEventListener("click", async () => {
