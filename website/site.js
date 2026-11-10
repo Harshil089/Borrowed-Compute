@@ -21,11 +21,17 @@
   $(`.dl-card[data-os="${os}"]`)?.classList.add("mine");
 
   // ---- Theme: follows the system until you choose, then remembers ----
-  $$(".theme-btn").forEach((btn) => btn.addEventListener("click", () => {
+  // A click crossfades the page into the other theme; the keyboard switches instantly.
+  function toggleTheme(instant) {
     const next = root.dataset.theme === "dark" ? "light" : "dark";
-    root.dataset.theme = next;
-    try { localStorage.setItem("bc-theme", next); } catch (_) {}
-  }));
+    const apply = () => {
+      root.dataset.theme = next;
+      try { localStorage.setItem("bc-theme", next); } catch (_) {}
+    };
+    if (instant || reduced || !document.startViewTransition) apply();
+    else document.startViewTransition(apply);
+  }
+  $$(".theme-btn").forEach((btn) => btn.addEventListener("click", (e) => toggleTheme(e.detail === 0)));
 
   // ---- Header: frosted once the page moves under it ----
   const bar = $("#bar");
@@ -89,6 +95,8 @@
       e.target.classList.add("in");
       $$("[data-on-view]", e.target).forEach(countUp);
       io.unobserve(e.target);
+      // Once settled, drop the slow arrival transition so hovers on it stay quick.
+      setTimeout(() => e.target.classList.remove("reveal", "d1", "d2", "d3", "d4"), 1600);
     }
   }, { rootMargin: "0px 0px -8% 0px", threshold: 0.12 });
   $$(".reveal").forEach((el) => (reduced ? el.classList.add("in") : io.observe(el)));
@@ -195,7 +203,7 @@
       .map(([label, id]) => ({ group: "Guide", label, href: `/how-it-works#${id}`, icon: "i-hash" })),
     { group: "Get the app", label: "Download for Mac", href: "/download/mac", icon: "i-apple", sub: "Apple Silicon" },
     { group: "Get the app", label: "Download for Windows", href: "/download/windows", icon: "i-windows", sub: "Windows 10 and 11" },
-    { group: "Get the app", label: "Switch between light and dark", icon: "i-sun", run: () => $(".theme-btn")?.click() },
+    { group: "Get the app", label: "Switch between light and dark", icon: "i-sun", run: (kb) => toggleTheme(kb) },
   ];
   let overlay = null, items = [], sel = 0, returnFocus = null;
   function renderPalette(q) {
@@ -212,10 +220,10 @@
     $("input", overlay).setAttribute("aria-activedescendant", items.length ? `pal-${sel}` : "");
     $('[aria-selected="true"]', list)?.scrollIntoView({ block: "nearest" });
   }
-  function choose(c) {
+  function choose(c, kb) {
     if (!c) return;
-    closePalette();
-    if (c.run) c.run(); else location.href = c.href;
+    closePalette(kb);
+    if (c.run) c.run(kb); else location.href = c.href;
   }
   function openPalette(fromKeyboard) {
     if (overlay) return;
@@ -235,17 +243,23 @@
         if (!items.length) return;
         sel = (sel + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
         renderPalette(input.value);
-      } else if (e.key === "Enter") { e.preventDefault(); choose(items[sel]); }
+      } else if (e.key === "Enter") { e.preventDefault(); choose(items[sel], true); }
       else if (e.key === "Escape") { e.preventDefault(); closePalette(); }
       else if (e.key === "Tab") e.preventDefault();
     });
-    overlay.addEventListener("pointerdown", (e) => { if (e.target === overlay) closePalette(); });
-    $("ul", overlay).addEventListener("click", (e) => { const li = e.target.closest("[data-i]"); if (li) choose(items[+li.dataset.i]); });
+    overlay.addEventListener("pointerdown", (e) => { if (e.target === overlay) closePalette(false); });
+    $("ul", overlay).addEventListener("click", (e) => { const li = e.target.closest("[data-i]"); if (li) choose(items[+li.dataset.i], false); });
   }
-  function closePalette() {
-    overlay?.remove();
+  // Closing is quieter than opening: a short fade by pointer, instant by keyboard.
+  function closePalette(kb = true) {
+    const el = overlay;
+    if (!el) return;
     overlay = null;
     returnFocus?.focus?.();
+    if (kb || reduced) { el.remove(); return; }
+    el.classList.add("closing");
+    el.addEventListener("animationend", () => el.remove(), { once: true });
+    setTimeout(() => el.remove(), 300);
   }
   $$("[data-palette]").forEach((b) => b.addEventListener("click", (e) => openPalette(e.detail === 0)));
   document.addEventListener("keydown", (e) => {
