@@ -36,10 +36,13 @@ const ROWS_PER_GROUP: u32 = 4;
 const MAX_HEAD: usize = 256;
 /// Input rows from which a product runs on the matrix units (`k_matmul_mm`): 3 to 4
 /// times faster for batches than `k_matmul`, but it sums in a different order, so a
-/// batch row is within rounding of a one-row pass, not bit for bit.
+/// batch row is within rounding of a one-row pass, not bit for bit. On a Mac one row runs
+/// `k_matvec`: on an M2, 70 GB/s of Q4K or Q6K weights where `k_matmul` read 21 and 37.
 const MM_FROM: usize = 2;
 /// Weight rows per `k_matmul_mm` thread group (`BM`).
 const MM_ROWS: u32 = 128;
+/// Weight rows per `k_matvec` thread group (4 SIMD groups of `VR`).
+const MV_ROWS: u32 = 16;
 /// Input rows per `k_matmul_mm` thread group (`BN`).
 const MM_BATCH: u32 = 16;
 
@@ -48,9 +51,13 @@ pub enum K {
     Matmul,
     /// The batched product on Apple's matrix units (Metal only).
     MatmulMm,
+    /// The one-row product, several weight rows a thread (Metal only).
+    Matvec,
     RmsNorm,
     Rope,
     Attention,
+    /// Attention on 128 threads a head (Metal only).
+    AttentionW,
     BiasAdd,
     SiluMul,
     Add,
@@ -65,9 +72,11 @@ impl K {
         match self {
             K::Matmul => "k_matmul",
             K::MatmulMm => "k_matmul_mm",
+            K::Matvec => "k_matvec",
             K::RmsNorm => "k_rms_norm",
             K::Rope => "k_rope",
             K::Attention => "k_attention",
+            K::AttentionW => "k_attention_w",
             K::BiasAdd => "k_bias_add",
             K::SiluMul => "k_silu_mul",
             K::Add => "k_add",
@@ -157,6 +166,9 @@ impl Gpu {
         if cfg!(target_os = "macos") && n >= MM_FROM {
             return Cmd { k: K::MatmulMm, grid: (rows.div_ceil(MM_ROWS), (n as u32).div_ceil(MM_BATCH)), threads: 128, args };
         }
+        if cfg!(target_os = "macos") {
+            return Cmd { k: K::Matvec, grid: (rows.div_ceil(MV_ROWS), 1), threads: 128, args };
+        }
         Cmd {
             k: K::Matmul,
             grid: (rows.div_ceil(ROWS_PER_GROUP), (n as u32).div_ceil(NB)),
@@ -169,20 +181,23 @@ impl Gpu {
     fn self_check(&self) -> Result<()> {
         use crate::quant::GgmlType::*;
         for ty in [F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4K, Q5K, Q6K] {
-            let (rows, cols, n) = (37, 512, 3);
+            let (rows, cols) = (37, 512);
             let t = Arc::new(crate::fixtures::random_tensor(ty, rows, cols, 7));
-            let x: Vec<f32> = (0..n * cols).map(|i| ((i * 31 % 97) as f32 - 48.0) / 50.0).collect();
-            let w = self.weights(&t)?;
-            let (bx, out) = (self.backend.upload(&x)?, self.backend.zeros(n * rows)?);
-            self.run(&[self.matmul(&w, &bx, &out, n)])?;
-            let got = self.backend.read(&out, n * rows)?;
-            let wf = t.to_f32();
-            for i in 0..n {
-                for r in 0..rows {
-                    let want: f64 = (0..cols).map(|c| wf[r * cols + c] as f64 * x[i * cols + c] as f64).sum();
-                    let g = got[i * rows + r] as f64;
-                    if (g - want).abs() > 1e-3 * (1.0 + want.abs()) {
-                        bail!("{ty:?} row {r}: GPU {g}, CPU {want}");
+            // One row and a batch run different kernels.
+            for n in [1, 3] {
+                let x: Vec<f32> = (0..n * cols).map(|i| ((i * 31 % 97) as f32 - 48.0) / 50.0).collect();
+                let w = self.weights(&t)?;
+                let (bx, out) = (self.backend.upload(&x)?, self.backend.zeros(n * rows)?);
+                self.run(&[self.matmul(&w, &bx, &out, n)])?;
+                let got = self.backend.read(&out, n * rows)?;
+                let wf = t.to_f32();
+                for i in 0..n {
+                    for r in 0..rows {
+                        let want: f64 = (0..cols).map(|c| wf[r * cols + c] as f64 * x[i * cols + c] as f64).sum();
+                        let g = got[i * rows + r] as f64;
+                        if (g - want).abs() > 1e-3 * (1.0 + want.abs()) {
+                            bail!("{ty:?} row {r}: GPU {g}, CPU {want}");
+                        }
                     }
                 }
             }
@@ -204,22 +219,27 @@ impl Gpu {
 
     /// Bytes a second the GPU reads weights at in a decoding product (for the planner).
     pub fn bandwidth(&self) -> Result<f64> {
-        self.product_rate(1)
+        self.product_rate(crate::quant::GgmlType::Q4K, 1)
     }
 
     #[doc(hidden)]
-    /// Bytes of weights a second in a product with `n` input rows.
-    pub fn product_rate(&self, n: usize) -> Result<f64> {
+    /// Bytes of weights of format `ty` a second in a product with `n` input rows.
+    pub fn product_rate(&self, ty: crate::quant::GgmlType, n: usize) -> Result<f64> {
         let (rows, cols) = (8192, 8192);
-        let t = Arc::new(crate::fixtures::random_tensor(crate::quant::GgmlType::Q4_0, rows, cols, 1));
+        let t = Arc::new(crate::fixtures::random_tensor(ty, rows, cols, 1));
         let w = self.weights(&t)?;
         let (bx, out) = (self.backend.upload(&vec![0.5; cols * n])?, self.backend.zeros(rows * n)?);
         self.run(&[self.matmul(&w, &bx, &out, n)])?;
         let reps = 8;
-        let start = std::time::Instant::now();
         let cmds: Vec<Cmd> = (0..reps).map(|_| self.matmul(&w, &bx, &out, n)).collect();
-        self.run(&cmds)?;
-        Ok(t.data.len() as f64 * reps as f64 / start.elapsed().as_secs_f64())
+        // The best of three: another program's burst must not make a device look slow.
+        let mut best = f64::MAX;
+        for _ in 0..3 {
+            let start = std::time::Instant::now();
+            self.run(&cmds)?;
+            best = best.min(start.elapsed().as_secs_f64());
+        }
+        Ok(t.data.len() as f64 * reps as f64 / best)
     }
 }
 
@@ -453,10 +473,11 @@ impl Layers {
             for (src, dst) in [(bk, kc), (bv, vc)] {
                 cmds.push(Cmd { k: K::Copy, grid: ew(rows * kvd), threads: 256, args: vec![Arg::B(src), Arg::B(dst), u(pos * kvd), u(rows * kvd)] });
             }
+            let wide = cfg!(target_os = "macos") && hd.is_multiple_of(4);
             cmds.push(Cmd {
-                k: K::Attention,
+                k: if wide { K::AttentionW } else { K::Attention },
                 grid: (nh as u32, rows as u32),
-                threads: 32,
+                threads: if wide { 128 } else { 32 },
                 args: vec![Arg::B(bq), Arg::B(kc), Arg::B(vc), Arg::B(ba), Arg::B(&bmask), u(tree), u(nh), u(nkv), u(hd), u(seen), Arg::F(1.0 / (hd as f32).sqrt())],
             });
             cmds.push(self.gpu.matmul(&l.wo, ba, bo, rows));

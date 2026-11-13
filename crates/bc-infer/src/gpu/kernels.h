@@ -169,9 +169,10 @@ DEVFN void group4(GLOBAL const uchar* row, uint ty, uint g, PRIV float4* w) {
         float ds = f16at(b, 0) * sc, dm = f16at(b, 2) * mn;
         GLOBAL const uint* q = (GLOBAL const uint*)(b + (ty == T_Q4K ? 16u : 48u) + 32u * c);
         GLOBAL const uint* qh = (GLOBAL const uint*)(b + 16);
+        // The fifth bits' mask is zero for Q4K: a branch here, per load, halves the speed.
+        uint fifth = ty == T_Q5K ? 0x01010101u : 0u;
         for (uint k = 0; k < 8u; k++) {
-            uint v = (q[k] >> (4u * hi)) & 0x0f0f0f0fu;
-            if (ty == T_Q5K) v |= ((qh[k] >> (hi + 2u * c)) & 0x01010101u) << 4;
+            uint v = ((q[k] >> (4u * hi)) & 0x0f0f0f0fu) | (((qh[k] >> (hi + 2u * c)) & fifth) << 4);
             float4 f = bytes4(v, 0.0f);
             w[k] = F4(ds * f.x - dm, ds * f.y - dm, ds * f.z - dm, ds * f.w - dm);
         }

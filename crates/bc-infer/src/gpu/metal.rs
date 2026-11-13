@@ -46,6 +46,99 @@ const ENTRIES: &str = r#"
 kernel void k_matmul(device const uchar* w [[buffer(0)]], device const float* x [[buffer(1)]], device float* out [[buffer(2)]],
     constant uint& ty [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& n [[buffer(6)]],
     constant uint& rb [[buffer(7)]], G) { matmul(w, x, out, ty, rows, cols, n, rb, g.x * ROWS_PER_GROUP + sg, g.y * NB, lane); }
+// One input row (decoding a token), the product every token waits on. A SIMD group takes
+// VR weight rows at once, so each thread loads its 32 inputs once for all of them, and a
+// thread group is 4 SIMD groups. Lane l takes groups l, l + 32, ... as in matmul.
+// K-quant weights are q·ds − dm with one ds, dm per 32: the − dm part is dm · Σx, summed
+// once per group for every row, which leaves one multiply-add per weight.
+#define VR 4u
+#define XK(k) float4 xv##k = x4(xp, k);
+#define QK5(k) s += dot(bytes4(((q[k] >> sh) & 0x0f0f0f0fu) | (((qh[k] >> (hi + 2u * c)) & 0x01010101u) << 4), 0.0f), xv##k);
+#define YK(k) float4 yv##k = x4(xp + 32, k);
+#define PK(k) { uint v = q[k]; s += dot(bytes4(v & 0x0f0f0f0fu, 0.0f), xv##k); u += dot(bytes4((v >> 4) & 0x0f0f0f0fu, 0.0f), yv##k); }
+#define Y6(k) float4 yv##k = x4(xp + 64, k);
+#define P6(k, s, u) { uint lo = ql[2 * k] | ((uint)ql[2 * k + 1] << 16), h = qh[2 * k] | ((uint)qh[2 * k + 1] << 16); \
+    s += dot(bytes4((lo & 0x0f0f0f0fu) | (((h >> (2u * e)) & 0x03030303u) << 4), 32.0f), xv##k); \
+    u += dot(bytes4(((lo >> 4) & 0x0f0f0f0fu) | (((h >> (2u * e + 4u)) & 0x03030303u) << 4), 32.0f), yv##k); }
+#define WK(k) s += dot(wv[k], xv##k);
+kernel void k_matvec(device const uchar* w [[buffer(0)]], device const float* x [[buffer(1)]], device float* out [[buffer(2)]],
+    constant uint& ty [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& n [[buffer(6)]],
+    constant uint& rb [[buffer(7)]], G) {
+    uint r0 = (g.x * 4u + sg) * VR;
+    float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
+    bool q5 = ty == T_Q5K;
+    // Q4K, what most published models are in: its 32 bytes hold one group in their low
+    // halves and the next in their high halves, so a lane takes both groups from one load.
+    for (uint pr = lane; ty == T_Q4K && pr < cols / 64u; pr += 32u) {
+        device const float* xp = x + pr * 64u;
+        XK(0) XK(1) XK(2) XK(3) XK(4) XK(5) XK(6) XK(7)
+        YK(0) YK(1) YK(2) YK(3) YK(4) YK(5) YK(6) YK(7)
+        float4 xs = ((xv0 + xv1) + (xv2 + xv3)) + ((xv4 + xv5) + (xv6 + xv7));
+        float4 ys = ((yv0 + yv1) + (yv2 + yv3)) + ((yv4 + yv5) + (yv6 + yv7));
+        float sumx = (xs.x + xs.y) + (xs.z + xs.w), sumy = (ys.x + ys.y) + (ys.z + ys.w);
+        uint c = pr % 4u, j0 = (2u * c) & 3u;
+#define PROW(j, a) if (r0 + j < rows) { \
+            device const uchar* b = w + (ulong)(r0 + j) * rb + (pr / 4u) * 144u; \
+            /* Scales and mins of groups 2c and 2c + 1 (ggml's get_scale_min_k4). */ \
+            uint qa = b[4u + j0], qb = b[8u + j0], qc = b[12u + j0], ra = b[5u + j0], rb2 = b[9u + j0], rc = b[13u + j0]; \
+            float sc0 = (float)(c < 2u ? qa & 63u : (qc & 15u) | ((qa >> 6) << 4)), mn0 = (float)(c < 2u ? qb & 63u : (qc >> 4) | ((qb >> 6) << 4)); \
+            float sc1 = (float)(c < 2u ? ra & 63u : (rc & 15u) | ((ra >> 6) << 4)), mn1 = (float)(c < 2u ? rb2 & 63u : (rc >> 4) | ((rb2 >> 6) << 4)); \
+            device const uint* q = (device const uint*)(b + 16u + 32u * c); \
+            float s = 0.0f, u = 0.0f; \
+            PK(0) PK(1) PK(2) PK(3) PK(4) PK(5) PK(6) PK(7) \
+            a += f16at(b, 0) * (sc0 * s + sc1 * u) - f16at(b, 2) * (mn0 * sumx + mn1 * sumy); }
+        PROW(0u, a0) PROW(1u, a1) PROW(2u, a2) PROW(3u, a3)
+#undef PROW
+    }
+    // Q6K the same way: a block's low-bit bytes hold groups e and e + 2 of a half in their
+    // halves, and its high-bit bytes two bits of each. A scale covers 16 weights.
+    for (uint pr = lane; ty == T_Q6K && pr < cols / 64u; pr += 32u) {
+        uint hh = (pr % 4u) / 2u, e = pr % 2u;
+        device const float* xp = x + ((pr / 4u) * 8u + 4u * hh + e) * 32u;
+        XK(0) XK(1) XK(2) XK(3) XK(4) XK(5) XK(6) XK(7)
+        Y6(0) Y6(1) Y6(2) Y6(3) Y6(4) Y6(5) Y6(6) Y6(7)
+#define PROW(j, a) if (r0 + j < rows) { \
+            device const uchar* b = w + (ulong)(r0 + j) * rb + (pr / 4u) * 210u; \
+            device const ushort* ql = (device const ushort*)(b + 64u * hh + 32u * e); \
+            device const ushort* qh = (device const ushort*)(b + 128u + 32u * hh); \
+            device const uchar* sc = b + 192u + 8u * hh + 2u * e; \
+            float s0 = 0.0f, s1 = 0.0f, u0 = 0.0f, u1 = 0.0f; \
+            P6(0, s0, u0) P6(1, s0, u0) P6(2, s0, u0) P6(3, s0, u0) P6(4, s1, u1) P6(5, s1, u1) P6(6, s1, u1) P6(7, s1, u1) \
+            a += f16at(b, 208) * (((float)i8of(sc[0]) * s0 + (float)i8of(sc[1]) * s1) + ((float)i8of(sc[4]) * u0 + (float)i8of(sc[5]) * u1)); }
+        PROW(0u, a0) PROW(1u, a1) PROW(2u, a2) PROW(3u, a3)
+#undef PROW
+    }
+    for (uint gr = lane; ty != T_Q4K && ty != T_Q6K && gr < cols / 32u; gr += 32u) {
+        device const float* xp = x + gr * 32u;
+        XK(0) XK(1) XK(2) XK(3) XK(4) XK(5) XK(6) XK(7)
+        float4 xs = ((xv0 + xv1) + (xv2 + xv3)) + ((xv4 + xv5) + (xv6 + xv7));
+        float sumx = (xs.x + xs.y) + (xs.z + xs.w);
+        uint sub = gr % 8u, c = sub / 2u, hi = sub % 2u, sh = 4u * hi;
+#define VROW(j, a) if (r0 + j < rows) { \
+            device const uchar* row = w + (ulong)(r0 + j) * rb; \
+            float s = 0.0f; \
+            if (q5) { \
+                device const uchar* b = row + (gr / 8u) * 176u; \
+                uint qa = b[4u + (sub & 3u)], qb = b[8u + (sub & 3u)], qc = b[12u + (sub & 3u)]; \
+                float sc = (float)(sub < 4u ? qa & 63u : (qc & 15u) | ((qa >> 6) << 4)); \
+                float mn = (float)(sub < 4u ? qb & 63u : (qc >> 4) | ((qb >> 6) << 4)); \
+                device const uint* q = (device const uint*)(b + 48u + 32u * c); \
+                device const uint* qh = (device const uint*)(b + 16); \
+                QK5(0) QK5(1) QK5(2) QK5(3) QK5(4) QK5(5) QK5(6) QK5(7) \
+                a += f16at(b, 0) * sc * s - f16at(b, 2) * mn * sumx; \
+            } else { \
+                float4 wv[8]; \
+                group4(row, ty, gr, wv); \
+                WK(0) WK(1) WK(2) WK(3) WK(4) WK(5) WK(6) WK(7) \
+                a += s; \
+            } }
+        VROW(0u, a0) VROW(1u, a1) VROW(2u, a2) VROW(3u, a3)
+#undef VROW
+    }
+#define VOUT(j, a) { float s = simd_sum(a); if (lane == 0u && r0 + j < rows) out[r0 + j] = s; }
+    VOUT(0u, a0) VOUT(1u, a1) VOUT(2u, a2) VOUT(3u, a3)
+#undef VOUT
+}
 // Batched product on the matrix units, for batches of a few rows to 64 (a tree of
 // guesses). A thread group of 4 SIMD groups computes BM weight rows x BN input rows, 32
 // columns (one weight group) at a time: the 128 threads decode the weights and load the
@@ -113,6 +206,66 @@ kernel void k_attention(device const float* q [[buffer(0)]], device const float*
     threadgroup float sh[TILE];
     attention(q, kc, vc, out, sh, masks, tree, nh, nkv, hd, pos, scale, g.x, g.y, lane);
 }
+// The same attention on 128 threads a head: a GPU thread is slow in a row, and at a few
+// hundred tokens of context 32 threads a head took a sixth of a token's time. Threads
+// share the positions when scoring (four values a load) and take one dimension each when
+// summing values; the four SIMD groups' maxima and sums meet in threadgroup memory. The
+// head dimension must be a multiple of 4.
+kernel void k_attention_w(device const float* q [[buffer(0)]], device const float* kc [[buffer(1)]], device const float* vc [[buffer(2)]],
+    device float* out [[buffer(3)]], device const uint* masks [[buffer(4)]], constant uint& tree [[buffer(5)]], constant uint& nh [[buffer(6)]],
+    constant uint& nkv [[buffer(7)]], constant uint& hd [[buffer(8)]], constant uint& pos [[buffer(9)]], constant float& scale [[buffer(10)]],
+    uint3 g [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup float sh[TILE];
+    threadgroup float red[8];
+    uint h = g.x, r = g.y, kvd = nkv * hd, kvh = h / (nh / nkv);
+    uint lo = tree != 0u ? masks[2u * r] : 0u, hi = tree != 0u ? masks[2u * r + 1u] : 0u;
+    uint upto = tree != 0u ? pos + popcount(lo) + popcount(hi) : pos + r + 1u;
+#define SLOT(k) ((tree == 0u || (k) < pos) ? (k) : pos + nth_bit(lo, hi, (k) - pos))
+    device const packed_float4* qh = (device const packed_float4*)(q + ((ulong)r * nh + h) * hd);
+    float acc0 = 0.0f, acc1 = 0.0f, m = -INFINITY, l = 0.0f;
+    for (uint start = 0; start < upto; start += TILE) {
+        uint end = min(start + TILE, upto);
+        float tmax = -INFINITY;
+        for (uint p = start + t; p < end; p += 128u) {
+            device const packed_float4* kt = (device const packed_float4*)(kc + (ulong)SLOT(p) * kvd + kvh * hd);
+            float4 s4 = float4(0.0f);
+            for (uint d = 0; d < hd / 4u; d++) s4 += float4(qh[d]) * float4(kt[d]);
+            float s = ((s4.x + s4.y) + (s4.z + s4.w)) * scale;
+            sh[p - start] = s;
+            tmax = max(tmax, s);
+        }
+        tmax = simd_max(tmax);
+        if (lane == 0u) red[sg] = tmax;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float mn = max(m, max(max(red[0], red[1]), max(red[2], red[3])));
+        float corr = mn == -INFINITY ? 1.0f : precise::exp(m - mn);
+        float part = 0.0f;
+        for (uint p = start + t; p < end; p += 128u) {
+            float e = precise::exp(sh[p - start] - mn);
+            sh[p - start] = e;
+            part += e;
+        }
+        part = simd_sum(part);
+        if (lane == 0u) red[4u + sg] = part;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        l = l * corr + ((red[4] + red[5]) + (red[6] + red[7]));
+        acc0 *= corr;
+        acc1 *= corr;
+        if (t < hd) {
+            for (uint p = start; p < end; p++) {
+                device const float* vt = vc + (ulong)SLOT(p) * kvd + kvh * hd;
+                acc0 += sh[p - start] * vt[t];
+                if (t + 128u < hd) acc1 += sh[p - start] * vt[t + 128u];
+            }
+        }
+        m = mn;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+#undef SLOT
+    device float* o = out + ((ulong)r * nh + h) * hd;
+    if (t < hd) o[t] = acc0 / l;
+    if (t + 128u < hd) o[t + 128u] = acc1 / l;
+}
 kernel void k_bias_add(device float* x [[buffer(0)]], device const float* b [[buffer(1)]], constant uint& n [[buffer(2)]],
     constant uint& dim [[buffer(3)]], I) { bias_add(x, b, n, dim, gi.x); }
 kernel void k_silu_mul(device float* g [[buffer(0)]], device const float* u [[buffer(1)]], constant uint& n [[buffer(2)]], I) { silu_mul(g, u, n, gi.x); }
@@ -132,7 +285,7 @@ impl Backend {
         let src = format!("{PRELUDE}{}{ENTRIES}", include_str!("kernels.h"));
         let lib = device.new_library_with_source(&src, &opts).map_err(|e| anyhow!("compiling the Metal kernels: {e}"))?;
         let mut kernels = HashMap::new();
-        for k in K::ALL.into_iter().chain([K::MatmulMm]) {
+        for k in K::ALL.into_iter().chain([K::MatmulMm, K::Matvec, K::AttentionW]) {
             let f = lib.get_function(k.name(), None).map_err(|e| anyhow!("{}: {e}", k.name()))?;
             let p = device.new_compute_pipeline_state_with_function(&f).map_err(|e| anyhow!("{}: {e}", k.name()))?;
             kernels.insert(k, p);
