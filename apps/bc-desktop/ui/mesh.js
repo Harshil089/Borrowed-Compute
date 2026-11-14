@@ -107,7 +107,9 @@ async function measure() {
     const r = await invoke("mesh_probe", { model: $("mesh-model").value, throughput: goal === "throughput", include });
     renderDevices(r.devices);
     renderPlan(r.pipelines, r.unused);
-    if (!r.pipelines.length && r.devices.some((d) => d.engine)) message(`${$("mesh-model").value} does not fit in the free memory of your devices together, this computer included. Pick a smaller model or free memory on them.`, "warn");
+    const silent = r.devices.filter((d) => d.error).map((d) => d.name);
+    const away = silent.length ? ` ${silent.join(", ")} did not answer and cannot be counted.` : "";
+    if (!r.pipelines.length && r.devices.some((d) => d.engine)) message(`${$("mesh-model").value} does not fit in the free memory of the devices that answered, this computer included.${away} Pick a smaller model or free memory on them.`, "warn");
   } catch (e) {
     message(String(e));
   } finally {
