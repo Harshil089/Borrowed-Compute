@@ -136,6 +136,11 @@ impl Tokenizer {
         self.tokens.iter().zip(&other.tokens).all(|(a, b)| a == b)
     }
 
+    /// The tokens that end an answer.
+    pub fn stops(&self) -> &[u32] {
+        &self.stops
+    }
+
     pub fn is_stop(&self, id: u32) -> bool {
         self.stops.contains(&id)
     }

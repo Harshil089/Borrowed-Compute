@@ -310,6 +310,19 @@ async fn this_computer_holds_the_first_layers_itself() {
     let llm = Llm::new(&header, vec![alone], None).unwrap();
     assert_eq!(llm.generate(&prompt, 16, Sampling::default(), |_| {}).await.unwrap().0, want);
 
+    // The whole model on the other device: it writes several tokens a trip when asked,
+    // the same ones a token a trip gives.
+    let far = Client::open(&m.coordinator, &url, plan(&[(1, 0..6)]), &addrs, &|_, _, _| {}).await.unwrap();
+    let meta = |run| bc_mesh::msg::Meta { stream: 9, run, ..Default::default() };
+    let five = far.call(meta(5), bc_mesh::msg::Activation::Tokens(prompt.clone())).await.unwrap();
+    assert_eq!(five, want[..5], "five tokens in one trip");
+    let next = far.call(bc_mesh::msg::Meta { pos: 10, ..meta(1) }, bc_mesh::msg::Activation::Tokens(vec![five[4]])).await.unwrap();
+    assert_eq!(next, want[5..6], "its cache holds all but the last it wrote");
+    let stopped = far.call(bc_mesh::msg::Meta { stream: 10, stops: vec![want[1]], ..meta(5) }, bc_mesh::msg::Activation::Tokens(prompt.clone())).await.unwrap();
+    assert_eq!(stopped, want[..2], "a stop token ends the trip");
+    let llm = Llm::new(&header, vec![far], None).unwrap();
+    assert_eq!(llm.generate(&prompt, 16, Sampling::default(), |_| {}).await.unwrap().0, want);
+
     // Only the first stage may be this computer's.
     let err = Client::open(&m.coordinator, &url, plan(&[(1, 0..3), (0, 3..6)]), &addrs, &|_, _, _| {}).await.err().expect("refused");
     assert!(format!("{err:#}").contains("must come first"), "{err:#}");

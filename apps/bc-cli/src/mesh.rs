@@ -268,8 +268,11 @@ impl Session {
         if plan.pipelines.is_empty() {
             let need = spec.layer_bytes * spec.layers as u64 + spec.extra_bytes;
             let free: u64 = owned.iter().filter_map(|d| d.report.as_ref().ok()).map(|r| (r.device.mem_available as f64 * MEMORY_SHARE) as u64).sum();
+            // A device that did not answer is the likelier cause than memory: say so.
+            let silent: Vec<&str> = devices.iter().filter(|d| d.report.is_err()).map(|d| d.name.as_str()).collect();
+            let away = if silent.is_empty() { String::new() } else { format!(" {} did not answer and cannot be counted.", silent.join(", ")) };
             bail!(
-                "{name} needs {} of memory and your devices, this computer included, have {} free together. Close apps on them, add a device, or pick a smaller model.",
+                "{name} needs {} of memory and the devices that answered, this computer included, have {} free together.{away} Close apps on them, add a device, or pick a smaller model.",
                 gb(need),
                 gb(free)
             );

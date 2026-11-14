@@ -106,6 +106,13 @@ pub struct Speed {
     requests: u64,
 }
 
+/// Tokens a device holding the whole model writes per trip: enough that the link's
+/// `net_ms` adds at most a seventh to each token's `token_ms`, and at most 16, so text
+/// still arrives a few times a second. A fast link (a local network) keeps one.
+fn burst(net_ms: f64, token_ms: f64) -> usize {
+    ((net_ms / (token_ms.max(1.0) / 7.0)).ceil() as usize).clamp(1, 16)
+}
+
 const EXPLORE: u64 = 8;
 /// Untried ways go in this order, so a new pipeline's first answer is never the costly
 /// experiment.
@@ -179,9 +186,14 @@ impl Client {
                     Ok(Some((_, meta, act))) => {
                         // Single tokens only: what decoding speed is made of.
                         if meta.rows == 1 && !meta.skipped {
+                            // A trip that wrote several tokens took that many passes.
+                            let wrote = match &act {
+                                Activation::Tokens(t) if meta.run > 1 => t.len().max(1) as f32,
+                                _ => 1.0,
+                            };
                             let mut avg = ms.lock().unwrap();
-                            for (a, m) in avg.iter_mut().zip(&meta.stage_ms) {
-                                *a = if *a == 0.0 { *m } else { 0.8 * *a + 0.2 * m };
+                            for (a, m) in avg.iter_mut().zip(meta.stage_ms.iter().map(|m| m / wrote)) {
+                                *a = if *a == 0.0 { m } else { 0.8 * *a + 0.2 * m };
                             }
                         }
                         if let Some(reply) = p.lock().unwrap().pop_front() {
@@ -563,12 +575,29 @@ impl Llm {
         let mode = if greedy { client.speed.lock().unwrap().choose(self.draft.is_some()) } else { Mode::Plain };
         if mode == Mode::Plain {
             // Sampling, or guessing measured slower here: a token a pass.
-            while out.len() < max_tokens {
+            // One remote device with the whole model writes several tokens a trip, as many
+            // as keep the link's share of a token small; the first trip measures both.
+            let whole = client.local.is_none() && client.plan.stages.len() == 1;
+            let mut run = 1;
+            'text: while out.len() < max_tokens {
                 stats.passes += 1;
-                let ids = client.call(meta(target_len, false), Activation::Tokens(seq[target_len..].to_vec())).await?;
-                target_len = seq.len();
-                if !push(ids[0], &mut out, &mut seq) {
-                    break;
+                let m = Meta { run: run as u32, stops: if run > 1 { self.tokenizer.stops().to_vec() } else { Vec::new() }, ..meta(target_len, false) };
+                let sent = Instant::now();
+                let (back, act) = client.submit(m, Activation::Tokens(seq[target_len..].to_vec())).await?.await.context("the pipeline went away")??;
+                let Activation::Tokens(ids) = act else { bail!("the last stage sent hidden states") };
+                if ids.is_empty() {
+                    bail!("no token came back");
+                }
+                // The stage has fed itself every token but the last.
+                target_len = seq.len() + ids.len() - 1;
+                if whole {
+                    let compute: f64 = back.stage_ms.iter().map(|&ms| ms as f64).sum();
+                    run = burst(sent.elapsed().as_secs_f64() * 1000.0 - compute, compute / ids.len() as f64).min(max_tokens - out.len());
+                }
+                for id in ids {
+                    if !push(id, &mut out, &mut seq) {
+                        break 'text;
+                    }
                 }
             }
             stats.generated = out.len();
@@ -691,6 +720,15 @@ impl Llm {
 #[cfg(test)]
 mod tests {
     use super::Speed;
+
+    #[test]
+    fn a_slow_link_gets_several_tokens_a_trip() {
+        // A relay at 120 ms and a 45 ms token: 16 a trip. A local network: one.
+        assert_eq!(super::burst(120.0, 45.0), 16);
+        assert_eq!(super::burst(30.0, 45.0), 5);
+        assert_eq!(super::burst(2.0, 45.0), 1);
+        assert_eq!(super::burst(-3.0, 0.0), 1);
+    }
 
     #[test]
     fn decoding_takes_the_fastest_way_and_rechecks_the_others() {

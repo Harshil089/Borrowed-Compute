@@ -344,10 +344,21 @@ impl Stage for LlmStage {
         let from = if meta.all_rows { 0 } else { rows - 1 };
         let scores = part.logits(&x[from * n_embd..], rows - from)?;
         let vocab = part.cfg.vocab;
-        let ids = (from..rows)
+        let mut ids: Vec<u32> = (from..rows)
             .zip(scores.chunks_exact(vocab))
             .map(|(r, s)| sample::sample(s, &meta.sampling, (pos + r) as u64))
             .collect();
+        // The whole model is here: write on without the coordinator, each token sampled
+        // exactly as if it had come back and been sent again.
+        if part.is_first() && !meta.all_rows && meta.tree.is_none() {
+            let mut at = pos + rows;
+            while ids.len() < meta.run as usize && !meta.stops.contains(&ids[ids.len() - 1]) && at < part.cfg.context {
+                let mut x = part.embed(&ids[ids.len() - 1..])?;
+                part.forward(&mut x, 1, at, kv)?;
+                ids.push(sample::sample(&part.logits(&x, 1)?, &meta.sampling, at as u64));
+                at += 1;
+            }
+        }
         Ok(Activation::Tokens(ids))
     }
 }
