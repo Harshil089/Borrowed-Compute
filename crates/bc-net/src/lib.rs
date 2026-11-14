@@ -50,31 +50,51 @@ pub struct NetConfig {
 /// Binds an endpoint with this device's key, ready to dial and accept job connections,
 /// connections to the Mac's cloud, invite requests and mesh connections.
 ///
-/// When this process already runs an agent with the same key ([`share_endpoint`]), that
-/// endpoint comes back instead: two endpoints with one key push each other off the relay.
-/// It ignores `config`, so `relay_only` does not apply to it.
+/// A process has one endpoint per key: two with one key push each other off the relay,
+/// and then nothing that needs the relay reaches this device or leaves it. So a second
+/// call with a key returns the first call's endpoint (also one still being bound, and the
+/// agent's, see [`share_endpoint`]) and ignores `config`, so `relay_only` does not apply.
 pub async fn bind(secret: SecretKey, config: NetConfig) -> Result<Endpoint> {
-    if let Some(shared) = SHARED.lock().unwrap().as_ref().filter(|e| e.id() == secret.public()) {
-        return Ok(shared.clone());
+    // Held while binding: whoever asks for the same key meanwhile waits for this endpoint.
+    let mut held = HELD.lock().await;
+    held.retain(|(e, _)| !e.is_closed());
+    if let Some((endpoint, users)) = held.iter_mut().find(|(e, _)| e.id() == secret.public()) {
+        *users += 1;
+        return Ok(endpoint.clone());
     }
-    bind_with(secret, config, vec![JOB_ALPN.to_vec(), CLOUD_ALPN.to_vec(), GUEST_ALPN.to_vec(), MESH_ALPN.to_vec()]).await
+    let endpoint = bind_with(secret, config, vec![JOB_ALPN.to_vec(), CLOUD_ALPN.to_vec(), GUEST_ALPN.to_vec(), MESH_ALPN.to_vec()]).await?;
+    held.push((endpoint.clone(), 1));
+    Ok(endpoint)
 }
 
-/// The endpoint the agent in this process listens on, which a device that both lends and
-/// uses shares between the two.
+/// Every open endpoint [`bind`] made, with how many callers hold it.
+static HELD: tokio::sync::Mutex<Vec<(Endpoint, usize)>> = tokio::sync::Mutex::const_new(Vec::new());
+
+/// The endpoint the agent in this process listens on, which is never closed by
+/// [`release`]: the agent owns it.
 static SHARED: std::sync::Mutex<Option<Endpoint>> = std::sync::Mutex::new(None);
 
-/// Makes later [`bind`] calls with this endpoint's key return it.
+/// Marks the agent's endpoint, so [`release`] leaves it open.
 pub fn share_endpoint(endpoint: &Endpoint) {
     *SHARED.lock().unwrap() = Some(endpoint.clone());
 }
 
-/// Closes an endpoint from [`bind`], except the shared one, which its agent owns.
+/// Gives back an endpoint from [`bind`]. It closes once its last holder has released it,
+/// except the agent's, which stays open.
 pub async fn release(endpoint: Endpoint) {
-    let shared = SHARED.lock().unwrap().as_ref().is_some_and(|s| s.id() == endpoint.id());
-    if !shared {
-        endpoint.close().await;
+    if SHARED.lock().unwrap().as_ref().is_some_and(|s| s.id() == endpoint.id()) {
+        return;
     }
+    // Held while closing, so a new endpoint for this key never overlaps the old one.
+    let mut held = HELD.lock().await;
+    if let Some(i) = held.iter().position(|(e, _)| e.id() == endpoint.id()) {
+        held[i].1 -= 1;
+        if held[i].1 > 0 {
+            return;
+        }
+        held.remove(i);
+    }
+    endpoint.close().await;
 }
 
 /// Binds an endpoint that accepts only the given protocols.
