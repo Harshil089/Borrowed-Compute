@@ -129,6 +129,14 @@ pub struct Meta {
     /// child of that last token.
     #[serde(default)]
     pub grow: Option<u32>,
+    /// Asks a stage holding the whole model to write up to this many tokens in one trip,
+    /// feeding each to itself, stopping after one of `stops`: on a slow link a token then
+    /// costs a share of a round trip, not all of one. The answer is every token written.
+    /// A stage that cannot (older, or holding only part) answers one token as before.
+    #[serde(default)]
+    pub run: u32,
+    #[serde(default)]
+    pub stops: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
