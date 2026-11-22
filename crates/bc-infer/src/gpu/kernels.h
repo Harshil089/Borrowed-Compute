@@ -332,3 +332,85 @@ DEVFN void add(GLOBAL float* x, GLOBAL const float* y, uint n, uint i) { if (i <
 DEVFN void copy(GLOBAL const float* src, GLOBAL float* dst, uint offset, uint n, uint i) { if (i < n) dst[offset + i] = src[i]; }
 // Within one buffer, `to` never after `from`: keeps an accepted tree row in the cache.
 DEVFN void move(GLOBAL float* b, uint from, uint to, uint n, uint i) { if (i < n) b[to + i] = b[from + i]; }
+
+// Qwen3.5's gated DeltaNet and gated attention.
+
+// Causal convolution of one channel over a batch of rows, then SiLU: tap j < taps - 1
+// takes the input j + 1 rows back (from `win`, the last taps - 1 inputs before this batch,
+// oldest first, `cd` apart), the last tap the row itself. `win` then holds the batch's
+// last inputs. taps <= 9.
+DEVFN void conv_silu(GLOBAL const float* in, uint iw, GLOBAL const float* w, uint taps, GLOBAL float* win, GLOBAL float* out, uint cd, uint rows, uint ch) {
+    if (ch >= cd) return;
+    float h[8];
+    for (uint j = 0; j + 1u < taps; j++) h[j] = win[j * cd + ch];
+    for (uint t = 0; t < rows; t++) {
+        float cur = in[(ulong)t * iw + ch];
+        float s = 0.0f;
+        for (uint j = 0; j + 1u < taps; j++) s += h[j] * w[ch * taps + j];
+        s += cur * w[ch * taps + taps - 1u];
+        out[(ulong)t * cd + ch] = s / (1.0f + EXP(-s));
+        for (uint j = 0; j + 2u < taps; j++) h[j] = h[j + 1u];
+        h[taps - 2u] = cur;
+    }
+    for (uint j = 0; j + 1u < taps; j++) win[j * cd + ch] = h[j];
+}
+
+// Scales head r % heads of row r / heads (rows `stride` apart, heads `hd` long) to unit
+// length: x / max(|x|, eps).
+DEVFN void l2_heads(GLOBAL float* x, uint stride, uint heads, uint hd, float eps, uint r, uint lane) {
+    GLOBAL float* p = x + (ulong)(r / heads) * stride + (r % heads) * hd;
+    float s = 0.0f;
+    for (uint c = lane; c < hd; c += 32u) s += p[c] * p[c];
+    s = WSUM(s);
+    float n = SQRT(s);
+    float inv = 1.0f / (n > eps ? n : eps);
+    for (uint c = lane; c < hd; c += 32u) p[c] *= inv;
+}
+
+// The delta rule for value head h, a token at a time, thread j taking column j of the
+// head's state S (S[i][j] at i·hd + j): S ← e^g S + β k (v − e^g Sᵀk)ᵀ, out = Sᵀq/√hd.
+// Value heads take key heads in turn (h mod k_heads), as the file stores them.
+DEVFN void delta_rule(GLOBAL const float* x, GLOBAL const float* ba, uint ba_w, GLOBAL const float* al, uint a_w, uint a_off,
+                      GLOBAL const float* dt, GLOBAL const float* a, GLOBAL float* state, uint soff, GLOBAL float* out,
+                      uint rows, uint cd, uint key_dim, uint k_heads, uint hd, uint vd, float scale, uint h, uint j) {
+    if (j >= hd) return;
+    uint kh = h % k_heads;
+    GLOBAL float* s = state + soff + (ulong)h * hd * hd;
+    for (uint t = 0; t < rows; t++) {
+        GLOBAL const float* xt = x + (ulong)t * cd;
+        GLOBAL const float* q = xt + kh * hd;
+        GLOBAL const float* k = xt + key_dim + kh * hd;
+        float v = xt[2u * key_dim + h * hd + j];
+        float beta = 1.0f / (1.0f + EXP(-ba[(ulong)t * ba_w + h]));
+        float pre = al[(ulong)t * a_w + a_off + h] + dt[h];
+        float sp = pre > 20.0f ? pre : LOG(1.0f + EXP(pre));
+        float decay = EXP(sp * a[h]);
+        float sk = 0.0f;
+        for (uint i = 0; i < hd; i++) sk += s[i * hd + j] * k[i];
+        float d = (v - sk * decay) * beta;
+        float o = 0.0f;
+        for (uint i = 0; i < hd; i++) {
+            float e = s[i * hd + j] * decay + k[i] * d;
+            s[i * hd + j] = e;
+            o += e * q[i];
+        }
+        out[(ulong)t * vd + h * hd + j] = o * scale;
+    }
+}
+
+// x[i] *= SiLU(z) for the gate of element i (rows `zw` apart, starting at `zoff`).
+DEVFN void silu_gate(GLOBAL float* x, GLOBAL const float* z, uint zw, uint zoff, uint vd, uint n, uint i) {
+    if (i >= n) return;
+    float g = z[(ulong)(i / vd) * zw + zoff + i % vd];
+    x[i] *= g / (1.0f + EXP(-g));
+}
+
+// Each head of W_q's output holds its query, then its output gate: split them.
+DEVFN void split_qgate(GLOBAL const float* full, GLOBAL float* q, GLOBAL float* g, uint hd, uint n, uint i) {
+    if (i >= n) return;
+    ulong r = i / hd, e = i % hd;
+    q[i] = full[r * 2u * hd + e];
+    g[i] = full[r * 2u * hd + hd + e];
+}
+
+DEVFN void sigmoid_mul(GLOBAL float* x, GLOBAL const float* g, uint n, uint i) { if (i < n) x[i] /= 1.0f + EXP(-g[i]); }

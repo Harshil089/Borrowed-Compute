@@ -70,6 +70,7 @@ __device__ static inline float reduce(float t) {
 }
 #define SIN(x) __nvvm_sin_approx_f(reduce(x))
 #define COS(x) __nvvm_cos_approx_f(reduce(x))
+#define LOG(x) (__nvvm_lg2_approx_f(x) * 0.6931471805599453f)
 
 #include "kernels.h"
 
@@ -88,3 +89,12 @@ extern "C" __global__ void k_silu_mul(float* g, const float* u, uint n) { silu_m
 extern "C" __global__ void k_add(float* x, const float* y, uint n) { add(x, y, n, IX); }
 extern "C" __global__ void k_move(float* b, uint from, uint to, uint n) { move(b, from, to, n, IX); }
 extern "C" __global__ void k_copy(const float* s, float* d, uint off, uint n) { copy(s, d, off, n, IX); }
+extern "C" __global__ void k_conv_silu(const float* in, uint iw, const float* w, uint taps, float* win, float* out, uint cd, uint rows) { conv_silu(in, iw, w, taps, win, out, cd, rows, IX); }
+extern "C" __global__ void k_l2_heads(float* x, uint stride, uint heads, uint hd, float eps) { l2_heads(x, stride, heads, hd, eps, BX, TX); }
+extern "C" __global__ void k_delta(const float* x, const float* ba, uint ba_w, const float* al, uint a_w, uint a_off, const float* dt, const float* a, float* state, uint soff,
+    float* out, uint rows, uint cd, uint key_dim, uint k_heads, uint hd, uint vd, float scale) {
+    delta_rule(x, ba, ba_w, al, a_w, a_off, dt, a, state, soff, out, rows, cd, key_dim, k_heads, hd, vd, scale, BX, TX);
+}
+extern "C" __global__ void k_silu_gate(float* x, const float* z, uint zw, uint zoff, uint vd, uint n) { silu_gate(x, z, zw, zoff, vd, n, IX); }
+extern "C" __global__ void k_split_qgate(const float* full, float* q, float* g, uint hd, uint n) { split_qgate(full, q, g, hd, n, IX); }
+extern "C" __global__ void k_sigmoid_mul(float* x, const float* g, uint n) { sigmoid_mul(x, g, n, IX); }

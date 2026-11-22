@@ -295,6 +295,8 @@ impl Tokenizer {
 /// with one leading non-letter, single digits, punctuation runs, newlines, whitespace).
 pub fn pretokenize(text: &str, digits: usize) -> Vec<String> {
     let c: Vec<char> = text.chars().collect();
+    // shortcut: Qwen3.5's pattern also counts combining marks (\p{M}) as letters; most are
+    // alphabetic here, the rest (a virama, accents typed apart) split off. Upgrade if Hindi text tokenizes oddly.
     let is_l = |x: char| x.is_alphabetic();
     let is_n = |x: char| x.is_numeric();
     let is_nl = |x: char| x == '\r' || x == '\n';

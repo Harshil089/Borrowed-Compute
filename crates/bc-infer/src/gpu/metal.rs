@@ -38,6 +38,7 @@ using namespace metal;
 #define EXP(x) precise::exp(x)
 #define SIN(x) precise::sin(x)
 #define COS(x) precise::cos(x)
+#define LOG(x) precise::log(x)
 "#;
 
 const ENTRIES: &str = r#"
@@ -270,6 +271,22 @@ kernel void k_bias_add(device float* x [[buffer(0)]], device const float* b [[bu
     constant uint& dim [[buffer(3)]], I) { bias_add(x, b, n, dim, gi.x); }
 kernel void k_silu_mul(device float* g [[buffer(0)]], device const float* u [[buffer(1)]], constant uint& n [[buffer(2)]], I) { silu_mul(g, u, n, gi.x); }
 kernel void k_add(device float* x [[buffer(0)]], device const float* y [[buffer(1)]], constant uint& n [[buffer(2)]], I) { add(x, y, n, gi.x); }
+kernel void k_conv_silu(device const float* in [[buffer(0)]], constant uint& iw [[buffer(1)]], device const float* w [[buffer(2)]], constant uint& taps [[buffer(3)]],
+    device float* win [[buffer(4)]], device float* out [[buffer(5)]], constant uint& cd [[buffer(6)]], constant uint& rows [[buffer(7)]], I) { conv_silu(in, iw, w, taps, win, out, cd, rows, gi.x); }
+kernel void k_l2_heads(device float* x [[buffer(0)]], constant uint& stride [[buffer(1)]], constant uint& heads [[buffer(2)]], constant uint& hd [[buffer(3)]],
+    constant float& eps [[buffer(4)]], G) { l2_heads(x, stride, heads, hd, eps, g.x, lane); }
+kernel void k_delta(device const float* x [[buffer(0)]], device const float* ba [[buffer(1)]], constant uint& ba_w [[buffer(2)]], device const float* al [[buffer(3)]],
+    constant uint& a_w [[buffer(4)]], constant uint& a_off [[buffer(5)]], device const float* dt [[buffer(6)]], device const float* a [[buffer(7)]],
+    device float* state [[buffer(8)]], constant uint& soff [[buffer(9)]], device float* out [[buffer(10)]], constant uint& rows [[buffer(11)]],
+    constant uint& cd [[buffer(12)]], constant uint& key_dim [[buffer(13)]], constant uint& k_heads [[buffer(14)]], constant uint& hd [[buffer(15)]],
+    constant uint& vd [[buffer(16)]], constant float& scale [[buffer(17)]], uint3 g [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]]) {
+    delta_rule(x, ba, ba_w, al, a_w, a_off, dt, a, state, soff, out, rows, cd, key_dim, k_heads, hd, vd, scale, g.x, t);
+}
+kernel void k_silu_gate(device float* x [[buffer(0)]], device const float* z [[buffer(1)]], constant uint& zw [[buffer(2)]], constant uint& zoff [[buffer(3)]],
+    constant uint& vd [[buffer(4)]], constant uint& n [[buffer(5)]], I) { silu_gate(x, z, zw, zoff, vd, n, gi.x); }
+kernel void k_split_qgate(device const float* full [[buffer(0)]], device float* q [[buffer(1)]], device float* g [[buffer(2)]], constant uint& hd [[buffer(3)]],
+    constant uint& n [[buffer(4)]], I) { split_qgate(full, q, g, hd, n, gi.x); }
+kernel void k_sigmoid_mul(device float* x [[buffer(0)]], device const float* g [[buffer(1)]], constant uint& n [[buffer(2)]], I) { sigmoid_mul(x, g, n, gi.x); }
 kernel void k_move(device float* b [[buffer(0)]], constant uint& from [[buffer(1)]], constant uint& to [[buffer(2)]],
     constant uint& n [[buffer(3)]], I) { move(b, from, to, n, gi.x); }
 kernel void k_copy(device const float* s [[buffer(0)]], device float* d [[buffer(1)]], constant uint& off [[buffer(2)]],
