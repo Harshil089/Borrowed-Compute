@@ -572,7 +572,8 @@ impl Llm {
             }
         };
         let greedy = sampling.temperature <= 0.0;
-        let mode = if greedy { client.speed.lock().unwrap().choose(self.draft.is_some()) } else { Mode::Plain };
+        // A model with a running state (Qwen3.5) cannot drop wrong guesses: a token a pass.
+        let mode = if greedy && !self.cfg.recurrent() { client.speed.lock().unwrap().choose(self.draft.is_some()) } else { Mode::Plain };
         if mode == Mode::Plain {
             // Sampling, or guessing measured slower here: a token a pass.
             // One remote device with the whole model writes several tokens a trip, as many

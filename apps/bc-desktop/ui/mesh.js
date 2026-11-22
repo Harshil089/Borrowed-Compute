@@ -191,7 +191,7 @@ setInterval(async () => {
 invoke("mesh_models").then((list) => {
   models = list;
   $("mesh-model").innerHTML = list.map((m) => `<option value="${esc(m.name)}">${esc(m.name)} · ${fmt(m.gb, 1)} GB${m.runnable ? "" : " (plan only)"}</option>`).join("");
-  $("mesh-model").value = list.find((m) => m.name === "llama-3.1-8b") ? "llama-3.1-8b" : list[0]?.name;
+  $("mesh-model").value = list.find((m) => m.name === "qwen3.5-9b") ? "qwen3.5-9b" : list[0]?.name;
 }).catch(() => {});
 invoke("mesh_status").then(renderRunning).catch(() => {});
 })();

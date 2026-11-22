@@ -69,6 +69,14 @@ pub fn catalog() -> Vec<Model> {
         draft: draft.map(String::from),
     };
     vec![
+        // Qwen3.5 family (qwen35): mostly DeltaNet layers, so no draft model (their running
+        // state cannot drop wrong guesses). The 27B ones are Qwen3.6 and 3.8, same layers.
+        m("qwen3.5-0.8b", 24, 0.50, 0.2, 1024, hf("unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf"), None),
+        m("qwen3.5-2b", 24, 1.19, 0.4, 2048, hf("unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf"), None),
+        m("qwen3.5-4b", 32, 2.55, 0.5, 2560, hf("unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf"), None),
+        m("qwen3.5-9b", 32, 5.29, 1.3, 4096, hf("unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q4_K_M.gguf"), None),
+        m("qwen3.6-27b", 64, 15.66, 1.7, 5120, hf("unsloth/Qwen3.6-27B-GGUF/resolve/main/Qwen3.6-27B-Q4_K_M.gguf"), None),
+        m("qwen3.8-27b", 64, 15.43, 1.7, 5120, hf("unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-UD-Q4_K_M.gguf"), None),
         m("qwen2.5-0.5b", 24, 0.46, 0.13, 896, hf("Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf"), None),
         m("llama-3.2-1b", 16, 0.75, 0.2, 2048, hf("bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf"), None),
         m("qwen2.5-1.5b", 28, 1.04, 0.2, 1536, hf("Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf"), Some("qwen2.5-0.5b")),

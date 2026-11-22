@@ -10,6 +10,16 @@
 //! angle p·θᵢ, θᵢ = base^(−2i/d): Llama pairs neighbours (2i, 2i+1), Qwen2 pairs i with
 //! i + d/2 ("NeoX" order).
 //!
+//! Qwen3.5 (`qwen35`) differs in three ways:
+//! - Three layers in four replace attention with a gated DeltaNet: a short causal
+//!   convolution over W·n(x), then per head a state matrix S that decays by e^g, learns
+//!   k → v with rate β (S += k (β(v − Sᵀk))ᵀ) and is read with q; the result is RMS-normed
+//!   per head, gated by SiLU(z) and projected back. Its memory is S and the last few
+//!   convolution inputs, not one key and value per token.
+//! - Attention layers normalise q and k per head, rotate only the first quarter of each
+//!   head, and gate their output with σ(gate), the gate coming from W_q as well.
+//! - The norm before the feed-forward is called `post_attention_norm`.
+//!
 //! A [`Part`] holds only its layers, plus the embeddings if it is first and the output
 //! head if it is last. Its key/value cache lives in a [`Kv`], one per conversation, so a
 //! stage keeps each conversation's history and only new tokens ever cross the network.
@@ -38,14 +48,59 @@ pub struct Config {
     pub eps: f32,
     pub vocab: usize,
     pub context: usize,
+    /// Qwen3.5's gated DeltaNet layers, `None` for models with attention in every layer.
+    pub delta: Option<Delta>,
+}
+
+/// Shape of the gated DeltaNet layers (`qwen35`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Delta {
+    /// Which layers are DeltaNet layers; the others are gated attention.
+    pub layers: Vec<bool>,
+    /// Convolution taps, the current input included.
+    pub conv: usize,
+    pub k_heads: usize,
+    pub v_heads: usize,
+    /// Dimension of each key, query and value head (one size for all three).
+    pub head: usize,
+}
+
+impl Delta {
+    fn key_dim(&self) -> usize {
+        self.k_heads * self.head
+    }
+    fn value_dim(&self) -> usize {
+        self.v_heads * self.head
+    }
+    /// Channels of the convolution: queries, keys, then values.
+    fn conv_dim(&self) -> usize {
+        2 * self.key_dim() + self.value_dim()
+    }
 }
 
 impl Config {
     pub fn from_header(h: &Header) -> Result<Self> {
         let arch = h.arch().to_string();
-        if !matches!(arch.as_str(), "llama" | "qwen2" | "mistral") {
-            bail!("the {arch} architecture is not supported yet (llama and qwen2 are)");
+        if !matches!(arch.as_str(), "llama" | "qwen2" | "mistral" | "qwen35") {
+            bail!("the {arch} architecture is not supported yet (llama, qwen2 and qwen35 are)");
         }
+        // Multi-token-prediction blocks come after the model's own layers and are not run.
+        let n_layer = (h.arch_u64("block_count").context("no block_count")? - h.arch_u64("nextn_predict_layers").unwrap_or(0)) as usize;
+        let delta = if arch == "qwen35" {
+            let need = |k: &str| h.arch_u64(k).with_context(|| format!("no {k}")).map(|v| v as usize);
+            let (k_heads, v_heads, head) = (need("ssm.group_count")?, need("ssm.time_step_rank")?, need("ssm.state_size")?);
+            if need("ssm.inner_size")? != v_heads * head || k_heads == 0 || v_heads % k_heads != 0 || need("ssm.conv_kernel")? < 2 {
+                bail!("a DeltaNet shape this engine does not take");
+            }
+            let every = h.arch_u64("full_attention_interval").unwrap_or(4).max(1) as usize;
+            let layers = match h.get(&format!("{arch}.attention.recurrent_layers")).and_then(crate::gguf::Value::as_array) {
+                Some(a) => a.iter().take(n_layer).map(|v| matches!(v, crate::gguf::Value::Bool(true)) || v.as_u64() == Some(1)).collect(),
+                None => (0..n_layer).map(|i| (i + 1) % every != 0).collect(),
+            };
+            Some(Delta { layers, conv: need("ssm.conv_kernel")?, k_heads, v_heads, head })
+        } else {
+            None
+        };
         let n_embd = h.arch_u64("embedding_length").context("no embedding_length")? as usize;
         let n_head = h.arch_u64("attention.head_count").context("no head_count")? as usize;
         let head_dim = h.arch_u64("attention.key_length").map(|v| v as usize).unwrap_or(n_embd / n_head.max(1));
@@ -55,18 +110,29 @@ impl Config {
             .context("no token_embd.weight")?;
         Ok(Config {
             n_embd,
-            n_layer: h.arch_u64("block_count").context("no block_count")? as usize,
+            n_layer,
             n_head,
             n_head_kv: h.arch_u64("attention.head_count_kv").map(|v| v as usize).unwrap_or(n_head),
             head_dim,
             rope_dim: h.arch_u64("rope.dimension_count").map(|v| v as usize).unwrap_or(head_dim),
             rope_base: h.arch_f64("rope.freq_base").unwrap_or(10000.0) as f32,
-            rope_neox: arch == "qwen2",
+            rope_neox: matches!(arch.as_str(), "qwen2" | "qwen35"),
             eps: h.arch_f64("attention.layer_norm_rms_epsilon").unwrap_or(1e-5) as f32,
             vocab,
             context: h.arch_u64("context_length").unwrap_or(4096) as usize,
             arch,
+            delta,
         })
+    }
+
+    /// True when some layers keep a running state instead of every token's keys: such a
+    /// model's cache cannot go back to an earlier position, so it takes no guessing.
+    pub fn recurrent(&self) -> bool {
+        self.delta.as_ref().is_some_and(|d| d.layers.iter().any(|&r| r))
+    }
+
+    fn is_delta(&self, layer: usize) -> bool {
+        self.delta.as_ref().is_some_and(|d| d.layers.get(layer).copied().unwrap_or(false))
     }
 
     fn kv_dim(&self) -> usize {
@@ -102,6 +168,20 @@ pub fn needed<'a>(h: &'a Header, layers: &Range<u32>, first: bool, last: bool) -
 
 struct Block {
     attn_norm: Vec<f32>,
+    mix: Mix,
+    ffn_norm: Vec<f32>,
+    gate: Arc<QTensor>,
+    up: Arc<QTensor>,
+    down: Arc<QTensor>,
+}
+
+/// What mixes tokens in a layer.
+enum Mix {
+    Attn(Attn),
+    Delta(DeltaNet),
+}
+
+struct Attn {
     wq: Arc<QTensor>,
     wk: Arc<QTensor>,
     wv: Arc<QTensor>,
@@ -109,10 +189,27 @@ struct Block {
     bq: Option<Vec<f32>>,
     bk: Option<Vec<f32>>,
     bv: Option<Vec<f32>>,
-    ffn_norm: Vec<f32>,
-    gate: Arc<QTensor>,
-    up: Arc<QTensor>,
-    down: Arc<QTensor>,
+    /// Qwen3.5: per-head RMSNorm weights for q and k, and W_q giving each head's output
+    /// gate after its query.
+    q_norm: Option<Vec<f32>>,
+    k_norm: Option<Vec<f32>>,
+    gated: bool,
+}
+
+struct DeltaNet {
+    /// q, k, v (the convolution's input), then z, the output gate: one matrix or two.
+    qkv: Arc<QTensor>,
+    z: Option<Arc<QTensor>>,
+    /// β, then α, per value head: one matrix or two.
+    beta: Arc<QTensor>,
+    alpha: Option<Arc<QTensor>>,
+    /// Convolution taps, `conv` per channel, oldest input first.
+    conv: Vec<f32>,
+    dt: Vec<f32>,
+    /// −e^A per value head: with softplus(α + dt) it gives the log decay g.
+    a: Vec<f32>,
+    norm: Vec<f32>,
+    out: Arc<QTensor>,
 }
 
 pub struct Part {
@@ -135,6 +232,9 @@ pub struct Part {
 pub struct Kv {
     k: Vec<Vec<f32>>,
     v: Vec<Vec<f32>>,
+    /// Per DeltaNet layer: the last `conv - 1` convolution inputs, then the state matrices
+    /// (each stored transposed, row j = column j of S). Empty for attention layers.
+    state: Vec<Vec<f32>>,
     gpu: Option<crate::gpu::Cache>,
     pub len: usize,
 }
@@ -146,6 +246,10 @@ impl Kv {
     pub fn keep(&mut self, base: usize, rows: &[u32]) -> Result<()> {
         if rows.windows(2).any(|w| w[0] >= w[1]) || rows.iter().any(|&r| base + r as usize >= self.len) {
             bail!("rows {rows:?} at {base} are not an ascending path within the {} cached tokens", self.len);
+        }
+        // A running state holds every token fed; it can only keep all of them.
+        if self.state.iter().any(|s| !s.is_empty()) && (base + rows.len() != self.len || rows.iter().enumerate().any(|(i, &r)| r as usize != i)) {
+            bail!("this model keeps a running state and cannot drop guessed tokens");
         }
         if let Some(g) = self.gpu.as_mut() {
             g.keep(base, rows)?;
@@ -167,7 +271,7 @@ impl Kv {
 
     /// Bytes held, in RAM and on the GPU.
     pub fn bytes(&self) -> usize {
-        self.k.iter().chain(&self.v).map(|x| x.len() * 4).sum::<usize>() + self.gpu.as_ref().map_or(0, |g| g.bytes())
+        self.k.iter().chain(&self.v).chain(&self.state).map(|x| x.len() * 4).sum::<usize>() + self.gpu.as_ref().map_or(0, |g| g.bytes())
     }
 }
 
@@ -178,22 +282,62 @@ impl Part {
         let vec = |n: &str| -> Result<Vec<f32>> { Ok(get(n)?.to_f32()) };
         let opt = |n: &str| tensors.get(n).map(|t| t.to_f32());
         let mut blocks = Vec::new();
+        let qwen35 = cfg.delta.is_some();
         for l in layers.clone() {
             let p = |s: &str| format!("blk.{l}.{s}");
+            let mix = if cfg.is_delta(l as usize) {
+                let (qkv, z) = match tensors.get(&p("attn_qkv_gate.weight")) {
+                    Some(t) => (t.clone(), None),
+                    None => (get(&p("attn_qkv.weight"))?, Some(get(&p("attn_gate.weight"))?)),
+                };
+                let (beta, alpha) = match tensors.get(&p("ssm_beta_alpha.weight")) {
+                    Some(t) => (t.clone(), None),
+                    None => (get(&p("ssm_beta.weight"))?, Some(get(&p("ssm_alpha.weight"))?)),
+                };
+                Mix::Delta(DeltaNet {
+                    qkv,
+                    z,
+                    beta,
+                    alpha,
+                    conv: vec(&p("ssm_conv1d.weight"))?,
+                    dt: vec(&p("ssm_dt.bias"))?,
+                    a: vec(&p("ssm_a"))?,
+                    norm: vec(&p("ssm_norm.weight"))?,
+                    out: get(&p("ssm_out.weight"))?,
+                })
+            } else {
+                Mix::Attn(Attn {
+                    wq: get(&p("attn_q.weight"))?,
+                    wk: get(&p("attn_k.weight"))?,
+                    wv: get(&p("attn_v.weight"))?,
+                    wo: get(&p("attn_output.weight"))?,
+                    bq: opt(&p("attn_q.bias")),
+                    bk: opt(&p("attn_k.bias")),
+                    bv: opt(&p("attn_v.bias")),
+                    q_norm: opt(&p("attn_q_norm.weight")),
+                    k_norm: opt(&p("attn_k_norm.weight")),
+                    gated: qwen35,
+                })
+            };
             blocks.push(Block {
                 attn_norm: vec(&p("attn_norm.weight"))?,
-                wq: get(&p("attn_q.weight"))?,
-                wk: get(&p("attn_k.weight"))?,
-                wv: get(&p("attn_v.weight"))?,
-                wo: get(&p("attn_output.weight"))?,
-                bq: opt(&p("attn_q.bias")),
-                bk: opt(&p("attn_k.bias")),
-                bv: opt(&p("attn_v.bias")),
-                ffn_norm: vec(&p("ffn_norm.weight"))?,
+                mix,
+                ffn_norm: vec(&p(if qwen35 { "post_attention_norm.weight" } else { "ffn_norm.weight" }))?,
                 gate: get(&p("ffn_gate.weight"))?,
                 up: get(&p("ffn_up.weight"))?,
                 down: get(&p("ffn_down.weight"))?,
             });
+        }
+        if let Some(d) = &cfg.delta {
+            for b in &blocks {
+                if let Mix::Delta(n) = &b.mix {
+                    let fused = n.z.is_none() as usize * d.value_dim();
+                    let ba = if n.alpha.is_none() { 2 * d.v_heads } else { d.v_heads };
+                    if n.qkv.rows != d.conv_dim() + fused || n.beta.rows != ba || n.conv.len() != d.conv_dim() * d.conv || n.dt.len() != d.v_heads || n.a.len() != d.v_heads || n.norm.len() != d.head {
+                        bail!("a DeltaNet layer's tensors do not match the model's shape");
+                    }
+                }
+            }
         }
         let embed = if first { Some(get("token_embd.weight")?) } else { None };
         let head = if last {
@@ -224,11 +368,29 @@ impl Part {
             .iter()
             .map(|b| crate::gpu::LayerWeights {
                 attn_norm: &b.attn_norm,
-                wq: &b.wq,
-                wk: &b.wk,
-                wv: &b.wv,
-                wo: &b.wo,
-                bias: [b.bq.as_deref(), b.bk.as_deref(), b.bv.as_deref()],
+                mix: match &b.mix {
+                    Mix::Attn(a) => crate::gpu::MixWeights::Attn {
+                        wq: &a.wq,
+                        wk: &a.wk,
+                        wv: &a.wv,
+                        wo: &a.wo,
+                        bias: [a.bq.as_deref(), a.bk.as_deref(), a.bv.as_deref()],
+                        q_norm: a.q_norm.as_deref(),
+                        k_norm: a.k_norm.as_deref(),
+                        gated: a.gated,
+                    },
+                    Mix::Delta(d) => crate::gpu::MixWeights::Delta {
+                        qkv: &d.qkv,
+                        z: d.z.as_ref(),
+                        beta: &d.beta,
+                        alpha: d.alpha.as_ref(),
+                        conv: &d.conv,
+                        dt: &d.dt,
+                        a: &d.a,
+                        norm: &d.norm,
+                        out: &d.out,
+                    },
+                },
                 ffn_norm: &b.ffn_norm,
                 gate: &b.gate,
                 up: &b.up,
@@ -256,7 +418,21 @@ impl Part {
     }
 
     pub fn new_kv(&self) -> Kv {
-        Kv { k: vec![Vec::new(); self.blocks.len()], v: vec![Vec::new(); self.blocks.len()], gpu: self.gpu.as_ref().map(|g| g.new_cache()), len: 0 }
+        Kv {
+            k: vec![Vec::new(); self.blocks.len()],
+            v: vec![Vec::new(); self.blocks.len()],
+            state: self.blocks.iter().map(|b| self.fresh_state(b)).collect(),
+            gpu: self.gpu.as_ref().map(|g| g.new_cache()),
+            len: 0,
+        }
+    }
+
+    /// A DeltaNet layer's state before any token: zeros.
+    fn fresh_state(&self, b: &Block) -> Vec<f32> {
+        match (&b.mix, &self.cfg.delta) {
+            (Mix::Delta(_), Some(d)) => vec![0.0; (d.conv - 1) * d.conv_dim() + d.v_heads * d.head * d.head],
+            _ => Vec::new(),
+        }
     }
 
     pub fn is_first(&self) -> bool {
@@ -306,6 +482,19 @@ impl Part {
         if pos + rows > c.context {
             bail!("{} tokens are past the model's context of {}", pos + rows, c.context);
         }
+        if kv.state.iter().any(|s| !s.is_empty()) {
+            if tree.is_some() {
+                bail!("this model keeps a running state and takes no tree of guesses");
+            }
+            // Starting over is the only way back: the state holds every token fed.
+            if pos == 0 {
+                for (s, b) in kv.state.iter_mut().zip(&self.blocks) {
+                    *s = self.fresh_state(b);
+                }
+            } else if pos != kv.len {
+                bail!("this model keeps a running state: it continues at {} or starts over, not at {pos}", kv.len);
+            }
+        }
         let kvd = c.kv_dim();
         let started = std::time::Instant::now();
         let on_gpu = match (&self.gpu, kv.gpu.as_mut()) {
@@ -317,24 +506,16 @@ impl Part {
             _ => 0,
         };
         let gpu_done = std::time::Instant::now();
-        for (b, (kc, vc)) in self.blocks.iter().zip(kv.k.iter_mut().zip(kv.v.iter_mut())).skip(on_gpu) {
-            kc.truncate(pos * kvd);
-            vc.truncate(pos * kvd);
+        for (b, ((kc, vc), state)) in self.blocks.iter().zip(kv.k.iter_mut().zip(kv.v.iter_mut()).zip(kv.state.iter_mut())).skip(on_gpu) {
             let n = rms_norm(x, &b.attn_norm, c.eps);
-            let mut q = b.wq.matmul(&n, rows);
-            let mut k = b.wk.matmul(&n, rows);
-            let mut v = b.wv.matmul(&n, rows);
-            add_bias(&mut q, b.bq.as_deref());
-            add_bias(&mut k, b.bk.as_deref());
-            add_bias(&mut v, b.bv.as_deref());
-            for (i, &p) in shape.positions.iter().enumerate() {
-                rope(&mut q[i * c.n_head * c.head_dim..(i + 1) * c.n_head * c.head_dim], c, p, &self.inv_freq);
-                rope(&mut k[i * kvd..(i + 1) * kvd], c, p, &self.inv_freq);
-            }
-            kc.extend_from_slice(&k);
-            vc.extend_from_slice(&v);
-            let att = attention(c, &q, kc, vc, rows, pos, shape.visible.as_deref().map(|v| (shape.base, v)));
-            let o = b.wo.matmul(&att, rows);
+            let o = match &b.mix {
+                Mix::Attn(a) => {
+                    kc.truncate(pos * kvd);
+                    vc.truncate(pos * kvd);
+                    self.attend(a, &n, rows, pos, &shape, kc, vc)
+                }
+                Mix::Delta(d) => self.delta_net(d, &n, rows, state),
+            };
             x.iter_mut().zip(&o).for_each(|(a, b)| *a += b);
 
             let n = rms_norm(x, &b.ffn_norm, c.eps);
@@ -349,6 +530,127 @@ impl Part {
         self.split_us[0].store((gpu_done - started).as_micros() as u64, Relaxed);
         self.split_us[1].store(gpu_done.elapsed().as_micros() as u64, Relaxed);
         Ok(())
+    }
+
+    /// An attention layer's output for `rows` normed inputs `n`, its keys and values added
+    /// to the cache.
+    #[allow(clippy::too_many_arguments)]
+    fn attend(&self, a: &Attn, n: &[f32], rows: usize, pos: usize, shape: &Shape, kc: &mut Vec<f32>, vc: &mut Vec<f32>) -> Vec<f32> {
+        let c = &self.cfg;
+        let (hd, kvd, qd) = (c.head_dim, c.kv_dim(), c.n_head * c.head_dim);
+        let full = a.wq.matmul(n, rows);
+        // Qwen3.5: each head's query is followed by its output gate.
+        let (mut q, gate) = if a.gated {
+            let mut q = Vec::with_capacity(rows * qd);
+            let mut g = Vec::with_capacity(rows * qd);
+            for head in full.chunks_exact(2 * hd) {
+                q.extend_from_slice(&head[..hd]);
+                g.extend_from_slice(&head[hd..]);
+            }
+            (q, Some(g))
+        } else {
+            (full, None)
+        };
+        let mut k = a.wk.matmul(n, rows);
+        let mut v = a.wv.matmul(n, rows);
+        add_bias(&mut q, a.bq.as_deref());
+        add_bias(&mut k, a.bk.as_deref());
+        add_bias(&mut v, a.bv.as_deref());
+        if let Some(w) = &a.q_norm {
+            q = rms_norm(&q, w, c.eps);
+        }
+        if let Some(w) = &a.k_norm {
+            k = rms_norm(&k, w, c.eps);
+        }
+        for (i, &p) in shape.positions.iter().enumerate() {
+            rope(&mut q[i * qd..(i + 1) * qd], c, p, &self.inv_freq);
+            rope(&mut k[i * kvd..(i + 1) * kvd], c, p, &self.inv_freq);
+        }
+        kc.extend_from_slice(&k);
+        vc.extend_from_slice(&v);
+        let mut att = attention(c, &q, kc, vc, rows, pos, shape.visible.as_deref().map(|v| (shape.base, v)));
+        if let Some(g) = gate {
+            att.iter_mut().zip(&g).for_each(|(a, g)| *a /= 1.0 + (-g).exp());
+        }
+        a.wo.matmul(&att, rows)
+    }
+
+    /// A gated DeltaNet layer's output for `rows` normed inputs `n`, one token after
+    /// another, carrying `state` (see [`Kv`]) from the last token fed.
+    fn delta_net(&self, d: &DeltaNet, n: &[f32], rows: usize, state: &mut [f32]) -> Vec<f32> {
+        let c = &self.cfg;
+        let s = c.delta.as_ref().expect("a DeltaNet layer in a model with them");
+        let (cd, vd, hd, taps) = (s.conv_dim(), s.value_dim(), s.head, s.conv);
+        let qkv = d.qkv.matmul(n, rows);
+        let qkv_w = d.qkv.rows;
+        let z = d.z.as_ref().map(|z| z.matmul(n, rows));
+        let ba = d.beta.matmul(n, rows);
+        let ba_w = d.beta.rows;
+        let alpha = d.alpha.as_ref().map(|a| a.matmul(n, rows));
+        let (window, mats) = state.split_at_mut((taps - 1) * cd);
+        let scale = 1.0 / (hd as f32).sqrt();
+        let mut out = vec![0.0; rows * vd];
+        let mut x = vec![0.0; cd];
+        let mut delta = vec![0.0; hd];
+        for t in 0..rows {
+            let input = &qkv[t * qkv_w..t * qkv_w + cd];
+            // Causal convolution over the last `taps` inputs, then SiLU.
+            for (ch, xc) in x.iter_mut().enumerate() {
+                let w = &d.conv[ch * taps..(ch + 1) * taps];
+                let mut sum = 0.0;
+                for (j, wj) in w.iter().enumerate().take(taps - 1) {
+                    sum += window[j * cd + ch] * wj;
+                }
+                sum += input[ch] * w[taps - 1];
+                *xc = sum / (1.0 + (-sum).exp());
+            }
+            window.copy_within(cd.., 0);
+            window[(taps - 2) * cd..].copy_from_slice(input);
+            let (q, rest) = x.split_at_mut(s.key_dim());
+            let (k, v) = rest.split_at_mut(s.key_dim());
+            for head in q.chunks_exact_mut(hd).chain(k.chunks_exact_mut(hd)) {
+                let inv = 1.0 / dot(head, head).sqrt().max(c.eps);
+                head.iter_mut().for_each(|e| *e *= inv);
+            }
+            let (betas, alphas) = match &alpha {
+                Some(a) => (&ba[t * ba_w..(t + 1) * ba_w], &a[t * s.v_heads..(t + 1) * s.v_heads]),
+                None => ba[t * ba_w..(t + 1) * ba_w].split_at(s.v_heads),
+            };
+            let o = &mut out[t * vd..(t + 1) * vd];
+            for h in 0..s.v_heads {
+                // Value heads take key heads in turn (the file stores them tiled).
+                let kh = h % s.k_heads;
+                let (qh, kh, vh) = (&q[kh * hd..(kh + 1) * hd], &k[kh * hd..(kh + 1) * hd], &v[h * hd..(h + 1) * hd]);
+                let beta = 1.0 / (1.0 + (-betas[h]).exp());
+                let pre = alphas[h] + d.dt[h];
+                let softplus = if pre > 20.0 { pre } else { pre.exp().ln_1p() };
+                let decay = (softplus * d.a[h]).exp();
+                let m = &mut mats[h * hd * hd..(h + 1) * hd * hd];
+                m.iter_mut().for_each(|e| *e *= decay);
+                for (j, row) in m.chunks_exact(hd).enumerate() {
+                    delta[j] = (vh[j] - dot(row, kh)) * beta;
+                }
+                for (row, dj) in m.chunks_exact_mut(hd).zip(&delta) {
+                    row.iter_mut().zip(kh).for_each(|(e, k)| *e += dj * k);
+                }
+                let oh = &mut o[h * hd..(h + 1) * hd];
+                for (j, row) in m.chunks_exact(hd).enumerate() {
+                    oh[j] = dot(row, qh) * scale;
+                }
+            }
+        }
+        // Per head: RMSNorm, then the gate SiLU(z).
+        let mut normed = rms_norm(&out, &d.norm, c.eps);
+        let (z, zw, zoff) = match &z {
+            Some(z) => (z.as_slice(), vd, 0),
+            None => (qkv.as_slice(), qkv_w, cd),
+        };
+        for (t, row) in normed.chunks_exact_mut(vd).enumerate() {
+            for (e, g) in row.iter_mut().zip(&z[t * zw + zoff..t * zw + zoff + vd]) {
+                *e *= g / (1.0 + (-g).exp());
+            }
+        }
+        d.out.matmul(&normed, rows)
     }
 
     /// Next-token scores for each row (rows × vocab).
@@ -674,8 +976,136 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn qwen35_splits_steps_and_layouts_agree() {
+        let file = crate::fixtures::tiny_qwen35(4, false);
+        let whole = load_all(&file, 0..4, true, true).without_gpu();
+        assert!(whole.cfg.recurrent() && whole.cfg.rope_dim == 4 && whole.cfg.rope_neox);
+        let prompt = [5u32, 9, 13, 2, 7];
+        // The prompt in one batch, then two tokens one at a time…
+        let mut kv = [whole.new_kv()];
+        run(&[&whole], &mut kv, &prompt, 0);
+        run(&[&whole], &mut kv, &[40], 5);
+        let stepped = run(&[&whole], &mut kv, &[41], 6);
+        // …score what the whole text in one batch does: the state carries the history.
+        let mut fresh = [whole.new_kv()];
+        let all = run(&[&whole], &mut fresh, &[5, 9, 13, 2, 7, 40, 41], 0);
+        let v = whole.cfg.vocab;
+        let err = all[6 * v..].iter().zip(&stepped).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        assert!(err < 1e-4, "batch against steps: {err}");
+        assert!(stepped.iter().all(|x| x.is_finite()) && stepped.iter().any(|&x| x != stepped[0]));
+        // Split over three parts: the same scores, bit for bit.
+        let (a, b, c) = (load_all(&file, 0..1, true, false).without_gpu(), load_all(&file, 1..3, false, false).without_gpu(), load_all(&file, 3..4, false, true).without_gpu());
+        let mut kvs = [a.new_kv(), b.new_kv(), c.new_kv()];
+        assert_eq!(run(&[&a, &b, &c], &mut kvs, &[5, 9, 13, 2, 7, 40, 41], 0), all);
+        // Starting over at 0 forgets the old text; going back elsewhere is refused.
+        assert_eq!(run(&[&whole], &mut kv, &[5, 9, 13, 2, 7, 40, 41], 0), all);
+        let mut x = whole.embed(&[1]).unwrap();
+        assert!(whole.forward(&mut x, 1, 3, &mut kv[0]).is_err());
+        assert!(kv[0].keep(5, &[1]).is_err());
+        // One matrix for q, k, v and z (and for β and α) computes what two do.
+        let fused = load_all(&crate::fixtures::tiny_qwen35(4, true), 0..4, true, true).without_gpu();
+        let mut kf = [fused.new_kv()];
+        assert_eq!(run(&[&fused], &mut kf, &[5, 9, 13, 2, 7, 40, 41], 0), all);
+    }
+
+    #[test]
+    fn qwen35_on_the_gpu_computes_what_the_cpu_does() {
+        if crate::gpu::get().is_none() {
+            eprintln!("no GPU here: skipped");
+            return;
+        }
+        for fused in [false, true] {
+            let file = crate::fixtures::tiny_qwen35(4, fused);
+            let gpu = load_all(&file, 0..4, true, true);
+            assert_eq!(gpu.gpu_layers(), (4, true), "all of a small model goes on the GPU");
+            let cpu = load_all(&file, 0..4, true, true).without_gpu();
+            let close = |a: &[f32], b: &[f32], what: &str| {
+                let err = a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0f32, f32::max);
+                let top = b.iter().fold(0f32, |m, v| m.max(v.abs()));
+                assert!(err <= 0.02 * (1.0 + top), "{what}: max error {err} against scores up to {top}");
+            };
+            // A prompt in one batch, then single tokens: the GPU's state carries over.
+            let (mut kg, mut kc) = ([gpu.new_kv()], [cpu.new_kv()]);
+            close(&run(&[&gpu], &mut kg, &[5, 9, 13, 2, 7], 0), &run(&[&cpu], &mut kc, &[5, 9, 13, 2, 7], 0), "prompt");
+            for (i, t) in [40u32, 41, 42].into_iter().enumerate() {
+                close(&run(&[&gpu], &mut kg, &[t], 5 + i), &run(&[&cpu], &mut kc, &[t], 5 + i), "step");
+            }
+            // Starting over at 0 resets the GPU's state too.
+            close(&run(&[&gpu], &mut kg, &[5, 9], 0), &run(&[&cpu], &mut kc, &[5, 9], 0), "again");
+            // Split between parts, the GPU agrees with itself.
+            let mut whole = [gpu.new_kv()];
+            let all = run(&[&gpu], &mut whole, &[5, 9, 13, 2, 7, 40], 0);
+            let (a, b) = (load_all(&file, 0..1, true, false), load_all(&file, 1..4, false, true));
+            let mut ks = [a.new_kv(), b.new_kv()];
+            assert_eq!(run(&[&a, &b], &mut ks, &[5, 9, 13, 2, 7, 40], 0), all);
+        }
+    }
+
+    #[test]
+    fn a_delta_net_step_follows_the_rule() {
+        // One token, one head, through `delta_net`'s update against the rule written
+        // plainly: S ← e^g S; S ← S + β k (v − Sᵀk)ᵀ; out = Sᵀq / √d, S[i][j] indexed as is.
+        let file = crate::fixtures::tiny_qwen35(2, false);
+        let part = load_all(&file, 0..1, true, false).without_gpu();
+        let Mix::Delta(dn) = &part.blocks[0].mix else { panic!("layer 0 is DeltaNet") };
+        let s = part.cfg.delta.clone().unwrap();
+        let hd = s.head;
+        let mut state = part.fresh_state(&part.blocks[0]);
+        let mats = (s.conv - 1) * s.conv_dim();
+        // A state already full of something, so decay and the update both show.
+        for (i, e) in state[mats..].iter_mut().enumerate() {
+            *e = ((i * 7 % 13) as f32 - 6.0) / 10.0;
+        }
+        let before = state.clone();
+        let n: Vec<f32> = (0..part.cfg.n_embd).map(|i| ((i * 5 % 11) as f32 - 5.0) / 7.0).collect();
+        part.delta_net(dn, &n, 1, &mut state);
+        // Recompute head 3's k, v, β and g from the same projections.
+        let qkv = dn.qkv.matmul(&n, 1);
+        let conv: Vec<f32> = (0..s.conv_dim())
+            .map(|ch| {
+                let v = qkv[ch] * dn.conv[ch * s.conv + s.conv - 1];
+                v / (1.0 + (-v).exp())
+            })
+            .collect();
+        let l2 = |x: &[f32]| {
+            let n = x.iter().map(|v| v * v).sum::<f32>().sqrt().max(part.cfg.eps);
+            x.iter().map(|v| v / n).collect::<Vec<f32>>()
+        };
+        let h = 3;
+        let kh = h % s.k_heads;
+        let k = l2(&conv[s.key_dim() + kh * hd..s.key_dim() + (kh + 1) * hd]);
+        let v = &conv[2 * s.key_dim() + h * hd..2 * s.key_dim() + (h + 1) * hd];
+        let beta = 1.0 / (1.0 + (-dn.beta.matmul(&n, 1)[h]).exp());
+        let pre = dn.alpha.as_ref().unwrap().matmul(&n, 1)[h] + dn.dt[h];
+        let decay = (pre.exp().ln_1p() * dn.a[h]).exp();
+        // S[i][j] = stored[j][i].
+        let old = &before[mats + h * hd * hd..mats + (h + 1) * hd * hd];
+        let mut sm = vec![vec![0f32; hd]; hd];
+        for i in 0..hd {
+            for j in 0..hd {
+                sm[i][j] = old[j * hd + i] * decay;
+            }
+        }
+        let stk: Vec<f32> = (0..hd).map(|j| (0..hd).map(|i| sm[i][j] * k[i]).sum()).collect();
+        for i in 0..hd {
+            for j in 0..hd {
+                sm[i][j] += beta * k[i] * (v[j] - stk[j]);
+            }
+        }
+        let new = &state[mats + h * hd * hd..mats + (h + 1) * hd * hd];
+        for i in 0..hd {
+            for j in 0..hd {
+                assert!((new[j * hd + i] - sm[i][j]).abs() < 1e-5, "S[{i}][{j}]");
+            }
+        }
+        // The convolution window now ends with this token's input.
+        let w = &state[(s.conv - 2) * s.conv_dim()..mats];
+        assert_eq!(w, &qkv[..s.conv_dim()]);
+    }
+
+    #[test]
     fn rope_rotates_pairs_by_position() {
-        let c = Config { arch: "llama".into(), n_embd: 4, n_layer: 1, n_head: 1, n_head_kv: 1, head_dim: 4, rope_dim: 4, rope_base: 10000.0, rope_neox: false, eps: 1e-5, vocab: 1, context: 8 };
+        let c = Config { arch: "llama".into(), n_embd: 4, n_layer: 1, n_head: 1, n_head_kv: 1, head_dim: 4, rope_dim: 4, rope_base: 10000.0, rope_neox: false, eps: 1e-5, vocab: 1, context: 8, delta: None };
         let inv: Vec<f32> = (0..2).map(|i| 10000f32.powf(-2.0 * i as f32 / 4.0)).collect();
         let mut x = [1.0, 0.0, 1.0, 0.0];
         rope(&mut x, &c, 0, &inv);
