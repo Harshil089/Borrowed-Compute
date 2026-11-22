@@ -69,10 +69,14 @@ pub enum K {
     SiluGate,
     SplitQGate,
     SigmoidMul,
+    Route,
+    MatmulId,
+    MoeSum,
+    GatedAdd,
 }
 
 impl K {
-    const ALL: [K; 15] = [
+    const ALL: [K; 19] = [
         K::Matmul,
         K::RmsNorm,
         K::Rope,
@@ -88,6 +92,10 @@ impl K {
         K::SiluGate,
         K::SplitQGate,
         K::SigmoidMul,
+        K::Route,
+        K::MatmulId,
+        K::MoeSum,
+        K::GatedAdd,
     ];
 
     fn name(self) -> &'static str {
@@ -110,6 +118,10 @@ impl K {
             K::SiluGate => "k_silu_gate",
             K::SplitQGate => "k_split_qgate",
             K::SigmoidMul => "k_sigmoid_mul",
+            K::Route => "k_route",
+            K::MatmulId => "k_matmul_id",
+            K::MoeSum => "k_moe_sum",
+            K::GatedAdd => "k_gated_add",
         }
     }
 }
@@ -208,7 +220,7 @@ impl Gpu {
     /// The GPU's product against the CPU's on every weight format, and its measured speed.
     fn self_check(&self) -> Result<()> {
         use crate::quant::GgmlType::*;
-        for ty in [F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4K, Q5K, Q6K] {
+        for ty in [F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q3K, Q4K, Q5K, Q6K] {
             let (rows, cols) = (37, 512);
             let t = Arc::new(crate::fixtures::random_tensor(ty, rows, cols, 7));
             // One row and a batch run different kernels.
@@ -285,9 +297,12 @@ struct Layer {
     attn_norm: Buf,
     mix: Mix,
     ffn_norm: Buf,
-    gate: W,
-    up: W,
-    down: W,
+    ffn: Ffn,
+}
+
+enum Ffn {
+    Dense { gate: W, up: W, down: W },
+    Moe { router: W, gate: Option<W>, up: W, down: W, ff: usize, shared: Option<[W; 4]> },
 }
 
 enum Mix {
@@ -327,6 +342,10 @@ pub struct Layers {
     /// Floats per row of the DeltaNet buffers: [mixed input, convolved, gate z, β(α),
     /// separate α, output]; zeros without DeltaNet layers.
     delta_w: [usize; 6],
+    /// Widest dense or shared-expert feed-forward, and [experts, used, expert width] for
+    /// a mixture of experts (zeros without).
+    ff: usize,
+    moe_w: [usize; 3],
 }
 
 /// Room for `rows` rows of every intermediate result of a layer.
@@ -345,6 +364,9 @@ struct Scratch {
     g: Buf,
     /// DeltaNet: see `Layers::delta_w`.
     d: [Buf; 6],
+    /// Experts: router scores, chosen ids, their weights, gate and up per (row, slot),
+    /// each slot's output, the shared expert's gate.
+    m: [Buf; 7],
 }
 
 /// One conversation's keys and values on the GPU, per layer, with room for `cap` tokens;
@@ -365,9 +387,13 @@ pub struct LayerWeights<'a> {
     pub attn_norm: &'a [f32],
     pub mix: MixWeights<'a>,
     pub ffn_norm: &'a [f32],
-    pub gate: &'a Arc<QTensor>,
-    pub up: &'a Arc<QTensor>,
-    pub down: &'a Arc<QTensor>,
+    pub ffn: FfnWeights<'a>,
+}
+
+pub enum FfnWeights<'a> {
+    Dense { gate: &'a Arc<QTensor>, up: &'a Arc<QTensor>, down: &'a Arc<QTensor> },
+    /// See `model::Experts`; `shared` is [gate scale, gate, up, down].
+    Moe { router: &'a Arc<QTensor>, gate: Option<&'a Arc<QTensor>>, up: &'a Arc<QTensor>, down: &'a Arc<QTensor>, ff: usize, shared: Option<[&'a Arc<QTensor>; 4]> },
 }
 
 pub enum MixWeights<'a> {
@@ -439,12 +465,17 @@ impl Layers {
         let mut left = budget;
         let mut on = Vec::new();
         let mut delta_w = [0usize; 6];
+        let (mut ff, mut moe_w) = (0usize, [0usize; 3]);
         for l in layers {
             let mats: Vec<&Arc<QTensor>> = match &l.mix {
                 MixWeights::Attn { wq, wk, wv, wo, .. } => vec![wq, wk, wv, wo],
                 MixWeights::Delta { qkv, z, beta, alpha, out, .. } => [Some(*qkv), *z, Some(*beta), *alpha, Some(*out)].into_iter().flatten().collect(),
             };
-            let mats: Vec<&Arc<QTensor>> = mats.into_iter().chain([l.gate, l.up, l.down]).collect();
+            let ffn_mats: Vec<&Arc<QTensor>> = match &l.ffn {
+                FfnWeights::Dense { gate, up, down } => vec![gate, up, down],
+                FfnWeights::Moe { router, gate, up, down, shared, .. } => [Some(*router), *gate, Some(*up), Some(*down)].into_iter().flatten().chain(shared.iter().flatten().copied()).collect(),
+            };
+            let mats: Vec<&Arc<QTensor>> = mats.into_iter().chain(ffn_mats).collect();
             let bytes: u64 = mats.iter().map(|t| t.data.len() as u64).sum();
             if bytes > left || mats.iter().any(|t| !t.cols.is_multiple_of(32)) {
                 break;
@@ -484,7 +515,31 @@ impl Layers {
                     }
                 }
             };
-            on.push(Layer { attn_norm: b.upload(l.attn_norm)?, mix, ffn_norm: b.upload(l.ffn_norm)?, gate: gpu.weights(l.gate)?, up: gpu.weights(l.up)?, down: gpu.weights(l.down)? });
+            let ffn = match &l.ffn {
+                FfnWeights::Dense { gate, up, down } => {
+                    ff = ff.max(gate.rows);
+                    Ffn::Dense { gate: gpu.weights(gate)?, up: gpu.weights(up)?, down: gpu.weights(down)? }
+                }
+                FfnWeights::Moe { router, gate, up, down, ff: width, shared } => {
+                    let m = cfg.moe.as_ref().expect("experts in a model with them");
+                    moe_w = [moe_w[0].max(m.experts), moe_w[1].max(m.used), moe_w[2].max(*width)];
+                    if let Some([_, g, _, _]) = shared {
+                        ff = ff.max(g.rows);
+                    }
+                    Ffn::Moe {
+                        router: gpu.weights(router)?,
+                        gate: gate.map(|g| gpu.weights(g)).transpose()?,
+                        up: gpu.weights(up)?,
+                        down: gpu.weights(down)?,
+                        ff: *width,
+                        shared: match shared {
+                            Some([w, g, u, d]) => Some([gpu.weights(w)?, gpu.weights(g)?, gpu.weights(u)?, gpu.weights(d)?]),
+                            None => None,
+                        },
+                    }
+                }
+            };
+            on.push(Layer { attn_norm: b.upload(l.attn_norm)?, mix, ffn_norm: b.upload(l.ffn_norm)?, ffn });
         }
         if on.is_empty() {
             return Ok(None);
@@ -493,7 +548,7 @@ impl Layers {
             Some((norm, out)) if on.len() == layers.len() && (out.data.len() as u64) <= left => Some((b.upload(norm)?, gpu.weights(out)?)),
             _ => None,
         };
-        Ok(Some(Layers { gpu, layers: on, head, inv_freq: b.upload(inv_freq)?, scratch: std::sync::Mutex::new(None), delta_w }))
+        Ok(Some(Layers { gpu, layers: on, head, inv_freq: b.upload(inv_freq)?, scratch: std::sync::Mutex::new(None), delta_w, ff, moe_w }))
     }
 
     /// Layers on the GPU, from the start of the part.
@@ -576,7 +631,7 @@ impl Layers {
         let b = &self.gpu.backend;
         let (e, hd, nh, nkv) = (cfg.n_embd, cfg.head_dim, cfg.n_head, cfg.n_head_kv);
         let (qd, kvd) = (nh * hd, nkv * hd);
-        let ff = self.layers[0].gate.rows as usize;
+        let ff = self.ff;
         let bx = b.upload(x)?;
         // Integers ride in float buffers bit for bit; the kernels read them as uint.
         let bpos = b.upload(&positions.iter().map(|&p| f32::from_bits(p)).collect::<Vec<_>>())?;
@@ -603,6 +658,10 @@ impl Layers {
                 qg: b.zeros(r * 2 * qd)?,
                 g: b.zeros(r * qd)?,
                 d: [b.zeros(r * dw[0])?, b.zeros(r * dw[1])?, b.zeros(r * dw[2])?, b.zeros(r * dw[3])?, b.zeros(r * dw[4])?, b.zeros(r * dw[5])?],
+                m: {
+                    let [ex, k, w] = self.moe_w;
+                    [b.zeros(r * ex)?, b.zeros(r * k)?, b.zeros(r * k)?, b.zeros(r * k * w)?, b.zeros(r * k * w)?, b.zeros(r * k * e)?, b.zeros(r)?]
+                },
             });
         }
         let s = held.as_ref().unwrap();
@@ -698,11 +757,57 @@ impl Layers {
             }
             cmds.push(Cmd { k: K::Add, grid: ew(rows * e), threads: 256, args: vec![Arg::B(&bx), Arg::B(bo), u(rows * e)] });
             cmds.push(norm(&bx, &l.ffn_norm, bn, rows, e, cfg.eps));
-            cmds.push(self.gpu.matmul(&l.gate, bn, bg, rows));
-            cmds.push(self.gpu.matmul(&l.up, bn, bu, rows));
-            cmds.push(Cmd { k: K::SiluMul, grid: ew(rows * ff), threads: 256, args: vec![Arg::B(bg), Arg::B(bu), u(rows * ff)] });
-            cmds.push(self.gpu.matmul(&l.down, bg, bo, rows));
-            cmds.push(Cmd { k: K::Add, grid: ew(rows * e), threads: 256, args: vec![Arg::B(&bx), Arg::B(bo), u(rows * e)] });
+            match &l.ffn {
+                Ffn::Dense { gate, up, down } => {
+                    let ff = gate.rows as usize;
+                    cmds.push(self.gpu.matmul(gate, bn, bg, rows));
+                    cmds.push(self.gpu.matmul(up, bn, bu, rows));
+                    cmds.push(Cmd { k: K::SiluMul, grid: ew(rows * ff), threads: 256, args: vec![Arg::B(bg), Arg::B(bu), u(rows * ff)] });
+                    cmds.push(self.gpu.matmul(down, bg, bo, rows));
+                    cmds.push(Cmd { k: K::Add, grid: ew(rows * e), threads: 256, args: vec![Arg::B(&bx), Arg::B(bo), u(rows * e)] });
+                }
+                Ffn::Moe { router, gate, up, down, ff: width, shared } => {
+                    let m = cfg.moe.as_ref().expect("experts in a model with them");
+                    let (k, w) = (m.used, *width);
+                    let [logits, ids, wts, gb, ub, db, sg] = &s.m;
+                    // Every slot (row, chosen expert) is its own product, by the expert's id.
+                    // Every slot (row, chosen expert) is its own product, by the expert's id.
+                    #[allow(clippy::too_many_arguments)]
+                    fn id<'a>(wt: &'a W, x: &'a Buf, out: &'a Buf, ids: &'a Buf, rows_out: usize, slots: usize, xdiv: usize, estride: usize, roff: usize) -> Cmd<'a> {
+                        Cmd {
+                            k: K::MatmulId,
+                            grid: ((rows_out as u32).div_ceil(ROWS_PER_GROUP), slots as u32),
+                            threads: 32 * ROWS_PER_GROUP,
+                            args: vec![Arg::B(&wt.buf), Arg::B(x), Arg::B(out), Arg::B(ids), Arg::U(wt.ty), Arg::U(rows_out as u32), Arg::U(wt.cols), Arg::U(wt.row_bytes), Arg::U(xdiv as u32), Arg::U(estride as u32), Arg::U(roff as u32)],
+                        }
+                    }
+                    let slots = rows * k;
+                    cmds.push(self.gpu.matmul(router, bn, logits, rows));
+                    cmds.push(Cmd { k: K::Route, grid: ew(rows), threads: 256, args: vec![Arg::B(logits), Arg::B(ids), Arg::B(wts), u(m.experts), u(k), Arg::F(m.scale), u(rows)] });
+                    match gate {
+                        Some(gate) => {
+                            cmds.push(id(gate, bn, gb, ids, w, slots, k, w, 0));
+                            cmds.push(id(up, bn, ub, ids, w, slots, k, w, 0));
+                        }
+                        None => {
+                            cmds.push(id(up, bn, gb, ids, w, slots, k, 2 * w, 0));
+                            cmds.push(id(up, bn, ub, ids, w, slots, k, 2 * w, w));
+                        }
+                    }
+                    cmds.push(Cmd { k: K::SiluMul, grid: ew(rows * k * w), threads: 256, args: vec![Arg::B(gb), Arg::B(ub), u(rows * k * w)] });
+                    cmds.push(id(down, gb, db, ids, e, slots, 1, e, 0));
+                    cmds.push(Cmd { k: K::MoeSum, grid: ew(rows * e), threads: 256, args: vec![Arg::B(&bx), Arg::B(db), Arg::B(wts), u(k), u(e), u(rows * e)] });
+                    if let Some([sw, sgate, sup, sdown]) = shared {
+                        let sff = sgate.rows as usize;
+                        cmds.push(self.gpu.matmul(sw, bn, sg, rows));
+                        cmds.push(self.gpu.matmul(sgate, bn, bg, rows));
+                        cmds.push(self.gpu.matmul(sup, bn, bu, rows));
+                        cmds.push(Cmd { k: K::SiluMul, grid: ew(rows * sff), threads: 256, args: vec![Arg::B(bg), Arg::B(bu), u(rows * sff)] });
+                        cmds.push(self.gpu.matmul(sdown, bg, bo, rows));
+                        cmds.push(Cmd { k: K::GatedAdd, grid: ew(rows * e), threads: 256, args: vec![Arg::B(&bx), Arg::B(bo), Arg::B(sg), u(e), u(rows * e)] });
+                    }
+                }
+            }
         }
         self.gpu.run(&cmds)?;
         x.copy_from_slice(&b.read(&bx, rows * e)?);

@@ -287,6 +287,15 @@ kernel void k_silu_gate(device float* x [[buffer(0)]], device const float* z [[b
 kernel void k_split_qgate(device const float* full [[buffer(0)]], device float* q [[buffer(1)]], device float* g [[buffer(2)]], constant uint& hd [[buffer(3)]],
     constant uint& n [[buffer(4)]], I) { split_qgate(full, q, g, hd, n, gi.x); }
 kernel void k_sigmoid_mul(device float* x [[buffer(0)]], device const float* g [[buffer(1)]], constant uint& n [[buffer(2)]], I) { sigmoid_mul(x, g, n, gi.x); }
+kernel void k_route(device const float* logits [[buffer(0)]], device uint* ids [[buffer(1)]], device float* wts [[buffer(2)]], constant uint& E [[buffer(3)]],
+    constant uint& k [[buffer(4)]], constant float& scale [[buffer(5)]], constant uint& rows [[buffer(6)]], I) { route(logits, ids, wts, E, k, scale, rows, gi.x); }
+kernel void k_matmul_id(device const uchar* w [[buffer(0)]], device const float* x [[buffer(1)]], device float* out [[buffer(2)]], device const uint* ids [[buffer(3)]],
+    constant uint& ty [[buffer(4)]], constant uint& rows [[buffer(5)]], constant uint& cols [[buffer(6)]], constant uint& rb [[buffer(7)]], constant uint& xdiv [[buffer(8)]],
+    constant uint& estride [[buffer(9)]], constant uint& roff [[buffer(10)]], G) { matmul_id(w, x, out, ids, ty, rows, cols, rb, xdiv, estride, roff, g.x * ROWS_PER_GROUP + sg, g.y, lane); }
+kernel void k_moe_sum(device float* x [[buffer(0)]], device const float* d [[buffer(1)]], device const float* wts [[buffer(2)]], constant uint& k [[buffer(3)]],
+    constant uint& e [[buffer(4)]], constant uint& n [[buffer(5)]], I) { moe_sum(x, d, wts, k, e, n, gi.x); }
+kernel void k_gated_add(device float* x [[buffer(0)]], device const float* y [[buffer(1)]], device const float* g [[buffer(2)]], constant uint& e [[buffer(3)]],
+    constant uint& n [[buffer(4)]], I) { gated_add(x, y, g, e, n, gi.x); }
 kernel void k_move(device float* b [[buffer(0)]], constant uint& from [[buffer(1)]], constant uint& to [[buffer(2)]],
     constant uint& n [[buffer(3)]], I) { move(b, from, to, n, gi.x); }
 kernel void k_copy(device const float* s [[buffer(0)]], device float* d [[buffer(1)]], constant uint& off [[buffer(2)]],

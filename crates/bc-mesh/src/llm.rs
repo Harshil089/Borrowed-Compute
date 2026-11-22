@@ -308,11 +308,14 @@ async fn local_stage(endpoint: &Endpoint, model_url: &str, layers: std::ops::Ran
 /// The model's size and shape for the planner, from its header.
 pub fn model_spec(name: &str, h: &Header) -> Result<Model> {
     let cfg = Config::from_header(h)?;
-    let (mut layer_bytes, mut extra) = (0u64, 0u64);
+    // Expert weights count fully for memory but only `used` of `experts` for reading.
+    let share = cfg.moe.as_ref().map_or(1.0, |m| m.used as f64 / m.experts as f64);
+    let (mut layer_bytes, mut extra, mut read) = (0u64, 0u64, 0f64);
     for t in &h.tensors {
         let len = t.range.end - t.range.start;
         if t.name.starts_with("blk.") {
             layer_bytes += len;
+            read += if t.name.contains("_exps.") { len as f64 * share } else { len as f64 };
         } else {
             extra += len;
         }
@@ -325,6 +328,7 @@ pub fn model_spec(name: &str, h: &Header) -> Result<Model> {
         hidden: cfg.n_embd as u32,
         url: None,
         draft: None,
+        read: if cfg.moe.is_some() { read / layer_bytes.max(1) as f64 } else { 0.0 },
     })
 }
 

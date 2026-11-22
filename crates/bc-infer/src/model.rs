@@ -20,6 +20,11 @@
 //!   head, and gate their output with σ(gate), the gate coming from W_q as well.
 //! - The norm before the feed-forward is called `post_attention_norm`.
 //!
+//! Qwen3.5 MoE (`qwen35moe`) has the same layers with a mixture of experts for the
+//! feed-forward: a router scores every expert, the `used` likeliest run (softmax, top-k,
+//! weights renormalised to sum to one) and their outputs are summed by weight, plus a
+//! shared expert scaled by σ(w·n(h)). Each token reads only its experts' weights.
+//!
 //! A [`Part`] holds only its layers, plus the embeddings if it is first and the output
 //! head if it is last. Its key/value cache lives in a [`Kv`], one per conversation, so a
 //! stage keeps each conversation's history and only new tokens ever cross the network.
@@ -50,6 +55,16 @@ pub struct Config {
     pub context: usize,
     /// Qwen3.5's gated DeltaNet layers, `None` for models with attention in every layer.
     pub delta: Option<Delta>,
+    /// Experts per layer and how many each token uses, for a mixture of experts.
+    pub moe: Option<Moe>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Moe {
+    pub experts: usize,
+    pub used: usize,
+    /// Factor on the chosen experts' weights; 0 or 1 leaves them as they are.
+    pub scale: f32,
 }
 
 /// Shape of the gated DeltaNet layers (`qwen35`).
@@ -81,12 +96,23 @@ impl Delta {
 impl Config {
     pub fn from_header(h: &Header) -> Result<Self> {
         let arch = h.arch().to_string();
-        if !matches!(arch.as_str(), "llama" | "qwen2" | "mistral" | "qwen35") {
-            bail!("the {arch} architecture is not supported yet (llama, qwen2 and qwen35 are)");
+        if !matches!(arch.as_str(), "llama" | "qwen2" | "mistral" | "qwen35" | "qwen35moe") {
+            bail!("the {arch} architecture is not supported yet (llama, qwen2, qwen35 and qwen35moe are)");
         }
+        let qwen35 = matches!(arch.as_str(), "qwen35" | "qwen35moe");
         // Multi-token-prediction blocks come after the model's own layers and are not run.
         let n_layer = (h.arch_u64("block_count").context("no block_count")? - h.arch_u64("nextn_predict_layers").unwrap_or(0)) as usize;
-        let delta = if arch == "qwen35" {
+        let moe = match h.arch_u64("expert_count") {
+            Some(experts) if experts > 1 => {
+                let used = h.arch_u64("expert_used_count").context("no expert_used_count")?;
+                if used == 0 || used > experts {
+                    bail!("{used} of {experts} experts a token");
+                }
+                Some(Moe { experts: experts as usize, used: used as usize, scale: h.arch_f64("expert_weights_scale").unwrap_or(0.0) as f32 })
+            }
+            _ => None,
+        };
+        let delta = if qwen35 {
             let need = |k: &str| h.arch_u64(k).with_context(|| format!("no {k}")).map(|v| v as usize);
             let (k_heads, v_heads, head) = (need("ssm.group_count")?, need("ssm.time_step_rank")?, need("ssm.state_size")?);
             if need("ssm.inner_size")? != v_heads * head || k_heads == 0 || v_heads % k_heads != 0 || need("ssm.conv_kernel")? < 2 {
@@ -116,12 +142,13 @@ impl Config {
             head_dim,
             rope_dim: h.arch_u64("rope.dimension_count").map(|v| v as usize).unwrap_or(head_dim),
             rope_base: h.arch_f64("rope.freq_base").unwrap_or(10000.0) as f32,
-            rope_neox: matches!(arch.as_str(), "qwen2" | "qwen35"),
+            rope_neox: arch == "qwen2" || qwen35,
             eps: h.arch_f64("attention.layer_norm_rms_epsilon").unwrap_or(1e-5) as f32,
             vocab,
             context: h.arch_u64("context_length").unwrap_or(4096) as usize,
             arch,
             delta,
+            moe,
         })
     }
 
@@ -170,9 +197,27 @@ struct Block {
     attn_norm: Vec<f32>,
     mix: Mix,
     ffn_norm: Vec<f32>,
-    gate: Arc<QTensor>,
+    ffn: Ffn,
+}
+
+/// The feed-forward: SiLU(W_gate·n) ⊙ W_up·n through W_down, once or per expert.
+enum Ffn {
+    Dense { gate: Arc<QTensor>, up: Arc<QTensor>, down: Arc<QTensor> },
+    Moe(Experts),
+}
+
+struct Experts {
+    /// Scores every expert (rows: experts).
+    router: Arc<QTensor>,
+    /// Every expert's W_gate and W_up stacked (rows: expert e's at e·ff..), or both in one
+    /// stack (e's gate rows then its up rows, 2·ff a expert).
+    gate: Option<Arc<QTensor>>,
     up: Arc<QTensor>,
+    /// Every expert's W_down (rows: e·n_embd..).
     down: Arc<QTensor>,
+    ff: usize,
+    /// The shared expert, and the one-row W that scales it by σ(w·n).
+    shared: Option<[Arc<QTensor>; 4]>,
 }
 
 /// What mixes tokens in a layer.
@@ -283,6 +328,7 @@ impl Part {
         let opt = |n: &str| tensors.get(n).map(|t| t.to_f32());
         let mut blocks = Vec::new();
         let qwen35 = cfg.delta.is_some();
+        let e = cfg.n_embd;
         for l in layers.clone() {
             let p = |s: &str| format!("blk.{l}.{s}");
             let mix = if cfg.is_delta(l as usize) {
@@ -323,9 +369,27 @@ impl Part {
                 attn_norm: vec(&p("attn_norm.weight"))?,
                 mix,
                 ffn_norm: vec(&p(if qwen35 { "post_attention_norm.weight" } else { "ffn_norm.weight" }))?,
-                gate: get(&p("ffn_gate.weight"))?,
-                up: get(&p("ffn_up.weight"))?,
-                down: get(&p("ffn_down.weight"))?,
+                ffn: match &cfg.moe {
+                    None => Ffn::Dense { gate: get(&p("ffn_gate.weight"))?, up: get(&p("ffn_up.weight"))?, down: get(&p("ffn_down.weight"))? },
+                    Some(m) => {
+                        let (gate, up) = match tensors.get(&p("ffn_gate_up_exps.weight")) {
+                            Some(t) => (None, t.clone()),
+                            None => (Some(get(&p("ffn_gate_exps.weight"))?), get(&p("ffn_up_exps.weight"))?),
+                        };
+                        let down = get(&p("ffn_down_exps.weight"))?;
+                        let router = get(&p("ffn_gate_inp.weight"))?;
+                        let ff = down.cols;
+                        let stack = if gate.is_some() { ff } else { 2 * ff };
+                        if router.rows != m.experts || down.rows != m.experts * e || up.rows != m.experts * stack || gate.as_ref().is_some_and(|g| g.rows != up.rows) {
+                            bail!("layer {l}'s experts do not match the model's {} of width {e}", m.experts);
+                        }
+                        let shared = match tensors.get(&p("ffn_up_shexp.weight")) {
+                            Some(up) => Some([get(&p("ffn_gate_inp_shexp.weight"))?, get(&p("ffn_gate_shexp.weight"))?, up.clone(), get(&p("ffn_down_shexp.weight"))?]),
+                            None => None,
+                        };
+                        Ffn::Moe(Experts { router, gate, up, down, ff, shared })
+                    }
+                },
             });
         }
         if let Some(d) = &cfg.delta {
@@ -392,9 +456,17 @@ impl Part {
                     },
                 },
                 ffn_norm: &b.ffn_norm,
-                gate: &b.gate,
-                up: &b.up,
-                down: &b.down,
+                ffn: match &b.ffn {
+                    Ffn::Dense { gate, up, down } => crate::gpu::FfnWeights::Dense { gate, up, down },
+                    Ffn::Moe(x) => crate::gpu::FfnWeights::Moe {
+                        router: &x.router,
+                        gate: x.gate.as_ref(),
+                        up: &x.up,
+                        down: &x.down,
+                        ff: x.ff,
+                        shared: x.shared.as_ref().map(|[w, g, u, d]| [w, g, u, d]),
+                    },
+                },
             })
             .collect();
         crate::gpu::Layers::new(g, cfg, &weights, head.map(|(n, o)| (n.as_slice(), o)), inv_freq, budget)
@@ -519,10 +591,10 @@ impl Part {
             x.iter_mut().zip(&o).for_each(|(a, b)| *a += b);
 
             let n = rms_norm(x, &b.ffn_norm, c.eps);
-            let g = b.gate.matmul(&n, rows);
-            let u = b.up.matmul(&n, rows);
-            let h: Vec<f32> = g.iter().zip(&u).map(|(g, u)| g / (1.0 + (-g).exp()) * u).collect();
-            let d = b.down.matmul(&h, rows);
+            let d = match &b.ffn {
+                Ffn::Dense { gate, up, down } => swiglu(gate, up, down, &n, rows),
+                Ffn::Moe(m) => self.experts(m, &n, rows),
+            };
             x.iter_mut().zip(&d).for_each(|(a, b)| *a += b);
         }
         kv.len = pos + rows;
@@ -530,6 +602,52 @@ impl Part {
         self.split_us[0].store((gpu_done - started).as_micros() as u64, Relaxed);
         self.split_us[1].store(gpu_done.elapsed().as_micros() as u64, Relaxed);
         Ok(())
+    }
+
+    /// A mixture of experts' output for `rows` normed inputs `n`: each row's chosen
+    /// experts, weighted, plus the shared expert. Rows that chose the same expert go
+    /// through it together, so its weights are read once for all of them.
+    fn experts(&self, m: &Experts, n: &[f32], rows: usize) -> Vec<f32> {
+        let c = &self.cfg;
+        let moe = c.moe.as_ref().expect("experts in a model with them");
+        let e = c.n_embd;
+        let logits = m.router.matmul(n, rows);
+        let mut by_expert: std::collections::BTreeMap<usize, Vec<(usize, f32)>> = Default::default();
+        for (r, row) in logits.chunks_exact(moe.experts).enumerate() {
+            for (ex, w) in route(row, moe.used, moe.scale) {
+                by_expert.entry(ex).or_default().push((r, w));
+            }
+        }
+        let mut out = vec![0.0; rows * e];
+        for (ex, users) in by_expert {
+            let xs: Vec<f32> = users.iter().flat_map(|&(r, _)| n[r * e..(r + 1) * e].iter().copied()).collect();
+            let k = users.len();
+            let ff = m.ff;
+            let h: Vec<f32> = match &m.gate {
+                Some(gate) => {
+                    let g = gate.matmul_span(&xs, k, ex * ff..(ex + 1) * ff);
+                    let u = m.up.matmul_span(&xs, k, ex * ff..(ex + 1) * ff);
+                    g.iter().zip(&u).map(|(g, u)| g / (1.0 + (-g).exp()) * u).collect()
+                }
+                None => {
+                    let gu = m.up.matmul_span(&xs, k, ex * 2 * ff..(ex + 1) * 2 * ff);
+                    gu.chunks_exact(2 * ff).flat_map(|r| r[..ff].iter().zip(&r[ff..]).map(|(g, u)| g / (1.0 + (-g).exp()) * u)).collect()
+                }
+            };
+            let d = m.down.matmul_span(&h, k, ex * e..(ex + 1) * e);
+            for (&(r, w), dr) in users.iter().zip(d.chunks_exact(e)) {
+                out[r * e..(r + 1) * e].iter_mut().zip(dr).for_each(|(o, v)| *o += w * v);
+            }
+        }
+        if let Some([w, gate, up, down]) = &m.shared {
+            let s = swiglu(gate, up, down, n, rows);
+            let scale = w.matmul(n, rows);
+            for ((o, s), g) in out.chunks_exact_mut(e).zip(s.chunks_exact(e)).zip(&scale) {
+                let g = 1.0 / (1.0 + (-g).exp());
+                o.iter_mut().zip(s).for_each(|(o, s)| *o += g * s);
+            }
+        }
+        out
     }
 
     /// An attention layer's output for `rows` normed inputs `n`, its keys and values added
@@ -670,6 +788,29 @@ impl Part {
         debug_assert_eq!(n.len(), rows * self.cfg.n_embd);
         Ok(out.matmul_rows(&n, rows, upto))
     }
+}
+
+/// SiLU(W_gate·n) ⊙ W_up·n through W_down, for `rows` rows.
+fn swiglu(gate: &QTensor, up: &QTensor, down: &QTensor, n: &[f32], rows: usize) -> Vec<f32> {
+    let g = gate.matmul(n, rows);
+    let u = up.matmul(n, rows);
+    let h: Vec<f32> = g.iter().zip(&u).map(|(g, u)| g / (1.0 + (-g).exp()) * u).collect();
+    down.matmul(&h, rows)
+}
+
+/// The `used` experts a row of router scores picks, with their weights: softmax over
+/// every expert, the likeliest `used` (the lower index first on a tie), weights divided
+/// by their sum (at least 2⁻¹⁴, as llama.cpp clamps it) and times `scale` unless 0 or 1.
+pub fn route(scores: &[f32], used: usize, scale: f32) -> Vec<(usize, f32)> {
+    let max = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let p: Vec<f32> = scores.iter().map(|s| (s - max).exp()).collect();
+    let total: f32 = p.iter().sum();
+    let mut order: Vec<usize> = (0..scores.len()).collect();
+    order.sort_by(|&a, &b| p[b].total_cmp(&p[a]).then(a.cmp(&b)));
+    order.truncate(used);
+    let picked: f32 = order.iter().map(|&i| p[i] / total).sum::<f32>().max(2f32.powi(-14));
+    let f = if scale != 0.0 && scale != 1.0 { scale } else { 1.0 };
+    order.into_iter().map(|i| (i, p[i] / total / picked * f)).collect()
 }
 
 fn add_bias(x: &mut [f32], bias: Option<&[f32]>) {
@@ -1042,6 +1183,73 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn routing_picks_the_likeliest_experts_and_renormalises() {
+        let picks = route(&[0.0, 2.0, 1.0, 2.0, -1.0], 2, 0.0);
+        // Experts 1 and 3 tie at the top: the lower index first, half the weight each.
+        assert_eq!(picks.iter().map(|p| p.0).collect::<Vec<_>>(), [1, 3]);
+        assert!(picks.iter().all(|p| (p.1 - 0.5).abs() < 1e-6));
+        let picks = route(&[3.0, 1.0, 0.0], 2, 2.5);
+        let (a, b) = ((3f32).exp(), (1f32).exp());
+        assert!((picks[0].1 - 2.5 * a / (a + b)).abs() < 1e-5 && (picks[1].1 - 2.5 * b / (a + b)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn experts_route_each_row_and_agree_across_layouts() {
+        let file = crate::fixtures::tiny_qwen35_moe(4, false);
+        let whole = load_all(&file, 0..4, true, true).without_gpu();
+        assert_eq!(whole.cfg.moe, Some(Moe { experts: 8, used: 2, scale: 0.0 }));
+        // Three rows through the experts at once (grouped by expert) against each row alone.
+        let Ffn::Moe(m) = &whole.blocks[1].ffn else { panic!("layer 1 has experts") };
+        let e = whole.cfg.n_embd;
+        let n: Vec<f32> = (0..3 * e).map(|i| ((i * 7 % 23) as f32 - 11.0) / 9.0).collect();
+        let together = whole.experts(m, &n, 3);
+        for r in 0..3 {
+            let alone = whole.experts(m, &n[r * e..(r + 1) * e], 1);
+            let err = alone.iter().zip(&together[r * e..(r + 1) * e]).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+            assert!(err < 1e-5, "row {r}: {err}");
+        }
+        // Batch against steps, a split against the whole, fused against separate weights.
+        let mut kv = [whole.new_kv()];
+        run(&[&whole], &mut kv, &[5, 9, 13, 2, 7], 0);
+        let stepped = run(&[&whole], &mut kv, &[40], 5);
+        let mut fresh = [whole.new_kv()];
+        let all = run(&[&whole], &mut fresh, &[5, 9, 13, 2, 7, 40], 0);
+        let v = whole.cfg.vocab;
+        let err = all[5 * v..].iter().zip(&stepped).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        assert!(err < 1e-4, "batch against steps: {err}");
+        let (a, b) = (load_all(&file, 0..2, true, false).without_gpu(), load_all(&file, 2..4, false, true).without_gpu());
+        let mut ks = [a.new_kv(), b.new_kv()];
+        assert_eq!(run(&[&a, &b], &mut ks, &[5, 9, 13, 2, 7, 40], 0), all);
+        let fused = load_all(&crate::fixtures::tiny_qwen35_moe(4, true), 0..4, true, true).without_gpu();
+        let mut kf = [fused.new_kv()];
+        assert_eq!(run(&[&fused], &mut kf, &[5, 9, 13, 2, 7, 40], 0), all);
+    }
+
+    #[test]
+    fn experts_on_the_gpu_compute_what_the_cpu_does() {
+        if crate::gpu::get().is_none() {
+            eprintln!("no GPU here: skipped");
+            return;
+        }
+        for fused in [false, true] {
+            let file = crate::fixtures::tiny_qwen35_moe(4, fused);
+            let gpu = load_all(&file, 0..4, true, true);
+            assert_eq!(gpu.gpu_layers(), (4, true));
+            let cpu = load_all(&file, 0..4, true, true).without_gpu();
+            let close = |a: &[f32], b: &[f32], what: &str| {
+                let err = a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0f32, f32::max);
+                let top = b.iter().fold(0f32, |m, v| m.max(v.abs()));
+                assert!(err <= 0.02 * (1.0 + top), "{what}: max error {err} against scores up to {top}");
+            };
+            let (mut kg, mut kc) = ([gpu.new_kv()], [cpu.new_kv()]);
+            close(&run(&[&gpu], &mut kg, &[5, 9, 13, 2, 7], 0), &run(&[&cpu], &mut kc, &[5, 9, 13, 2, 7], 0), "prompt");
+            for (i, t) in [40u32, 41].into_iter().enumerate() {
+                close(&run(&[&gpu], &mut kg, &[t], 5 + i), &run(&[&cpu], &mut kc, &[t], 5 + i), "step");
+            }
+        }
+    }
+
+    #[test]
     fn a_delta_net_step_follows_the_rule() {
         // One token, one head, through `delta_net`'s update against the rule written
         // plainly: S ← e^g S; S ← S + β k (v − Sᵀk)ᵀ; out = Sᵀq / √d, S[i][j] indexed as is.
@@ -1105,7 +1313,7 @@ pub(crate) mod tests {
 
     #[test]
     fn rope_rotates_pairs_by_position() {
-        let c = Config { arch: "llama".into(), n_embd: 4, n_layer: 1, n_head: 1, n_head_kv: 1, head_dim: 4, rope_dim: 4, rope_base: 10000.0, rope_neox: false, eps: 1e-5, vocab: 1, context: 8, delta: None };
+        let c = Config { arch: "llama".into(), n_embd: 4, n_layer: 1, n_head: 1, n_head_kv: 1, head_dim: 4, rope_dim: 4, rope_base: 10000.0, rope_neox: false, eps: 1e-5, vocab: 1, context: 8, delta: None, moe: None };
         let inv: Vec<f32> = (0..2).map(|i| 10000f32.powf(-2.0 * i as f32 / 4.0)).collect();
         let mut x = [1.0, 0.0, 1.0, 0.0];
         rope(&mut x, &c, 0, &inv);

@@ -41,6 +41,10 @@ pub struct Model {
     pub layers: u32,
     /// Weights of one transformer layer, as stored (quantization included).
     pub layer_bytes: u64,
+    /// Share of a layer's weights a token reads: below 1 for a mixture of experts, whose
+    /// tokens use a few experts each. 0 means 1 (every weight, as a dense layer).
+    #[serde(default)]
+    pub read: f64,
     /// Embeddings and output head: half on the first stage, half on the last.
     pub extra_bytes: u64,
     /// Width of the hidden state sent between stages, in values.
@@ -55,8 +59,9 @@ pub struct Model {
 
 const GB: u64 = 1 << 30;
 
-/// Models known by name: 4-bit quantized (Q4_K_M) GGUF files on Hugging Face. Sizes are
-/// for planning without a download; running a model reads its real header.
+/// Models known by name: 4-bit quantized (Q4_K_M, unless the name says otherwise) GGUF
+/// files on Hugging Face. Sizes are for planning without a download; running a model
+/// reads its real header.
 pub fn catalog() -> Vec<Model> {
     let hf = |path: &str| Some(format!("https://huggingface.co/{path}"));
     let m = |name: &str, layers: u32, total_gb: f64, extra_gb: f64, hidden: u32, url: Option<String>, draft: Option<&str>| Model {
@@ -67,6 +72,7 @@ pub fn catalog() -> Vec<Model> {
         hidden,
         url,
         draft: draft.map(String::from),
+        read: 0.0,
     };
     vec![
         // Qwen3.5 family (qwen35): mostly DeltaNet layers, so no draft model (their running
@@ -77,6 +83,11 @@ pub fn catalog() -> Vec<Model> {
         m("qwen3.5-9b", 32, 5.29, 1.3, 4096, hf("unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q4_K_M.gguf"), None),
         m("qwen3.6-27b", 64, 15.66, 1.7, 5120, hf("unsloth/Qwen3.6-27B-GGUF/resolve/main/Qwen3.6-27B-Q4_K_M.gguf"), None),
         m("qwen3.8-27b", 64, 15.43, 1.7, 5120, hf("unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-UD-Q4_K_M.gguf"), None),
+        // Qwen3.6 MoE (qwen35moe): 256 experts of which 8 a token, so a token reads about
+        // an eighth of each layer: 3B of its 35B weights.
+        Model { read: 0.13, ..m("qwen3.6-35b-a3b", 40, 20.61, 0.7, 2048, hf("unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"), None) },
+        // The same at 3 bits (Q3_K_M): 16 GB, for two devices that cannot hold 21.
+        Model { read: 0.13, ..m("qwen3.6-35b-a3b-q3", 40, 15.94, 0.6, 2048, hf("bartowski/Qwen_Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen_Qwen3.6-35B-A3B-Q3_K_M.gguf"), None) },
         m("qwen2.5-0.5b", 24, 0.46, 0.13, 896, hf("Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf"), None),
         m("llama-3.2-1b", 16, 0.75, 0.2, 2048, hf("bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf"), None),
         m("qwen2.5-1.5b", 28, 1.04, 0.2, 1536, hf("Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf"), Some("qwen2.5-0.5b")),
@@ -216,8 +227,15 @@ impl Plan {
     }
 }
 
+impl Model {
+    /// Bytes of a layer a token reads.
+    pub fn read_bytes(&self) -> f64 {
+        self.layer_bytes as f64 * if self.read > 0.0 { self.read } else { 1.0 }
+    }
+}
+
 fn layer_secs(model: &Model, d: &Device) -> f64 {
-    model.layer_bytes as f64 / (d.mem_bw * BANDWIDTH_EFFICIENCY).max(1.0)
+    model.read_bytes() / (d.mem_bw * BANDWIDTH_EFFICIENCY).max(1.0)
 }
 
 /// Seconds a stage of `n` layers on `d` takes per token: the layers its GPU holds at the
@@ -225,7 +243,7 @@ fn layer_secs(model: &Model, d: &Device) -> f64 {
 /// CPU's. Never less per layer as `n` grows, which the splits below rely on.
 pub fn stage_secs(model: &Model, d: &Device, n: u32) -> f64 {
     let on_gpu = if d.gpu_bw > 0.0 { (d.gpu_bytes / model.layer_bytes.max(1)).min(n as u64) as u32 } else { 0 };
-    let gpu_layer = model.layer_bytes as f64 / d.gpu_bw.max(1.0);
+    let gpu_layer = model.read_bytes() / d.gpu_bw.max(1.0);
     // A GPU slower than the CPU (never seen, but measured) is not used for more layers.
     on_gpu as f64 * gpu_layer.min(layer_secs(model, d)) + (n - on_gpu) as f64 * layer_secs(model, d)
 }
@@ -467,7 +485,7 @@ mod tests {
     use super::*;
 
     fn model(layers: u32) -> Model {
-        Model { name: "m".into(), layers, layer_bytes: GB, extra_bytes: 0, hidden: 8192, url: None, draft: None }
+        Model { name: "m".into(), layers, layer_bytes: GB, extra_bytes: 0, hidden: 8192, url: None, draft: None, read: 0.0 }
     }
 
     fn dev(name: &str, mem_gb: u64, bw_gbs: f64) -> Device {

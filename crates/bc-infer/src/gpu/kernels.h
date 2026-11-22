@@ -18,6 +18,7 @@
 #define T_Q5_0 6u
 #define T_Q5_1 7u
 #define T_Q8_0 8u
+#define T_Q3K 11u
 #define T_Q4K 12u
 #define T_Q5K 13u
 #define T_Q6K 14u
@@ -44,6 +45,23 @@ DEVFN void scale_min_k4(uint j, GLOBAL const uchar* q, PRIV float* sc, PRIV floa
         *sc = (float)((q[j + 4] & 15u) | ((q[j - 4] >> 6) << 4));
         *mn = (float)((q[j + 4] >> 4) | ((q[j] >> 6) << 4));
     }
+}
+
+// Q3_K's 6-bit scale i of 16 (quant.rs's q3_scale), and weight t of group sub (0..8) of a
+// block: two low bits from qs, the third from hmask (set means no -4).
+DEVFN int q3_scale(GLOBAL const uchar* sc, uint i) {
+    uint lo, hi;
+    if (i < 4u) { lo = sc[i] & 15u; hi = sc[8u + i] & 3u; }
+    else if (i < 8u) { lo = sc[i] & 15u; hi = (sc[i + 4u] >> 2) & 3u; }
+    else if (i < 12u) { lo = sc[i - 8u] >> 4; hi = (sc[i] >> 4) & 3u; }
+    else { lo = sc[i - 8u] >> 4; hi = (sc[i - 4u] >> 6) & 3u; }
+    return (int)(lo | (hi << 4)) - 32;
+}
+DEVFN float q3_value(GLOBAL const uchar* b, uint sub, uint t) {
+    // Not `half`: that names a type in Metal.
+    uint hb = sub / 4u, j = sub % 4u;
+    int q = (int)((b[32u + 32u * hb + t] >> (2u * j)) & 3u) - (((b[t] >> sub) & 1u) != 0u ? 0 : 4);
+    return (float)q;
 }
 
 // Weight `lane` (0..32) of group g of a stored row, one at a time: for the formats
@@ -79,6 +97,11 @@ DEVFN float weight(GLOBAL const uchar* row, uint ty, uint g, uint lane) {
         uint q = (b[(ty == T_Q4K ? 16u : 48u) + 32u * c + lane] >> (4u * hi)) & 15u;
         if (ty == T_Q5K && (b[16 + lane] & ((1u + hi) << (2u * c))) != 0u) q += 16u;
         return f16at(b, 0) * sc * (float)q - f16at(b, 2) * mn;
+    }
+    if (ty == T_Q3K) {
+        GLOBAL const uchar* b = row + (g / 8u) * 110u;
+        uint sub = g % 8u;
+        return f16at(b, 108) * (float)q3_scale(b + 96, 2u * sub + (lane < 16u ? 0u : 1u)) * q3_value(b, sub, lane);
     }
     if (ty == T_Q6K) {
         GLOBAL const uchar* b = row + (g / 8u) * 210u;
@@ -189,6 +212,15 @@ DEVFN void group4(GLOBAL const uchar* row, uint ty, uint g, PRIV float4* w) {
             uint lo = ql[2 * k] | ((uint)ql[2 * k + 1] << 16), h = qh[2 * k] | ((uint)qh[2 * k + 1] << 16);
             uint v = ((lo >> shift) & 0x0f0f0f0fu) | (((h >> (2u * qr)) & 0x03030303u) << 4);
             w[k] = scale4(bytes4(v, 32.0f), k < 4u ? d0 : d1);
+        }
+    } else if (ty == T_Q3K) {
+        GLOBAL const uchar* b = row + (g / 8u) * 110u;
+        uint sub = g % 8u;
+        float d = f16at(b, 108);
+        float d0 = d * (float)q3_scale(b + 96, 2u * sub), d1 = d * (float)q3_scale(b + 96, 2u * sub + 1u);
+        for (uint k = 0; k < 8u; k++) {
+            uint t = 4u * k;
+            w[k] = scale4(F4(q3_value(b, sub, t), q3_value(b, sub, t + 1u), q3_value(b, sub, t + 2u), q3_value(b, sub, t + 3u)), k < 4u ? d0 : d1);
         }
     } else {
         for (uint k = 0; k < 8u; k++) w[k] = four(row, ty, g, k);
@@ -414,3 +446,56 @@ DEVFN void split_qgate(GLOBAL const float* full, GLOBAL float* q, GLOBAL float* 
 }
 
 DEVFN void sigmoid_mul(GLOBAL float* x, GLOBAL const float* g, uint n, uint i) { if (i < n) x[i] /= 1.0f + EXP(-g[i]); }
+
+// Mixture of experts.
+
+// Row r's experts: softmax over the E router scores, the k likeliest (the lower index on a
+// tie), weights divided by their sum (at least 2^-14) and times `scale` unless 0 or 1.
+DEVFN void route(GLOBAL const float* logits, GLOBAL uint* ids, GLOBAL float* wts, uint E, uint k, float scale, uint rows, uint r) {
+    if (r >= rows) return;
+    GLOBAL const float* l = logits + (ulong)r * E;
+    float mx = NEG_INF;
+    for (uint e = 0; e < E; e++) mx = l[e] > mx ? l[e] : mx;
+    float total = 0.0f;
+    for (uint e = 0; e < E; e++) total += EXP(l[e] - mx);
+    float picked = 0.0f;
+    for (uint s = 0; s < k; s++) {
+        uint best = 0;
+        float bv = NEG_INF;
+        for (uint e = 0; e < E; e++) {
+            bool taken = false;
+            for (uint t = 0; t < s; t++) taken = taken || ids[r * k + t] == e;
+            float p = EXP(l[e] - mx);
+            if (!taken && p > bv) { bv = p; best = e; }
+        }
+        ids[r * k + s] = best;
+        wts[r * k + s] = bv / total;
+        picked += bv / total;
+    }
+    picked = picked > 6.103515625e-5f ? picked : 6.103515625e-5f;
+    float f = (scale != 0.0f && scale != 1.0f) ? scale : 1.0f;
+    for (uint s = 0; s < k; s++) wts[r * k + s] = wts[r * k + s] / picked * f;
+}
+
+// One output row of a product with the expert chosen for slot y (ids[y]): weight rows
+// ids[y]·estride + roff .. + rows, input row y / xdiv, output row y.
+DEVFN void matmul_id(GLOBAL const uchar* w, GLOBAL const float* x, GLOBAL float* out, GLOBAL const uint* ids, uint ty, uint rows, uint cols, uint rb,
+                     uint xdiv, uint estride, uint roff, uint r, uint y, uint lane) {
+    GLOBAL const uchar* we = w + (ulong)(ids[y] * estride + roff) * rb;
+    matmul(we, x + (ulong)(y / xdiv) * cols, out + (ulong)y * rows, ty, rows, cols, 1u, rb, r, 0u, lane);
+}
+
+// x[t][c] += Σ_s wts[t·k + s] · d[t·k + s][c], for n = rows · e values.
+DEVFN void moe_sum(GLOBAL float* x, GLOBAL const float* d, GLOBAL const float* wts, uint k, uint e, uint n, uint i) {
+    if (i >= n) return;
+    uint t = i / e, c = i % e;
+    float s = 0.0f;
+    for (uint j = 0; j < k; j++) s += wts[t * k + j] * d[(ulong)(t * k + j) * e + c];
+    x[i] += s;
+}
+
+// x[t][c] += σ(g[t]) · y[t][c]: the shared expert, scaled by its gate.
+DEVFN void gated_add(GLOBAL float* x, GLOBAL const float* y, GLOBAL const float* g, uint e, uint n, uint i) {
+    if (i >= n) return;
+    x[i] += y[i] / (1.0f + EXP(-g[i / e]));
+}
