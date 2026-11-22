@@ -220,7 +220,7 @@ impl Gpu {
     /// The GPU's product against the CPU's on every weight format, and its measured speed.
     fn self_check(&self) -> Result<()> {
         use crate::quant::GgmlType::*;
-        for ty in [F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4K, Q5K, Q6K] {
+        for ty in [F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q3K, Q4K, Q5K, Q6K] {
             let (rows, cols) = (37, 512);
             let t = Arc::new(crate::fixtures::random_tensor(ty, rows, cols, 7));
             // One row and a batch run different kernels.

@@ -59,8 +59,9 @@ pub struct Model {
 
 const GB: u64 = 1 << 30;
 
-/// Models known by name: 4-bit quantized (Q4_K_M) GGUF files on Hugging Face. Sizes are
-/// for planning without a download; running a model reads its real header.
+/// Models known by name: 4-bit quantized (Q4_K_M, unless the name says otherwise) GGUF
+/// files on Hugging Face. Sizes are for planning without a download; running a model
+/// reads its real header.
 pub fn catalog() -> Vec<Model> {
     let hf = |path: &str| Some(format!("https://huggingface.co/{path}"));
     let m = |name: &str, layers: u32, total_gb: f64, extra_gb: f64, hidden: u32, url: Option<String>, draft: Option<&str>| Model {
@@ -85,6 +86,8 @@ pub fn catalog() -> Vec<Model> {
         // Qwen3.6 MoE (qwen35moe): 256 experts of which 8 a token, so a token reads about
         // an eighth of each layer: 3B of its 35B weights.
         Model { read: 0.13, ..m("qwen3.6-35b-a3b", 40, 20.61, 0.7, 2048, hf("unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"), None) },
+        // The same at 3 bits (Q3_K_M): 16 GB, for two devices that cannot hold 21.
+        Model { read: 0.13, ..m("qwen3.6-35b-a3b-q3", 40, 15.94, 0.6, 2048, hf("bartowski/Qwen_Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen_Qwen3.6-35B-A3B-Q3_K_M.gguf"), None) },
         m("qwen2.5-0.5b", 24, 0.46, 0.13, 896, hf("Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf"), None),
         m("llama-3.2-1b", 16, 0.75, 0.2, 2048, hf("bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf"), None),
         m("qwen2.5-1.5b", 28, 1.04, 0.2, 1536, hf("Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf"), Some("qwen2.5-0.5b")),

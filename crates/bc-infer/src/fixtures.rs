@@ -208,6 +208,7 @@ pub fn random_tensor(ty: crate::quant::GgmlType, rows: usize, cols: usize, seed:
             F16 => blk.copy_from_slice(&f32_to_f16(((next() % 2001) as f32 - 1000.0) / 1000.0).to_le_bytes()),
             BF16 => blk.copy_from_slice(&(((((next() % 2001) as f32 - 1000.0) / 1000.0).to_bits() >> 16) as u16).to_le_bytes()),
             Q6K => blk[208..210].copy_from_slice(&small(&mut next)),
+            Q3K => blk[108..110].copy_from_slice(&small(&mut next)),
             _ => {
                 blk[0..2].copy_from_slice(&small(&mut next));
                 if matches!(ty, Q4_1 | Q5_1 | Q4K | Q5K) {

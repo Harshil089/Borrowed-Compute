@@ -25,6 +25,7 @@ pub enum GgmlType {
     Q5_0,
     Q5_1,
     Q8_0,
+    Q3K,
     Q4K,
     Q5K,
     Q6K,
@@ -41,6 +42,7 @@ impl GgmlType {
             GgmlType::Q5_0 => 6,
             GgmlType::Q5_1 => 7,
             GgmlType::Q8_0 => 8,
+            GgmlType::Q3K => 11,
             GgmlType::Q4K => 12,
             GgmlType::Q5K => 13,
             GgmlType::Q6K => 14,
@@ -57,6 +59,7 @@ impl GgmlType {
             6 => GgmlType::Q5_0,
             7 => GgmlType::Q5_1,
             8 => GgmlType::Q8_0,
+            11 => GgmlType::Q3K,
             12 => GgmlType::Q4K,
             13 => GgmlType::Q5K,
             14 => GgmlType::Q6K,
@@ -75,6 +78,7 @@ impl GgmlType {
             GgmlType::Q5_0 => (32, 22),
             GgmlType::Q5_1 => (32, 24),
             GgmlType::Q8_0 => (32, 34),
+            GgmlType::Q3K => (256, 110),
             GgmlType::Q4K => (256, 144),
             GgmlType::Q5K => (256, 176),
             GgmlType::Q6K => (256, 210),
@@ -218,6 +222,16 @@ pub fn dequant_block(ty: GgmlType, src: &[u8], dst: &mut [f32]) {
                 }
             }
         }
+        GgmlType::Q3K => {
+            // 16 groups of 16: two low bits in qs, the third in hmask (set means no −4),
+            // a 6-bit scale each (centred on 32), times d (ggml's dequantize_row_q3_K).
+            let (hm, qs, d) = (&src[0..32], &src[32..96], f16_at(src, 108));
+            for (i, out) in dst[..256].iter_mut().enumerate() {
+                let (half, j, l) = (i / 128, (i % 128) / 32, i % 32);
+                let q = ((qs[32 * half + l] >> (2 * j)) & 3) as i32 - if hm[l] & (1 << (4 * half + j)) != 0 { 0 } else { 4 };
+                *out = d * (q3_scale(&src[96..108], i / 16) - 32) as f32 * q as f32;
+            }
+        }
         GgmlType::Q6K => {
             let ql = &src[0..128];
             let qh = &src[128..192];
@@ -240,6 +254,18 @@ pub fn dequant_block(ty: GgmlType, src: &[u8], dst: &mut [f32]) {
             }
         }
     }
+}
+
+/// Q3_K's 6-bit scale `i` of 16, packed in 12 bytes: low four bits in bytes 0..8, high
+/// two in bytes 8..12.
+fn q3_scale(sc: &[u8], i: usize) -> i32 {
+    let (lo, hi) = match i {
+        0..4 => (sc[i] & 15, sc[8 + i] & 3),
+        4..8 => (sc[i] & 15, (sc[i + 4] >> 2) & 3),
+        8..12 => (sc[i - 8] >> 4, (sc[i] >> 4) & 3),
+        _ => (sc[i - 8] >> 4, (sc[i - 4] >> 6) & 3),
+    };
+    (lo | (hi << 4)) as i32
 }
 
 /// A weight matrix as stored: `rows` rows of `cols` weights, each row whole blocks.
@@ -472,7 +498,7 @@ struct Unpacked {
 }
 
 fn unpackable(ty: GgmlType) -> bool {
-    matches!(ty, GgmlType::Q4_0 | GgmlType::Q4_1 | GgmlType::Q5_0 | GgmlType::Q5_1 | GgmlType::Q8_0 | GgmlType::Q4K | GgmlType::Q5K | GgmlType::Q6K)
+    matches!(ty, GgmlType::Q4_0 | GgmlType::Q4_1 | GgmlType::Q5_0 | GgmlType::Q5_1 | GgmlType::Q8_0 | GgmlType::Q3K | GgmlType::Q4K | GgmlType::Q5K | GgmlType::Q6K)
 }
 
 impl Unpacked {
@@ -483,7 +509,7 @@ impl Unpacked {
     /// Unpacks one block into the start of the buffers.
     fn unpack_block(&mut self, ty: GgmlType, blk: &[u8]) {
         let n = ty.block().0;
-        self.group = if ty == GgmlType::Q6K { 16 } else { 32 };
+        self.group = if matches!(ty, GgmlType::Q3K | GgmlType::Q6K) { 16 } else { 32 };
         {
             let q = &mut self.q[..n];
             let (s, o) = (&mut self.s[..n / self.group], &mut self.o[..n / self.group]);
@@ -539,6 +565,17 @@ impl Unpacked {
                         o[2 * g] = -dmin * m1;
                         s[2 * g + 1] = d * sc2;
                         o[2 * g + 1] = -dmin * m2;
+                    }
+                }
+                GgmlType::Q3K => {
+                    let (hm, qs, d) = (&blk[0..32], &blk[32..96], f16_at(blk, 108));
+                    for (i, qi) in q.iter_mut().enumerate() {
+                        let (half, j, l) = (i / 128, (i % 128) / 32, i % 32);
+                        *qi = ((qs[32 * half + l] >> (2 * j)) & 3) as i8 - if hm[l] & (1 << (4 * half + j)) != 0 { 0 } else { 4 };
+                    }
+                    for (k, (s, o)) in s.iter_mut().zip(o.iter_mut()).enumerate() {
+                        *s = d * (q3_scale(&blk[96..108], k) - 32) as f32;
+                        *o = 0.0;
                     }
                 }
                 GgmlType::Q6K => {
@@ -758,6 +795,44 @@ mod tests {
 mod kernel_tests {
     use super::*;
 
+    /// Q3_K against ggml's dequantize_row_q3_K, transcribed loop for loop.
+    #[test]
+    fn q3k_dequantizes_like_ggml() {
+        let blk: Vec<u8> = (0..110u32).map(|i| (i * 37 + 11) as u8).collect();
+        let mut blk = blk;
+        blk[108..110].copy_from_slice(&f32_to_f16(0.25).to_le_bytes());
+        let mut got = [0f32; 256];
+        dequant_block(GgmlType::Q3K, &blk, &mut got);
+        let mut aux = [0u32; 4];
+        for (k, a) in aux.iter_mut().take(3).enumerate() {
+            *a = u32::from_le_bytes(blk[96 + 4 * k..100 + 4 * k].try_into().unwrap());
+        }
+        let (k1, k2, tmp) = (0x03030303u32, 0x0f0f0f0fu32, aux[2]);
+        aux[2] = ((aux[0] >> 4) & k2) | (((tmp >> 4) & k1) << 4);
+        aux[3] = ((aux[1] >> 4) & k2) | (((tmp >> 6) & k1) << 4);
+        aux[0] = (aux[0] & k2) | ((tmp & k1) << 4);
+        aux[1] = (aux[1] & k2) | (((tmp >> 2) & k1) << 4);
+        let scales: Vec<i8> = aux.iter().flat_map(|a| a.to_le_bytes()).map(|b| b as i8).collect();
+        let (mut want, mut is, mut m, mut q) = (Vec::new(), 0, 1u8, 32usize);
+        for _ in 0..2 {
+            let mut shift = 0;
+            for _ in 0..4 {
+                for half in [0, 16] {
+                    let dl = 0.25 * (scales[is] as i32 - 32) as f32;
+                    is += 1;
+                    for l in 0..16 {
+                        let v = ((blk[q + l + half] >> shift) & 3) as i32 - if blk[l + half] & m != 0 { 0 } else { 4 };
+                        want.push(dl * v as f32);
+                    }
+                }
+                shift += 2;
+                m <<= 1;
+            }
+            q += 32;
+        }
+        assert_eq!(&got[..], &want[..]);
+    }
+
     /// Every integer kernel against dequantize-then-dot, on random blocks.
     #[test]
     fn integer_kernels_match_dequantized_products() {
@@ -768,13 +843,13 @@ mod kernel_tests {
             seed ^= seed << 17;
             (seed >> 24) as u8
         };
-        for ty in [GgmlType::Q4_0, GgmlType::Q5_0, GgmlType::Q8_0, GgmlType::Q4K, GgmlType::Q5K, GgmlType::Q6K] {
+        for ty in [GgmlType::Q4_0, GgmlType::Q5_0, GgmlType::Q8_0, GgmlType::Q3K, GgmlType::Q4K, GgmlType::Q5K, GgmlType::Q6K] {
             let (n, b) = ty.block();
             let cols = 512;
             let mut row: Vec<u8> = (0..cols / n * b).map(|_| byte()).collect();
             // Keep scales finite and modest: rewrite each block's f16 fields.
             for blk in row.chunks_exact_mut(b) {
-                let at = if ty == GgmlType::Q6K { vec![208] } else if matches!(ty, GgmlType::Q4K | GgmlType::Q5K) { vec![0, 2] } else { vec![0] };
+                let at = if ty == GgmlType::Q6K { vec![208] } else if ty == GgmlType::Q3K { vec![108] } else if matches!(ty, GgmlType::Q4K | GgmlType::Q5K) { vec![0, 2] } else { vec![0] };
                 for i in at {
                     blk[i..i + 2].copy_from_slice(&f32_to_f16(0.01 + (byte() as f32) / 2000.0).to_le_bytes());
                 }
