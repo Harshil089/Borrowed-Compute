@@ -98,3 +98,9 @@ extern "C" __global__ void k_delta(const float* x, const float* ba, uint ba_w, c
 extern "C" __global__ void k_silu_gate(float* x, const float* z, uint zw, uint zoff, uint vd, uint n) { silu_gate(x, z, zw, zoff, vd, n, IX); }
 extern "C" __global__ void k_split_qgate(const float* full, float* q, float* g, uint hd, uint n) { split_qgate(full, q, g, hd, n, IX); }
 extern "C" __global__ void k_sigmoid_mul(float* x, const float* g, uint n) { sigmoid_mul(x, g, n, IX); }
+extern "C" __global__ void k_route(const float* logits, uint* ids, float* wts, uint E, uint k, float scale, uint rows) { route(logits, ids, wts, E, k, scale, rows, IX); }
+extern "C" __global__ void k_matmul_id(const uchar* w, const float* x, float* out, const uint* ids, uint ty, uint rows, uint cols, uint rb, uint xdiv, uint estride, uint roff) {
+    matmul_id(w, x, out, ids, ty, rows, cols, rb, xdiv, estride, roff, BX * ROWS_PER_GROUP + TX / 32, BY, TX % 32);
+}
+extern "C" __global__ void k_moe_sum(float* x, const float* d, const float* wts, uint k, uint e, uint n) { moe_sum(x, d, wts, k, e, n, IX); }
+extern "C" __global__ void k_gated_add(float* x, const float* y, const float* g, uint e, uint n) { gated_add(x, y, g, e, n, IX); }

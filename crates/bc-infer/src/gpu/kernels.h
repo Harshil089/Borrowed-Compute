@@ -414,3 +414,56 @@ DEVFN void split_qgate(GLOBAL const float* full, GLOBAL float* q, GLOBAL float* 
 }
 
 DEVFN void sigmoid_mul(GLOBAL float* x, GLOBAL const float* g, uint n, uint i) { if (i < n) x[i] /= 1.0f + EXP(-g[i]); }
+
+// Mixture of experts.
+
+// Row r's experts: softmax over the E router scores, the k likeliest (the lower index on a
+// tie), weights divided by their sum (at least 2^-14) and times `scale` unless 0 or 1.
+DEVFN void route(GLOBAL const float* logits, GLOBAL uint* ids, GLOBAL float* wts, uint E, uint k, float scale, uint rows, uint r) {
+    if (r >= rows) return;
+    GLOBAL const float* l = logits + (ulong)r * E;
+    float mx = NEG_INF;
+    for (uint e = 0; e < E; e++) mx = l[e] > mx ? l[e] : mx;
+    float total = 0.0f;
+    for (uint e = 0; e < E; e++) total += EXP(l[e] - mx);
+    float picked = 0.0f;
+    for (uint s = 0; s < k; s++) {
+        uint best = 0;
+        float bv = NEG_INF;
+        for (uint e = 0; e < E; e++) {
+            bool taken = false;
+            for (uint t = 0; t < s; t++) taken = taken || ids[r * k + t] == e;
+            float p = EXP(l[e] - mx);
+            if (!taken && p > bv) { bv = p; best = e; }
+        }
+        ids[r * k + s] = best;
+        wts[r * k + s] = bv / total;
+        picked += bv / total;
+    }
+    picked = picked > 6.103515625e-5f ? picked : 6.103515625e-5f;
+    float f = (scale != 0.0f && scale != 1.0f) ? scale : 1.0f;
+    for (uint s = 0; s < k; s++) wts[r * k + s] = wts[r * k + s] / picked * f;
+}
+
+// One output row of a product with the expert chosen for slot y (ids[y]): weight rows
+// ids[y]·estride + roff .. + rows, input row y / xdiv, output row y.
+DEVFN void matmul_id(GLOBAL const uchar* w, GLOBAL const float* x, GLOBAL float* out, GLOBAL const uint* ids, uint ty, uint rows, uint cols, uint rb,
+                     uint xdiv, uint estride, uint roff, uint r, uint y, uint lane) {
+    GLOBAL const uchar* we = w + (ulong)(ids[y] * estride + roff) * rb;
+    matmul(we, x + (ulong)(y / xdiv) * cols, out + (ulong)y * rows, ty, rows, cols, 1u, rb, r, 0u, lane);
+}
+
+// x[t][c] += Σ_s wts[t·k + s] · d[t·k + s][c], for n = rows · e values.
+DEVFN void moe_sum(GLOBAL float* x, GLOBAL const float* d, GLOBAL const float* wts, uint k, uint e, uint n, uint i) {
+    if (i >= n) return;
+    uint t = i / e, c = i % e;
+    float s = 0.0f;
+    for (uint j = 0; j < k; j++) s += wts[t * k + j] * d[(ulong)(t * k + j) * e + c];
+    x[i] += s;
+}
+
+// x[t][c] += σ(g[t]) · y[t][c]: the shared expert, scaled by its gate.
+DEVFN void gated_add(GLOBAL float* x, GLOBAL const float* y, GLOBAL const float* g, uint e, uint n, uint i) {
+    if (i >= n) return;
+    x[i] += y[i] / (1.0f + EXP(-g[i / e]));
+}

@@ -63,6 +63,17 @@ pub fn tiny_model(layers: u32, neox: bool) -> Vec<u8> {
 /// the others gated DeltaNet. `fused` stores q, k, v and z as one matrix and β with α as
 /// another, as newer conversions do; the weights are the same either way.
 pub fn tiny_qwen35(layers: u32, fused: bool) -> Vec<u8> {
+    qwen35_like(layers, fused, false)
+}
+
+/// [`tiny_qwen35`] with a mixture of 8 experts (2 a token, 32 wide) and a shared expert in
+/// every layer (`qwen35moe`); `fused` also stacks each expert's gate and up together.
+pub fn tiny_qwen35_moe(layers: u32, fused: bool) -> Vec<u8> {
+    qwen35_like(layers, fused, true)
+}
+
+fn qwen35_like(layers: u32, fused: bool, moe: bool) -> Vec<u8> {
+    let (experts, used, ef) = (8u64, 2u32, 32u64);
     // Width 64; attention: 4 heads of 16, 2 key/value heads, a quarter of each rotated;
     // DeltaNet: 2 key heads and 4 value heads of 16, a convolution of 4 taps.
     let (d, ff, vocab, heads, kv_heads, hd) = (64u64, 128u64, 96u64, 4u64, 2u64, 16u64);
@@ -114,17 +125,37 @@ pub fn tiny_qwen35(layers: u32, fused: bool) -> Vec<u8> {
             t.push((p("attn_q_norm.weight"), vec![hd], 0, f32b(&ones(rnd(hd, 0.2)))));
             t.push((p("attn_k_norm.weight"), vec![hd], 0, f32b(&ones(rnd(hd, 0.2)))));
         }
-        t.push((p("ffn_gate.weight"), vec![d, ff], 8, q8(&rnd(d * ff, 0.15))));
-        t.push((p("ffn_up.weight"), vec![d, ff], 8, q8(&rnd(d * ff, 0.15))));
-        t.push((p("ffn_down.weight"), vec![ff, d], 8, q8(&rnd(ff * d, 0.15))));
+        if moe {
+            t.push((p("ffn_gate_inp.weight"), vec![d, experts], 8, q8(&rnd(d * experts, 0.5))));
+            let (gate, up) = (rnd(d * ef * experts, 0.15), rnd(d * ef * experts, 0.15));
+            if fused {
+                // Each expert's gate rows, then its up rows.
+                let per = (d * ef) as usize;
+                let both: Vec<f32> = (0..experts as usize).flat_map(|x| gate[x * per..(x + 1) * per].iter().chain(&up[x * per..(x + 1) * per]).copied().collect::<Vec<_>>()).collect();
+                t.push((p("ffn_gate_up_exps.weight"), vec![d, 2 * ef, experts], 8, q8(&both)));
+            } else {
+                t.push((p("ffn_gate_exps.weight"), vec![d, ef, experts], 8, q8(&gate)));
+                t.push((p("ffn_up_exps.weight"), vec![d, ef, experts], 8, q8(&up)));
+            }
+            t.push((p("ffn_down_exps.weight"), vec![ef, d, experts], 8, q8(&rnd(ef * d * experts, 0.15))));
+            t.push((p("ffn_gate_inp_shexp.weight"), vec![d], 0, f32b(&rnd(d, 0.3))));
+            t.push((p("ffn_gate_shexp.weight"), vec![d, ef], 8, q8(&rnd(d * ef, 0.15))));
+            t.push((p("ffn_up_shexp.weight"), vec![d, ef], 8, q8(&rnd(d * ef, 0.15))));
+            t.push((p("ffn_down_shexp.weight"), vec![ef, d], 8, q8(&rnd(ef * d, 0.15))));
+        } else {
+            t.push((p("ffn_gate.weight"), vec![d, ff], 8, q8(&rnd(d * ff, 0.15))));
+            t.push((p("ffn_up.weight"), vec![d, ff], 8, q8(&rnd(d * ff, 0.15))));
+            t.push((p("ffn_down.weight"), vec![ff, d], 8, q8(&rnd(ff * d, 0.15))));
+        }
     }
     t.push(("output_norm.weight".into(), vec![d], 0, f32b(&vec![1.0; d as usize])));
     t.push(("output.weight".into(), vec![d, vocab], 8, q8(&rnd(d * vocab, 0.3))));
     let mut tokens: Vec<String> = vec!["<unk>".into(), "<s>".into(), "</s>".into()];
     tokens.extend((0..(vocab as usize - 3)).map(|i| char::from(b' ' + (i % 95) as u8).to_string()));
-    let k = |s: &str| format!("qwen35.{s}");
-    let meta = vec![
-        ("general.architecture".to_string(), Meta::Str("qwen35".into())),
+    let arch = if moe { "qwen35moe" } else { "qwen35" };
+    let k = |s: &str| format!("{arch}.{s}");
+    let mut meta = vec![
+        ("general.architecture".to_string(), Meta::Str(arch.into())),
         (k("embedding_length"), Meta::U32(d as u32)),
         (k("block_count"), Meta::U32(layers)),
         (k("attention.head_count"), Meta::U32(heads as u32)),
@@ -146,6 +177,11 @@ pub fn tiny_qwen35(layers: u32, fused: bool) -> Vec<u8> {
         ("tokenizer.ggml.bos_token_id".into(), Meta::U32(1)),
         ("tokenizer.ggml.eos_token_id".into(), Meta::U32(2)),
     ];
+    if moe {
+        meta.push((k("expert_count"), Meta::U32(experts as u32)));
+        meta.push((k("expert_used_count"), Meta::U32(used)));
+        meta.push((k("expert_feed_forward_length"), Meta::U32(ef as u32)));
+    }
     let meta: Vec<(&str, Meta)> = meta.into_iter().map(|(k, v)| (&*Box::leak(k.into_boxed_str()), v)).collect();
     let t: Vec<(&str, Vec<u64>, u32, Vec<u8>)> = t.iter().map(|(n, d, ty, b)| (n.as_str(), d.clone(), *ty, b.clone())).collect();
     gguf(&meta, &t)

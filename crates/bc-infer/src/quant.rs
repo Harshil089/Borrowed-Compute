@@ -374,7 +374,14 @@ impl QTensor {
 
     /// [`QTensor::matmul`] against the first `upto` weight rows only: `out` is n×upto.
     pub fn matmul_rows(&self, x: &[f32], n: usize, upto: usize) -> Vec<f32> {
-        let total = upto.min(self.rows);
+        self.matmul_span(x, n, 0..upto)
+    }
+
+    /// [`QTensor::matmul`] against weight rows `span` only (one expert of a stack of
+    /// them): `out` is n×span.len().
+    pub fn matmul_span(&self, x: &[f32], n: usize, span: std::ops::Range<usize>) -> Vec<f32> {
+        let first = span.start.min(self.rows);
+        let total = span.end.min(self.rows).saturating_sub(first);
         debug_assert_eq!(x.len(), n * self.cols);
         let acts: Vec<Q8Row> = (0..n).map(|i| Q8Row::new(&x[i * self.cols..(i + 1) * self.cols])).collect();
         // Pieces of at least PARALLEL_MIN weight-uses, several per thread for big products,
@@ -385,7 +392,7 @@ impl QTensor {
         let slots: Vec<std::sync::Mutex<Vec<f32>>> = (0..chunks).map(|_| Default::default()).collect();
         let integer = unpackable(self.ty);
         crate::pool::run(chunks, &|t| {
-            let rows = (t * per).min(total)..((t + 1) * per).min(total);
+            let rows = first + (t * per).min(total)..first + ((t + 1) * per).min(total);
             let mut part = vec![0.0f32; n * rows.len()];
             let mut buf = Vec::new();
             let (bn, bb) = self.ty.block();
