@@ -1,5 +1,6 @@
 //! Client side of a job: pack the project, send it, stream the output back.
 
+pub mod agent;
 pub mod autofix;
 pub mod detect;
 pub mod flows;

@@ -31,6 +31,7 @@
     <symbol id="i-users" viewBox="0 0 16 16"><circle cx="6" cy="5.5" r="2.5"/><path d="M1.5 13.5c.4-2.4 2.2-3.8 4.5-3.8s4.1 1.4 4.5 3.8M10.5 3.2a2.4 2.4 0 0 1 0 4.6M12 9.9c1.4.5 2.3 1.7 2.5 3.6"/></symbol>
     <symbol id="i-gear" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.8v1.6M8 12.6v1.6M14.2 8h-1.6M3.4 8H1.8M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1M12.4 12.4l-1.1-1.1M4.7 4.7 3.6 3.6"/></symbol>
     <symbol id="i-mesh" viewBox="0 0 16 16"><circle cx="3.5" cy="4" r="1.75"/><circle cx="12.5" cy="4" r="1.75"/><circle cx="8" cy="12" r="1.75"/><path d="M5.25 4h5.5M4.4 5.5l2.7 5M11.6 5.5l-2.7 5"/></symbol>
+    <symbol id="i-agent" viewBox="0 0 16 16"><path d="M3 4.5 6.5 8 3 11.5M8.5 11.5H13"/></symbol>
     <symbol id="i-sidebar" viewBox="0 0 16 16"><rect x="1.75" y="2.75" width="12.5" height="10.5" rx="2"/><path d="M6 2.75v10.5"/></symbol>
     <symbol id="i-out" viewBox="0 0 16 16"><path d="M6 13.5H3.5a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1H6M10.5 11 13.5 8l-3-3M13.5 8H6"/></symbol>
   </svg>
@@ -92,6 +93,7 @@
         </div>
         <div id="macs" class="macs"></div>
         <button class="nav-item" data-nav="mesh" data-title="Mesh"><svg class="icon"><use href="#i-mesh"/></svg>Mesh<span id="mesh-live" class="count hidden">On</span></button>
+        <button class="nav-item" data-nav="agent" data-title="Agent"><svg class="icon"><use href="#i-agent"/></svg>Agent<span id="agent-live" class="count hidden">Working</span></button>
       </div>
 
       <div id="nearby-box" class="side-section hidden">
@@ -349,17 +351,41 @@
           <h2 class="heading">Your devices</h2>
           <div id="mesh-devices" class="table card"><div class="board-empty">Measure your devices to see each link and how much memory each can give.</div></div>
         </section>
-        <section id="mesh-try" class="block hidden">
-          <h2 class="heading">Try it</h2>
-          <div class="card mesh-chat">
-            <form id="mesh-chat-form" class="invite-form">
-              <input id="mesh-prompt" type="text" placeholder="Ask the model something" autocomplete="off" aria-label="Message">
-              <button id="mesh-send" type="submit" class="primary">Send</button>
+      </div>
+
+      <div class="page hidden" data-page="agent">
+        <div id="agent-nomodel" class="banner warn hidden">No model is running. <button id="agent-to-mesh" class="link">Start one on the Mesh page</button>; qwen3-8b with its draft is the fastest for tool use.</div>
+        <div class="agent">
+          <aside class="agent-side card">
+            <button id="agent-new"><svg class="icon"><use href="#i-plus"/></svg>New conversation</button>
+            <div id="agent-list" class="agent-list"></div>
+            <button id="agent-memory-open" class="link">Memory</button>
+          </aside>
+          <section id="agent-chat" class="agent-main card">
+            <div class="agent-head">
+              <h2 id="agent-title" class="heading">New conversation</h2>
+              <button id="agent-folder" class="agent-folder" title="The folder its file tools and commands work in"><svg class="icon"><use href="#i-folder"/></svg><span id="agent-folder-text">Choose a folder</span></button>
+            </div>
+            <div id="agent-log" class="agent-log selectable" aria-live="polite"></div>
+            <form id="agent-form" class="agent-compose">
+              <textarea id="agent-input" rows="2" placeholder="Ask something, or give it a task in the folder" aria-label="Message"></textarea>
+              <div class="agent-compose-foot">
+                <label class="check" title="Lets the model reason before it answers: better plans, slower steps"><input id="agent-think" type="checkbox"><span>Think first</span></label>
+                <label class="check" title="Changes files, runs commands and reads the web without asking"><input id="agent-auto" type="checkbox"><span>Don't ask</span></label>
+                <span class="agent-spacer"></span>
+                <button id="agent-stop" type="button" class="danger hidden">Stop</button>
+                <button id="agent-send" type="submit" class="primary">Send</button>
+              </div>
+              <p id="agent-stats" class="hint agent-stats"></p>
             </form>
-            <div id="mesh-answer" class="mesh-answer hidden"></div>
-            <p id="mesh-stats" class="muted"></p>
-          </div>
-        </section>
+          </section>
+          <section id="agent-memory" class="agent-main card hidden">
+            <div class="agent-head"><h2 class="heading">Memory</h2><button id="agent-memory-close" class="link">Done</button></div>
+            <p class="hint">Notes the agent keeps with remember go into every conversation. Conversations stay on this computer, and the agent searches them with recall.</p>
+            <textarea id="agent-notes" rows="10" aria-label="Notes"></textarea>
+            <div class="row"><button id="agent-notes-save" class="primary">Save notes</button><span id="agent-notes-msg" class="hint"></span><button id="agent-forget" class="danger agent-forget">Delete all conversations</button></div>
+          </section>
+        </div>
       </div>
 
       <!-- Settings -->
@@ -504,5 +530,6 @@
   <script src="app.js"></script>
   <script src="lend.js"></script>
   <script src="mesh.js"></script>
+  <script src="agent.js"></script>
 </body>
 </html>

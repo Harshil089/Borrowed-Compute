@@ -555,13 +555,13 @@ async fn mesh_run(cloud: &CloudClient, key_path: &std::path::Path, action: MeshA
         }
         MeshAction::Serve { port, .. } => {
             let (cloud_c, me_c) = (signed.clone(), me.clone());
-            let served = std::sync::Arc::new(bc_cli::serve::Served {
-                session: session.clone(),
-                targets: std::sync::Arc::new(move || {
+            let served = std::sync::Arc::new(bc_cli::serve::Served::new(
+                session.clone(),
+                std::sync::Arc::new(move || {
                     let (c, m) = (cloud_c.clone(), me_c.clone());
                     Box::pin(async move { bc_cli::mesh::mesh_targets(&c, &m, &bc_cli::flows::client_home()?).await })
                 }),
-            });
+            ));
             let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.with_context(|| format!("port {port} is taken"))?;
             eprintln!("bc: serving {} at http://127.0.0.1:{port}/v1 (OpenAI-compatible). Ctrl+C stops it.", session.name);
             let balancer = session.clone();

@@ -66,7 +66,7 @@ async fn chats_through_an_openai_endpoint_backed_by_two_devices() {
     let session = Arc::new(Session::start(coordinator, targets.clone(), &url, Goal::Throughput, Some("none"), Vec::new(), |_| {}).await.unwrap());
     assert!(!session.layout().await.is_empty());
     let t = targets.clone();
-    let served = Arc::new(Served { session: session.clone(), targets: Arc::new(move || { let t = t.clone(); Box::pin(async move { Ok(t) }) }) });
+    let served = Arc::new(Served::new(session.clone(), Arc::new(move || { let t = t.clone(); Box::pin(async move { Ok(t) }) })));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}/v1", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, router(served)).await.unwrap() });
@@ -96,6 +96,22 @@ async fn chats_through_an_openai_endpoint_backed_by_two_devices() {
     }
     assert!(text.trim_end().ends_with("data: [DONE]"));
     assert_eq!(streamed, content, "greedy: the same answer streamed or not");
+
+    // With tools and a tool result, the next request reuses what the stages already hold.
+    let tools = serde_json::json!([{ "type": "function", "function": { "name": "weather", "description": "Weather now", "parameters": { "type": "object" } } }]);
+    let mut messages = vec![
+        serde_json::json!({ "role": "user", "content": "weather in Pune?" }),
+        serde_json::json!({ "role": "assistant", "content": null, "tool_calls": [{ "id": "c1", "type": "function", "function": { "name": "weather", "arguments": "{\"city\":\"Pune\"}" } }] }),
+        serde_json::json!({ "role": "tool", "tool_call_id": "c1", "content": "31 C" }),
+    ];
+    let ask = |messages: &Vec<serde_json::Value>| serde_json::json!({ "messages": messages, "tools": tools, "max_tokens": 8 });
+    let first: serde_json::Value = http.post(format!("{base}/chat/completions")).json(&ask(&messages)).send().await.unwrap().json().await.unwrap();
+    assert!(["stop", "length", "tool_calls"].contains(&first["choices"][0]["finish_reason"].as_str().unwrap()), "{first}");
+    messages.push(serde_json::json!({ "role": "assistant", "content": first["choices"][0]["message"]["content"].as_str().unwrap_or("") }));
+    messages.push(serde_json::json!({ "role": "user", "content": "and tomorrow?" }));
+    let second: serde_json::Value = http.post(format!("{base}/chat/completions")).json(&ask(&messages)).send().await.unwrap().json().await.unwrap();
+    let (cached, prompt) = (second["usage"]["prompt_tokens_details"]["cached_tokens"].as_u64().unwrap(), second["usage"]["prompt_tokens"].as_u64().unwrap());
+    assert!(cached * 2 > prompt, "only the new turn is computed again: {cached} of {prompt} held");
     // Nothing changed on the devices, so a rebalance keeps the plan.
     assert!(!session.rebalance().await.unwrap());
 }

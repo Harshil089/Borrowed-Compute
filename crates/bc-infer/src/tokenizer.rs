@@ -41,6 +41,9 @@ pub struct Tokenizer {
     index: HashMap<String, u32>,
     ranks: HashMap<(String, String), usize>,
     specials: Vec<(String, u32)>,
+    /// Control tokens (type 3: `<|im_start|>`…) say nothing in text; user-defined ones
+    /// (type 4: Qwen's `<tool_call>`, `<think>`) are written out like any word.
+    control: std::collections::HashSet<u32>,
     pub bos: Option<u32>,
     pub eos: u32,
     add_bos: bool,
@@ -94,6 +97,7 @@ impl Tokenizer {
             .filter_map(|(i, m)| m.split_once(' ').map(|(a, b)| ((a.to_string(), b.to_string()), i)))
             .collect();
         let index: HashMap<String, u32> = tokens.iter().enumerate().map(|(i, t)| (t.clone(), i as u32)).collect();
+        let control = types.iter().enumerate().filter(|(_, &t)| t == 3).map(|(i, _)| i as u32).collect();
         // Control (3) and user-defined (4) tokens are matched whole, longest first.
         let mut specials: Vec<(String, u32)> = types
             .iter()
@@ -123,7 +127,7 @@ impl Tokenizer {
             Some("llama-bpe" | "llama3" | "smaug-bpe") => 3,
             _ => 1,
         };
-        Ok(Tokenizer { kind, tokens, scores, index, ranks, specials, bos, eos, add_bos, template, stops, digits })
+        Ok(Tokenizer { kind, tokens, scores, index, ranks, specials, control, bos, eos, add_bos, template, stops, digits })
     }
 
     pub fn vocab(&self) -> usize {
@@ -134,6 +138,11 @@ impl Tokenizer {
     /// differ only in padding at the end (Qwen2.5 0.5B has 151936 ids, 7B 152064).
     pub fn same_ids(&self, other: &Tokenizer) -> bool {
         self.tokens.iter().zip(&other.tokens).all(|(a, b)| a == b)
+    }
+
+    /// The id of a token written exactly as `text`, such as `<think>`.
+    pub fn token_id(&self, text: &str) -> Option<u32> {
+        self.index.get(text).copied()
     }
 
     /// The tokens that end an answer.
@@ -175,12 +184,22 @@ impl Tokenizer {
     }
 
     pub fn encode(&self, text: &str) -> Vec<u32> {
+        self.encode_from(text, true)
+    }
+
+    /// Text that continues tokens already fed, such as a conversation's next turn: no
+    /// beginning-of-text token and no SentencePiece leading space.
+    pub fn encode_segment(&self, text: &str) -> Vec<u32> {
+        self.encode_from(text, false)
+    }
+
+    fn encode_from(&self, text: &str, start: bool) -> Vec<u32> {
         let mut out = Vec::new();
-        if self.add_bos {
+        if self.add_bos && start {
             out.extend(self.bos);
         }
         let mut rest = text;
-        let mut first = true;
+        let mut first = start;
         while !rest.is_empty() {
             // The earliest special token in what is left, if any.
             let hit = self.specials.iter().filter_map(|(s, id)| rest.find(s.as_str()).map(|at| (at, s.len(), *id))).min_by_key(|(at, len, _)| (*at, std::cmp::Reverse(*len)));
@@ -261,7 +280,7 @@ impl Tokenizer {
     /// Bytes a token stands for (control tokens decode to nothing).
     pub fn token_bytes(&self, id: u32) -> Vec<u8> {
         let Some(t) = self.tokens.get(id as usize) else { return Vec::new() };
-        if self.specials.iter().any(|(_, s)| *s == id) || Some(id) == self.bos || id == self.eos {
+        if self.control.contains(&id) || Some(id) == self.bos || id == self.eos {
             return Vec::new();
         }
         match self.kind {
@@ -388,11 +407,11 @@ mod tests {
     fn bpe_merges_by_rank_and_keeps_specials_whole() {
         let map = byte_to_char();
         let sp = map[b' ' as usize].to_string();
-        let tokens: Vec<String> = ["h", "e", "y", &sp, "he", "hey", &format!("{sp}h"), &format!("{sp}hey"), "<|im_end|>", "!"].iter().map(|s| s.to_string()).collect();
+        let tokens: Vec<String> = ["h", "e", "y", &sp, "he", "hey", &format!("{sp}h"), &format!("{sp}hey"), "<|im_end|>", "!", "<tool_call>"].iter().map(|s| s.to_string()).collect();
         let h = header(vec![
             ("tokenizer.ggml.model", Meta::Str("gpt2".into())),
             ("tokenizer.ggml.tokens", Meta::Strs(tokens)),
-            ("tokenizer.ggml.token_type", Meta::I32s(vec![1, 1, 1, 1, 1, 1, 1, 1, 3, 1])),
+            ("tokenizer.ggml.token_type", Meta::I32s(vec![1, 1, 1, 1, 1, 1, 1, 1, 3, 1, 4])),
             ("tokenizer.ggml.merges", Meta::Strs(vec!["h e".into(), "he y".into(), format!("{sp} h"), format!("{sp}h e"), format!("{sp} hey")])),
             ("tokenizer.ggml.eos_token_id", Meta::U32(8)),
         ]);
@@ -400,6 +419,10 @@ mod tests {
         let ids = t.encode("hey hey!<|im_end|>");
         assert_eq!(ids, [5, 7, 9, 8]);
         assert_eq!(t.decode(&ids), "hey hey!");
+        assert_eq!(t.encode_segment("!<|im_end|>"), [9, 8]);
+        // A user-defined token is matched whole and written out; a control token is not.
+        assert_eq!(t.encode("<tool_call>hey"), [10, 5]);
+        assert_eq!(t.decode(&[10, 5, 8]), "<tool_call>hey");
         assert!(t.is_stop(8));
         assert_eq!(t.template, Template::Plain, "no <|im_start|> in this vocabulary");
     }

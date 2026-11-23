@@ -253,6 +253,43 @@ async fn speculative_decoding_writes_the_same_text_in_fewer_passes() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_conversation_sends_only_its_new_tokens() {
+    // Plain attention with a perfect draft (every way of decoding takes a turn), then a
+    // model with a running state (Qwen3.5, which only continues).
+    for (file, draft) in [(bc_infer::fixtures::tiny_model(4, false), true), (bc_infer::fixtures::tiny_qwen35(4, false), false)] {
+        let (url, _) = serve(file.clone()).await;
+        let m = mesh(2).await;
+        let addrs: Vec<_> = m.devices.iter().map(|d| d.addr()).collect();
+        let header = Source::parse_remote(&url).unwrap().header().await.unwrap();
+        let same = if draft {
+            let dir = tempfile_dir();
+            std::fs::write(dir.join("d.gguf"), &file).unwrap();
+            let l = Local::load(&Source::File(dir.join("d.gguf"))).await.unwrap();
+            let _ = std::fs::remove_dir_all(&dir);
+            Some(l)
+        } else {
+            None
+        };
+        let client = Client::open(&m.coordinator, &url, plan(&[(0, 0..2), (1, 2..4)]), &addrs, &|_, _, _| {}).await.unwrap();
+        let llm = Llm::new(&header, vec![client], same).unwrap();
+        let mut cache = bc_mesh::llm::Cached::default();
+        let mut history: Vec<u32> = vec![1, 50, 51, 52];
+        for turn in 0..5u32 {
+            let want = local_text(&file, &history, 12).await;
+            let (got, stats) = llm.generate_cached(&mut cache, &history, 12, Sampling::default(), |_| {}).await.unwrap();
+            assert_eq!(got, want, "turn {turn}: the same text as a fresh run");
+            if turn > 0 {
+                assert!(stats.cached_tokens + 20 > history.len(), "turn {turn}: {} of {} tokens were held", stats.cached_tokens, history.len());
+            }
+            history.extend(&got);
+            assert!(cache.held().len() >= history.len() - got.len() && history.starts_with(cache.held()), "turn {turn}: the stages hold the prompt");
+            // The next turn: a stop token, then a few new ones, as an agent's tool result.
+            history.extend([2, 60 + turn, 61, 62]);
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn one_conversation_keeps_every_stage_busy() {
     // Three stages of 60 ms each and a perfect draft: one batch at a time would take
     // 180 ms a pass; with a batch per stage in flight, one comes back every 60 ms.
