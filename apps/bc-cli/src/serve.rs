@@ -216,7 +216,7 @@ async fn chat(State(s): State<Arc<Served>>, Json(req): Json<ChatRequest>) -> Res
     let prompt = render(&llm.tokenizer, &req);
     let with_tools = !req.tools.is_empty();
     let max = req.max_tokens.unwrap_or(512).min(llm.cfg.context.saturating_sub(prompt.len()));
-    let sampling = Sampling { temperature: req.temperature.unwrap_or(0.0), top_p: req.top_p.unwrap_or(1.0), seed: req.seed.unwrap_or_else(rand::random) };
+    let sampling = Sampling { temperature: req.temperature.unwrap_or(0.0), top_p: req.top_p.unwrap_or(1.0), seed: req.seed.unwrap_or_else(rand::random), allow: None };
     let id = format!("chatcmpl-{:016x}", rand::random::<u64>());
     let model = s.session.name.clone();
 

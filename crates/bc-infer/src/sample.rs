@@ -13,11 +13,16 @@ pub struct Sampling {
     pub temperature: f32,
     pub top_p: f32,
     pub seed: u64,
+    /// Only token ids in `[start, end)` may be picked: a forced choice, such as one digit
+    /// of a numbered list, that any model answers validly. A device from before this field
+    /// leaves it out and picks freely, which the caller must still read safely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow: Option<[u32; 2]>,
 }
 
 impl Default for Sampling {
     fn default() -> Self {
-        Sampling { temperature: 0.0, top_p: 1.0, seed: 0 }
+        Sampling { temperature: 0.0, top_p: 1.0, seed: 0, allow: None }
     }
 }
 
@@ -33,6 +38,12 @@ pub fn argmax(scores: &[f32]) -> u32 {
 
 /// `step` varies the draw between positions of one request.
 pub fn sample(scores: &[f32], s: &Sampling, step: u64) -> u32 {
+    if let Some([start, end]) = s.allow {
+        let (start, end) = (start as usize, (end as usize).min(scores.len()));
+        if start < end {
+            return start as u32 + sample(&scores[start..end], &Sampling { allow: None, ..*s }, step);
+        }
+    }
     if s.temperature <= 0.0 {
         return argmax(scores);
     }
@@ -79,12 +90,16 @@ mod tests {
         let scores = [0.1, 3.0, 2.9, -5.0];
         assert_eq!(sample(&scores, &Sampling::default(), 0), 1);
         // A tight nucleus keeps only the top token.
-        let s = Sampling { temperature: 1.0, top_p: 0.01, seed: 7 };
+        let s = Sampling { temperature: 1.0, top_p: 0.01, seed: 7, allow: None };
         assert!((0..20).all(|i| sample(&scores, &s, i) == 1));
         // A wide one draws both close candidates, never the far ones.
-        let s = Sampling { temperature: 1.0, top_p: 0.95, seed: 7 };
+        let s = Sampling { temperature: 1.0, top_p: 0.95, seed: 7, allow: None };
         let picks: Vec<u32> = (0..200).map(|i| sample(&scores, &s, i)).collect();
         assert!(picks.contains(&1) && picks.contains(&2) && !picks.contains(&3));
         assert_eq!(picks, (0..200).map(|i| sample(&scores, &s, i)).collect::<Vec<_>>(), "seeded");
+        // A forced choice picks the best token inside its range, whatever is outside.
+        let forced = Sampling { allow: Some([2, 4]), ..Sampling::default() };
+        assert_eq!(sample(&scores, &forced, 0), 2);
+        assert_eq!(sample(&scores, &Sampling { allow: Some([3, 99]), ..forced }, 0), 3);
     }
 }

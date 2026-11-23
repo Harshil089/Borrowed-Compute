@@ -574,7 +574,7 @@ async fn mesh_run(cloud: &CloudClient, key_path: &std::path::Path, action: MeshA
         MeshAction::Run { prompt, max_tokens, temperature, .. } => {
             let llm = session.llm.clone();
             let ids = llm.tokenizer.encode(&llm.tokenizer.chat_prompt(&[("user".into(), prompt)]));
-            let sampling = bc_infer::Sampling { temperature, top_p: 0.95, seed: rand_seed() };
+            let sampling = bc_infer::Sampling { temperature, top_p: 0.95, seed: rand_seed(), allow: None };
             let (_, stats) = llm
                 .generate(&ids, max_tokens, sampling, |t| {
                     print!("{t}");

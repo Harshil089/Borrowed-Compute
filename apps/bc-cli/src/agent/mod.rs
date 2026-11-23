@@ -12,6 +12,7 @@ pub mod format;
 pub mod log;
 pub mod memory;
 pub mod remind;
+pub mod route;
 pub mod tools;
 
 use std::collections::HashSet;
@@ -27,6 +28,7 @@ use serde_json::Value;
 
 use format::{head_tail, parse, system_prompt, Turns};
 use log::RunEvent;
+use route::Route;
 use memory::{Conversation, Memory, Message};
 use tools::{Risk, Tools};
 
@@ -45,6 +47,8 @@ pub trait Brain: Send + Sync {
     fn tokenizer(&self) -> &Tokenizer;
     fn context(&self) -> usize;
     fn complete<'a>(&'a self, cache: &'a mut Cached, ids: &'a [u32], max: usize, on_text: &'a mut (dyn FnMut(&str) + Send)) -> BoxFuture<'a, Result<(Vec<u32>, Stats)>>;
+    /// The one token the model writes next, held to ids in `[range[0], range[1])`.
+    fn choose<'a>(&'a self, cache: &'a mut Cached, ids: &'a [u32], range: [u32; 2]) -> BoxFuture<'a, Result<u32>>;
 }
 
 impl Brain for Llm {
@@ -60,6 +64,14 @@ impl Brain for Llm {
         // Greedy, so the draft model's guesses can be checked several at a time.
         Box::pin(self.generate_cached(cache, ids, max, bc_infer::Sampling::default(), on_text))
     }
+
+    fn choose<'a>(&'a self, cache: &'a mut Cached, ids: &'a [u32], range: [u32; 2]) -> BoxFuture<'a, Result<u32>> {
+        Box::pin(async move {
+            let sampling = bc_infer::Sampling { allow: Some(range), ..Default::default() };
+            let (out, _) = self.generate_cached(cache, ids, 1, sampling, |_| {}).await?;
+            out.first().copied().ok_or_else(|| anyhow::anyhow!("the model wrote nothing"))
+        })
+    }
 }
 
 /// The conversation a set of tools works for: the one whose run log records its calls.
@@ -67,47 +79,15 @@ fn chat_id_of(tools: &Tools) -> String {
     tools.conversation.clone()
 }
 
+/// Files the harness reads for a question about the folder.
+const FILES_READ: usize = 4;
+
 /// Pages the harness opens from its own search, so the model reads articles, not only
 /// their snippets.
 const PREFETCH_PAGES: usize = 2;
 
 fn call_key(c: &format::Call) -> String {
     format!("{} {}", c.name, c.arguments)
-}
-
-/// What to search the web for, when a message asks for something only the web has: news,
-/// anything current, or a search outright. The question's own words, less the asking.
-fn web_query(text: &str) -> Option<String> {
-    let lower = text.to_lowercase();
-    let has = |words: &[&str]| words.iter().any(|w| lower.split(|c: char| !c.is_alphanumeric()).any(|x| x == *w));
-    let phrase = |phrases: &[&str]| phrases.iter().any(|p| lower.contains(p));
-    let wants = has(&["news", "headlines", "latest", "weather", "forecast", "google", "internet", "online"])
-        || phrase(&["on the web", "search the web", "web search", "look up", "who won", "score of", "price of", "right now", "this week", "today's", "todays", "yesterday's", "currently"]);
-    if !wants {
-        return None;
-    }
-    const ASKING: &[&str] = &[
-        "can", "could", "would", "you", "please", "check", "search", "look", "up", "for", "find", "on", "the", "web", "internet", "online", "google", "me", "tell",
-        "give", "show", "just", "a", "an", "of", "about", "what", "whats", "is", "are", "some", "read", "get",
-        // News results are today's already; the word only finds pages about dates.
-        "today", "today's", "todays", "now", "currently",
-    ];
-    let words: Vec<&str> = text
-        .split_whitespace()
-        .filter(|w| !ASKING.contains(&w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase().replace('’', "'").as_str()))
-        .collect();
-    let query = words.join(" ").trim_matches(|c: char| !c.is_alphanumeric()).to_string();
-    Some(if query.is_empty() { text.trim().to_string() } else { query })
-}
-
-/// A reminder the message asks for, when it says the time: ("9pm", "call Ayush at 9pm").
-fn reminder_request(text: &str) -> Option<(String, String)> {
-    let lower = text.to_lowercase();
-    let i = lower.find("remind me")?;
-    remind::parse_when(text, chrono::Local::now())?;
-    let what = text[i + "remind me".len()..].trim();
-    let what = ["to ", "that ", "about ", "of "].iter().find_map(|p| what.strip_prefix(p)).unwrap_or(what).trim_end_matches(['.', '!']);
-    Some((text.to_string(), what.to_string()))
 }
 
 /// What the person decided about a call.
@@ -172,6 +152,8 @@ pub struct Chat {
     ids: Vec<u32>,
     cache: Cached,
     allowed: Arc<Mutex<HashSet<String>>>,
+    /// The decision step's own stream, so it never disturbs the conversation's.
+    route_cache: Cached,
     /// The model `ids` were made for: its tokenizer's address, which changes when another
     /// model (or the same one again) starts on the Mesh page.
     brain: usize,
@@ -179,7 +161,7 @@ pub struct Chat {
 
 impl Chat {
     pub fn new(conv: Conversation) -> Self {
-        Chat { conv, ids: Vec::new(), cache: Cached::default(), allowed: Arc::default(), brain: 0 }
+        Chat { conv, ids: Vec::new(), cache: Cached::default(), allowed: Arc::default(), route_cache: Cached::default(), brain: 0 }
     }
 }
 
@@ -277,6 +259,7 @@ impl Agent {
             chat.brain = brain_id;
             chat.ids.clear();
             chat.cache = Cached::default();
+            chat.route_cache = Cached::default();
         }
         if chat.ids.is_empty() {
             chat.ids = self.render(chat, &turns);
@@ -316,10 +299,37 @@ impl Agent {
         // The harness looks things up itself when the person asks for something on the web,
         // so a model that would not call web_search still answers from real results.
         // Likewise a reminder asked for with a time: set, whatever the model would do.
-        if let Some((when, what)) = reminder_request(text) {
+        let has_web = self.tools.specs().iter().any(|t| t.name == "web_search");
+        let route = if let Some((when, what)) = route::reminder_request(text) {
             self.harness_calls(chat, &turns, &mut made, vec![format::Call { name: "remind".into(), arguments: serde_json::json!({ "when": when, "text": what }) }]).await;
+            None
+        } else if has_web && route::web_query(text).is_some() {
+            Some(Route::Web)
+        } else {
+            let mut options = vec![Route::Answer];
+            if has_web {
+                options.push(Route::Web);
+            }
+            if self.tools.root.is_some() {
+                options.push(Route::Files);
+            }
+            options.push(Route::Past);
+            Some(route::decide(brain.as_ref(), &mut chat.route_cache, text, &options).await)
+        };
+        if let Some(r) = route {
+            log.append(&RunEvent::Route { at: memory::now(), route: r.name().into() });
         }
-        if let Some(query) = web_query(text).filter(|_| self.tools.specs().iter().any(|t| t.name == "web_search")) {
+        if route == Some(Route::Past) {
+            self.harness_calls(chat, &turns, &mut made, vec![format::Call { name: "recall".into(), arguments: serde_json::json!({ "query": text }) }]).await;
+        }
+        if route == Some(Route::Files) {
+            let reads = self.files_for(text);
+            if !reads.is_empty() {
+                self.harness_calls(chat, &turns, &mut made, reads).await;
+            }
+        }
+        if route == Some(Route::Web) {
+            let query = route::search_words(text);
             let found = self.harness_calls(chat, &turns, &mut made, vec![format::Call { name: "web_search".into(), arguments: serde_json::json!({ "query": query }) }]).await;
             let pages: Vec<format::Call> = found
                 .lines()
@@ -453,6 +463,32 @@ impl Agent {
         results.join("\n")
     }
 
+    /// Files to read for a question about the folder: those the message names, else the
+    /// whole top level when it is a few small files.
+    fn files_for(&self, text: &str) -> Vec<format::Call> {
+        let Some(root) = &self.tools.root else { return Vec::new() };
+        let read = |path: &str| format::Call { name: "read_file".into(), arguments: serde_json::json!({ "path": path }) };
+        let named: Vec<format::Call> = text
+            .split_whitespace()
+            .map(|w| w.trim_matches(|c: char| matches!(c, '`' | '"' | '\'' | ',' | '?' | '!' | '(' | ')')).trim_end_matches('.'))
+            .filter(|w| (w.contains('.') || w.contains('/')) && self.tools.resolve(w).is_ok_and(|p| p.is_file()))
+            .take(FILES_READ)
+            .map(read)
+            .collect();
+        if !named.is_empty() {
+            return named;
+        }
+        let Ok(entries) = std::fs::read_dir(root) else { return Vec::new() };
+        let entries: Vec<std::fs::DirEntry> = entries.flatten().filter(|e| !e.file_name().to_string_lossy().starts_with('.')).collect();
+        let small = |e: &std::fs::DirEntry| e.metadata().is_ok_and(|m| m.is_file() && m.len() <= 16 << 10);
+        if entries.is_empty() || entries.len() > FILES_READ || !entries.iter().all(small) {
+            return Vec::new();
+        }
+        let mut names: Vec<String> = entries.iter().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        names.iter().map(|n| read(n)).collect()
+    }
+
     /// Runs one call, recorded in the run log before and after. Output longer than `keep`
     /// characters is kept whole as an artifact and the model gets its start and end, with
     /// the artifact's id to read the rest.
@@ -559,6 +595,9 @@ mod tests {
         tk: Tokenizer,
         answers: Mutex<Vec<String>>,
         fed: Mutex<Vec<Vec<u32>>>,
+        /// The digit the decision step picks; none picks the first option, Answer.
+        choice: Mutex<Option<u32>>,
+        chose: Mutex<Vec<Vec<u32>>>,
     }
 
     impl Brain for Script {
@@ -576,6 +615,11 @@ mod tests {
             let out = self.tk.encode_segment(&a);
             Box::pin(async move { Ok((out, Stats::default())) })
         }
+        fn choose<'a>(&'a self, _: &'a mut Cached, ids: &'a [u32], range: [u32; 2]) -> BoxFuture<'a, Result<u32>> {
+            self.chose.lock().unwrap().push(ids.to_vec());
+            let pick = self.choice.lock().unwrap().and_then(|d| self.tk.token_id(&d.to_string())).unwrap_or(range[0]);
+            Box::pin(async move { Ok(pick) })
+        }
     }
 
     struct Run {
@@ -587,7 +631,7 @@ mod tests {
 
     fn agent(answers: &[&str], decision: Decision) -> Run {
         let dir = tempfile::tempdir().unwrap();
-        let brain = Arc::new(Script { tk: tokenizer(), answers: Mutex::new(answers.iter().map(|s| s.to_string()).collect()), fed: Mutex::default() });
+        let brain = Arc::new(Script { tk: tokenizer(), answers: Mutex::new(answers.iter().map(|s| s.to_string()).collect()), fed: Mutex::default(), choice: Mutex::default(), chose: Mutex::default() });
         let seen = Arc::new(Mutex::new(Vec::new()));
         let s = seen.clone();
         let memory = Memory::at(&dir.path().join("home"));
@@ -682,6 +726,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_decision_step_reads_the_folder_for_a_model_that_would_not() {
+        let r = agent(&["It holds a note saying hello."], Decision::Allow);
+        std::fs::write(r.dir.path().join("project/note.txt"), "hello").unwrap();
+        // Answer, Web, Files, Past: the model picks 3.
+        *r.brain.choice.lock().unwrap() = Some(3);
+        let mut chat = Chat::new(Conversation::new(None));
+        r.agent.turn(&mut chat, "what do you see in this", Settings::default(), Arc::default()).await.unwrap();
+        let roles: Vec<&str> = chat.conv.messages.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, ["user", "assistant", "tool", "assistant"]);
+        assert!(chat.conv.messages[2].content.contains("hello"), "{:?}", chat.conv.messages);
+        let asked = r.brain.tk.decode(&r.brain.chose.lock().unwrap()[0]);
+        assert!(asked.contains("3. Look in the chosen project folder") && asked.contains("what do you see in this"), "{asked}");
+        // A file named in the message is read even in a big folder; nothing else is.
+        for i in 0..6 {
+            std::fs::write(r.dir.path().join(format!("project/f{i}.txt")), "x").unwrap();
+        }
+        assert_eq!(r.agent.files_for("what does `note.txt` say?").len(), 1);
+        assert!(r.agent.files_for("what is here").is_empty());
+        assert!(r.agent.files_for("read ../../etc/passwd").is_empty());
+    }
+
+    #[tokio::test]
     async fn the_agent_stops_a_repeating_model_or_when_told() {
         // The same call again is not run; the model hears so, and a second answer of only
         // repeats ends the turn.
@@ -700,23 +766,6 @@ mod tests {
         let mut chat = Chat::new(Conversation::new(None));
         agent.turn(&mut chat, "go", Settings::default(), stop).await.unwrap();
         assert_eq!(r.brain.fed.lock().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn a_reminder_with_a_time_is_read_from_the_message() {
-        assert_eq!(reminder_request("remind me to call ayush at 9pm"), Some(("remind me to call ayush at 9pm".into(), "call ayush at 9pm".into())));
-        assert_eq!(reminder_request("Can you remind me in 20 minutes to stretch."), Some(("Can you remind me in 20 minutes to stretch.".into(), "in 20 minutes to stretch".into())));
-        assert_eq!(reminder_request("remind me to call ayush"), None);
-        assert_eq!(reminder_request("call ayush at 9pm"), None);
-    }
-
-    #[test]
-    fn asking_for_news_or_the_web_gives_a_search_of_the_question() {
-        assert_eq!(web_query("can you check for today’s cybersecurity news on the web").as_deref(), Some("cybersecurity news"));
-        assert_eq!(web_query("just give me the latest F1 grand prix results").as_deref(), Some("latest F1 grand prix results"));
-        assert_eq!(web_query("what's the weather in Pune?").as_deref(), Some("what's weather in Pune"));
-        assert_eq!(web_query("read the README and fix the build"), None);
-        assert_eq!(web_query("search the project for TODO"), None);
     }
 
     #[tokio::test]

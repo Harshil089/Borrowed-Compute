@@ -1,0 +1,127 @@
+//! What the harness does before the model answers, so a model too small to decide on a
+//! tool still answers from real results. Two fast paths read the message itself (a
+//! reminder with a time; news or anything on the web). Otherwise a decision step asks
+//! the model to pick one numbered action, with decoding held to those digits
+//! (`Sampling::allow`): even a model that never writes a tool call picks a valid one.
+
+use bc_infer::Tokenizer;
+use bc_mesh::llm::Cached;
+
+use super::format::Turns;
+use super::Brain;
+
+/// What to do first for a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Route {
+    Answer,
+    Web,
+    Files,
+    Past,
+}
+
+impl Route {
+    pub fn name(self) -> &'static str {
+        match self {
+            Route::Answer => "answer",
+            Route::Web => "web",
+            Route::Files => "files",
+            Route::Past => "past conversations",
+        }
+    }
+
+    fn option(self) -> &'static str {
+        match self {
+            Route::Answer => "Answer directly: greetings, chat, writing, maths, code questions, explanations, anything you already know.",
+            Route::Web => "Search the web: news, current events, prices, weather, sports, people, anything recent or that you may not know.",
+            Route::Files => "Look in the chosen project folder: its files or code.",
+            Route::Past => "Search past conversations: the person refers to something said before that is not in this conversation.",
+        }
+    }
+}
+
+/// Asks the model which of `options` fits `text` best, by the one digit it may write.
+/// Gives `Answer` when the vocabulary has no run of digit tokens to hold it to, or when
+/// a device from before `Sampling::allow` wrote something else.
+pub async fn decide(brain: &dyn Brain, cache: &mut Cached, text: &str, options: &[Route]) -> Route {
+    let tk = brain.tokenizer();
+    let Some(range) = digits(tk, options.len()) else { return Route::Answer };
+    let list: String = options.iter().enumerate().map(|(i, r)| format!("{}. {}\n", i + 1, r.option())).collect();
+    let system = format!("Pick what to do first for the person's message. Reply with the number only.\n{list}");
+    let turns = Turns { tokenizer: tk, think: false };
+    let mut ids = tk.encode(&turns.open(&system));
+    ids.extend(tk.encode_segment(&turns.user(&super::format::clip(text, 2000))));
+    match brain.choose(cache, &ids, range).await {
+        Ok(id) if (range[0]..range[1]).contains(&id) => options[(id - range[0]) as usize],
+        _ => Route::Answer,
+    }
+}
+
+/// The token ids of "1" to "n", when they run consecutively, as byte-level vocabularies
+/// (Qwen, Llama 3) have them.
+fn digits(tk: &Tokenizer, n: usize) -> Option<[u32; 2]> {
+    let first = tk.token_id("1")?;
+    (1..n).all(|i| tk.token_id(&(i + 1).to_string()) == Some(first + i as u32)).then_some([first, first + n as u32])
+}
+
+/// What to search the web for, when a message asks for something only the web has: news,
+/// anything current, or a search outright.
+pub fn web_query(text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| lower.split(|c: char| !c.is_alphanumeric()).any(|x| x == *w));
+    let phrase = |phrases: &[&str]| phrases.iter().any(|p| lower.contains(p));
+    let wants = has(&["news", "headlines", "latest", "weather", "forecast", "google", "internet", "online"])
+        || phrase(&["on the web", "search the web", "web search", "look up", "who won", "score of", "price of", "right now", "this week", "today's", "todays", "yesterday's", "currently"]);
+    wants.then(|| search_words(text))
+}
+
+/// The question's own words, less the asking: what goes to the search.
+pub fn search_words(text: &str) -> String {
+    const ASKING: &[&str] = &[
+        "can", "could", "would", "you", "please", "check", "search", "look", "up", "for", "find", "on", "the", "web", "internet", "online", "google", "me", "tell",
+        "give", "show", "just", "a", "an", "of", "about", "what", "whats", "is", "are", "some", "read", "get",
+        // News results are today's already; the word only finds pages about dates.
+        "today", "today's", "todays", "now", "currently",
+    ];
+    let words: Vec<&str> = text
+        .split_whitespace()
+        .filter(|w| !ASKING.contains(&w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase().replace('’', "'").as_str()))
+        .collect();
+    let query = words.join(" ").trim_matches(|c: char| !c.is_alphanumeric()).to_string();
+    if query.is_empty() {
+        text.trim().to_string()
+    } else {
+        query
+    }
+}
+
+/// A reminder the message asks for, when it says the time: (the message, what to remind).
+pub fn reminder_request(text: &str) -> Option<(String, String)> {
+    let lower = text.to_lowercase();
+    let i = lower.find("remind me")?;
+    super::remind::parse_when(text, chrono::Local::now())?;
+    let what = text[i + "remind me".len()..].trim();
+    let what = ["to ", "that ", "about ", "of "].iter().find_map(|p| what.strip_prefix(p)).unwrap_or(what).trim_end_matches(['.', '!']);
+    Some((text.to_string(), what.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_reminder_with_a_time_is_read_from_the_message() {
+        assert_eq!(reminder_request("remind me to call ayush at 9pm"), Some(("remind me to call ayush at 9pm".into(), "call ayush at 9pm".into())));
+        assert_eq!(reminder_request("Can you remind me in 20 minutes to stretch."), Some(("Can you remind me in 20 minutes to stretch.".into(), "in 20 minutes to stretch".into())));
+        assert_eq!(reminder_request("remind me to call ayush"), None);
+        assert_eq!(reminder_request("call ayush at 9pm"), None);
+    }
+
+    #[test]
+    fn asking_for_news_or_the_web_gives_a_search_of_the_question() {
+        assert_eq!(web_query("can you check for today’s cybersecurity news on the web").as_deref(), Some("cybersecurity news"));
+        assert_eq!(web_query("just give me the latest F1 grand prix results").as_deref(), Some("latest F1 grand prix results"));
+        assert_eq!(web_query("what's the weather in Pune?").as_deref(), Some("what's weather in Pune"));
+        assert_eq!(web_query("read the README and fix the build"), None);
+        assert_eq!(web_query("search the project for TODO"), None);
+    }
+}
