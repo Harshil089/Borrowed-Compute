@@ -23,7 +23,8 @@ const READ_CHARS: usize = 8000;
 const READ_LINES: usize = 200;
 const LIST_ENTRIES: usize = 200;
 const SEARCH_HITS: usize = 50;
-const SEARCH_RESULTS: usize = 8;
+const NEWS_RESULTS: usize = 5;
+const WEB_RESULTS: usize = 5;
 const FETCH_BYTES: usize = 1 << 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -302,16 +303,33 @@ async fn fetch(url: &str) -> Result<String> {
     Ok(head_tail(&download(parsed).await?, OUTPUT_CHARS))
 }
 
-/// Bing's RSS results: no account or key, and plain XML. DuckDuckGo's keyless page puts
-/// automated clients behind a bot check, which the agent must not try to pass.
+/// Bing's RSS results, news and web at once: no account or key, and plain XML. Web
+/// results alone answer "today's news" with encyclopedia pages, and a model then searches
+/// again and again. DuckDuckGo's keyless page puts automated clients behind a bot check,
+/// which the agent must not try to pass.
 async fn web_search(query: &str) -> Result<String> {
-    let mut url = reqwest::Url::parse("https://www.bing.com/search")?;
-    url.query_pairs_mut().append_pair("q", query.trim()).append_pair("format", "rss");
-    Ok(search_results(&download(url).await?))
+    let rss = |path: &str| {
+        let mut url = reqwest::Url::parse("https://www.bing.com/").expect("a fixed address").join(path).expect("a fixed path");
+        url.query_pairs_mut().append_pair("q", query.trim()).append_pair("format", "rss");
+        download(url)
+    };
+    let (news, web) = tokio::join!(rss("news/search"), rss("search"));
+    if let (Err(e), Err(_)) = (&news, &web) {
+        bail!("the search did not answer: {e:#}");
+    }
+    let news = news.map(|x| search_results(&x, NEWS_RESULTS, true)).unwrap_or_default();
+    let web = web.map(|x| search_results(&x, WEB_RESULTS, false)).unwrap_or_default();
+    let mut out = Vec::new();
+    for (head, items) in [("News", news), ("Web", web)] {
+        if !items.is_empty() {
+            out.push(format!("{head}:\n{}", items.join("\n")));
+        }
+    }
+    Ok(if out.is_empty() { "No results.".to_string() } else { out.join("\n\n") })
 }
 
-/// The results of an RSS search page, numbered: title, address, snippet.
-fn search_results(xml: &str) -> String {
+/// The items of an RSS search page: title (with its date, for news), address, snippet.
+fn search_results(xml: &str, max: usize, dated: bool) -> Vec<String> {
     let tag = |item: &str, name: &str| -> String {
         let open = format!("<{name}>");
         let start = item.find(&open).map(|i| i + open.len());
@@ -321,18 +339,23 @@ fn search_results(xml: &str) -> String {
             _ => String::new(),
         }
     };
-    let out: Vec<String> = xml
-        .split("<item>")
+    xml.split("<item>")
         .skip(1)
-        .take(SEARCH_RESULTS)
-        .enumerate()
-        .map(|(i, item)| format!("{}. {}\n   {}\n   {}", i + 1, tag(item, "title"), tag(item, "link"), tag(item, "description")))
-        .collect();
-    if out.is_empty() {
-        "No results.".to_string()
-    } else {
-        out.join("\n")
-    }
+        .take(max)
+        .map(|item| {
+            let link = tag(item, "link");
+            // News links go through a Bing redirect over http; the article's own https
+            // address is in its `url` parameter, and fetch_url takes only https.
+            let link = reqwest::Url::parse(&link)
+                .ok()
+                .and_then(|u| u.query_pairs().find(|(k, _)| k == "url").map(|(_, v)| v.into_owned()))
+                .unwrap_or(link);
+            // "Mon, 23 Nov 2026 12:34:00 GMT" to "Mon, 23 Nov 2026".
+            let date = tag(item, "pubDate");
+            let date = if dated && date.len() >= 16 { format!(" ({})", &date[..16]) } else { String::new() };
+            format!("- {}{date}\n  {link}\n  {}", tag(item, "title"), tag(item, "description"))
+        })
+        .collect()
 }
 
 /// A page's text, HTML reduced to its words, at most [`FETCH_BYTES`] of it.
@@ -350,11 +373,52 @@ async fn download(parsed: reqwest::Url) -> Result<String> {
         }
     }
     let text = String::from_utf8_lossy(&body);
-    let text = if html { html_text(&text) } else { text.into_owned() };
+    let text = if html { html_text(main_part(&text)) } else { text.into_owned() };
     if !status.is_success() {
         bail!("the page answered {status}: {}", super::format::clip(&text, 300));
     }
     Ok(text)
+}
+
+/// `&#8211;` and `&#x2014;` as the characters they stand for.
+fn numeric_entities(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find("&#") {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i + 2..];
+        let end = tail.find(';').filter(|&e| e <= 8);
+        let code = end.and_then(|e| match tail[..e].strip_prefix(['x', 'X']) {
+            Some(hex) => u32::from_str_radix(hex, 16).ok(),
+            None => tail[..e].parse().ok(),
+        });
+        match (end, code.and_then(char::from_u32)) {
+            (Some(e), Some(c)) => {
+                out.push(c);
+                rest = &tail[e + 1..];
+            }
+            _ => {
+                out.push_str("&#");
+                rest = tail;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A page's article (or main part) when it marks one, without the menus around it, which
+/// would otherwise fill the model's room before the story starts.
+fn main_part(html: &str) -> &str {
+    let lower = html.to_ascii_lowercase();
+    for (open, close) in [("<article", "</article>"), ("<main", "</main>")] {
+        if let (Some(a), Some(b)) = (lower.find(open), lower.rfind(close)) {
+            if a < b {
+                return &html[a..b + close.len()];
+            }
+        }
+    }
+    html
 }
 
 /// The readable text of a page: no scripts, styles or tags, whitespace collapsed.
@@ -383,7 +447,7 @@ fn html_text(html: &str) -> String {
         out.push_str(&html[i..next]);
         i = next;
     }
-    let out = out.replace("&nbsp;", " ").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'").replace("&amp;", "&");
+    let out = numeric_entities(&out.replace("&nbsp;", " ").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'")).replace("&amp;", "&");
     let mut lines: Vec<String> = out.lines().map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")).filter(|l| !l.is_empty()).collect();
     lines.dedup();
     lines.join("\n")
@@ -458,13 +522,16 @@ mod tests {
 
     #[test]
     fn search_results_read_rss_items() {
-        let xml = "<rss><channel><title>Bing</title><item><title>Race &amp; result</title><link>https://example.com/a</link><description>Winner &lt;b&gt;took&lt;/b&gt;\nit</description></item><item><title>Two</title><link>https://example.com/b</link></item></channel></rss>";
-        assert_eq!(search_results(xml), "1. Race & result\n   https://example.com/a\n   Winner took it\n2. Two\n   https://example.com/b\n   ");
-        assert_eq!(search_results("<rss></rss>"), "No results.");
+        let xml = "<rss><channel><title>Bing</title><item><title>Race &amp; result</title><link>http://www.bing.com/news/apiclick.aspx?ref=FexRss&amp;url=https%3a%2f%2fexample.com%2fa&amp;c=1</link><description>Winner &lt;b&gt;took&lt;/b&gt;\nit</description><pubDate>Mon, 23 Nov 2026 12:34:00 GMT</pubDate></item><item><title>Two</title><link>https://example.com/b</link></item></channel></rss>";
+        assert_eq!(search_results(xml, 5, true), ["- Race & result (Mon, 23 Nov 2026)\n  https://example.com/a\n  Winner took it", "- Two\n  https://example.com/b\n  "]);
+        assert_eq!(search_results(xml, 1, false), ["- Race & result\n  https://example.com/a\n  Winner took it"]);
+        assert!(search_results("<rss></rss>", 5, false).is_empty());
     }
 
     #[test]
     fn pages_become_text() {
+        assert_eq!(html_text("A &#8211; B &#x2014; C &#oops; &amp;#38;"), "A – B — C &#oops; &#38;");
+        assert_eq!(main_part("<nav>menu</nav><article><p>Story</p></article><footer>x</footer>"), "<article><p>Story</p></article>");
         let t = html_text("<html><head><style>p{}</style><script>var x = '<p>';</script></head><body><h1>Title</h1><p>One &amp; two</p><div>three</div></body></html>");
         assert_eq!(t, "Title\nOne & two\nthree");
     }
