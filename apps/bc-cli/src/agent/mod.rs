@@ -56,6 +56,39 @@ impl Brain for Llm {
     }
 }
 
+/// Pages the harness opens from its own search, so the model reads articles, not only
+/// their snippets.
+const PREFETCH_PAGES: usize = 2;
+
+fn call_key(c: &format::Call) -> String {
+    format!("{} {}", c.name, c.arguments)
+}
+
+/// What to search the web for, when a message asks for something only the web has: news,
+/// anything current, or a search outright. The question's own words, less the asking.
+fn web_query(text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| lower.split(|c: char| !c.is_alphanumeric()).any(|x| x == *w));
+    let phrase = |phrases: &[&str]| phrases.iter().any(|p| lower.contains(p));
+    let wants = has(&["news", "headlines", "latest", "weather", "forecast", "google", "internet", "online"])
+        || phrase(&["on the web", "search the web", "web search", "look up", "who won", "score of", "price of", "right now", "this week", "today's", "todays", "yesterday's", "currently"]);
+    if !wants {
+        return None;
+    }
+    const ASKING: &[&str] = &[
+        "can", "could", "would", "you", "please", "check", "search", "look", "up", "for", "find", "on", "the", "web", "internet", "online", "google", "me", "tell",
+        "give", "show", "just", "a", "an", "of", "about", "what", "whats", "is", "are", "some", "read", "get",
+        // News results are today's already; the word only finds pages about dates.
+        "today", "today's", "todays", "now", "currently",
+    ];
+    let words: Vec<&str> = text
+        .split_whitespace()
+        .filter(|w| !ASKING.contains(&w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase().replace('’', "'").as_str()))
+        .collect();
+    let query = words.join(" ").trim_matches(|c: char| !c.is_alphanumeric()).to_string();
+    Some(if query.is_empty() { text.trim().to_string() } else { query })
+}
+
 /// What the person decided about a call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -139,7 +172,8 @@ pub struct Agent {
 
 const BASE_PROMPT: &str = "You are the assistant in Borrowed Compute, running on the person's own devices.\n\
 - When a tool can answer or do what the person asks, call it at once. Do not describe what you could do, and do not ask which details they want when a sensible choice exists.\n\
-- For anything current or that you do not know (news, results, prices, weather, docs), call web_search, then fetch_url on the best result when the snippets are not enough. Say where the answer came from.\n\
+- For anything current or that you do not know (news, results, prices, weather, docs), call web_search, then fetch_url on the best result when the snippets are not enough. When search results are already there, answer from them. Say where the answer came from.\n\
+- Each message ends with the local time it was sent; use it for questions about the date and time.\n\
 - When the person tells you something to keep (a fact, a preference, a plan) or asks you to remember it, call remember.\n\
 - You remember the person's other conversations: the latest are listed below, and related lines may come with a message. They are background, which the person cannot see: never bring them up, quote or list them on your own. Use them only when the person asks about or refers to something from before; when it is not there, call recall.\n\
 - Never claim to have done something you did not do with a tool. You cannot act later on your own: you cannot set reminders, alarms or timers. Say so, and keep a note with remember instead.\n\
@@ -149,13 +183,12 @@ const BASE_PROMPT: &str = "You are the assistant in Borrowed Compute, running on
 impl Agent {
     fn system(&self, conversation: &str) -> String {
         let mut base = BASE_PROMPT.to_string();
-        base.push_str(&format!("\n\nToday is {}.", memory::day_of(memory::now())));
         if let Some(root) = &self.tools.root {
             // The top of the folder comes with the prompt, so "what is in this" needs no
             // tool call and the model knows from the start which files it can open.
             let top = self.tools.list_dir(".").unwrap_or_default();
             base.push_str(&format!(
-                " The person chose the project folder {}: \"this\", \"here\" and \"the project\" mean it, and file paths are relative to it. Its top level:\n{top}",
+                "\n\nThe person chose the project folder {}: \"this\", \"here\" and \"the project\" mean it, and file paths are relative to it. Its top level:\n{top}",
                 root.display()
             ));
         }
@@ -226,17 +259,36 @@ impl Agent {
         }
         chat.conv.messages.push(Message { role: "user".into(), content: text.to_string(), name: None });
         chat.conv.updated = memory::now();
-        // shortcut: the related lines go to the model but not into the saved message, so a
-        // re-render (reopening, trimming) drops them; store them if answers need them later.
-        let read = match self.memory.related(text, Some(&chat.conv.id)) {
-            Some(lines) => format!("{text}\n\n<earlier_conversations>\n{lines}\n</earlier_conversations>"),
-            None => text.to_string(),
-        };
+        // shortcut: the time and related lines go to the model but not into the saved
+        // message, so a re-render (reopening, trimming) drops them; store them if answers
+        // need them later.
+        let mut read = format!("{text}\n\n(Sent {})", chrono::Local::now().format("%A %Y-%m-%d %H:%M, local time"));
+        if let Some(lines) = self.memory.related(text, Some(&chat.conv.id)) {
+            read.push_str(&format!("\n\n<earlier_conversations>\n{lines}\n</earlier_conversations>"));
+        }
         chat.ids.extend(tk.encode_segment(&turns.user(&read)));
         chat.cache.stop_with(stop.clone());
+        // Calls made this turn, so the same one is not run twice.
+        let mut made: HashSet<String> = HashSet::new();
+        // The harness looks things up itself when the person asks for something on the web,
+        // so a model that would not call web_search still answers from real results.
+        if let Some(query) = web_query(text).filter(|_| self.tools.specs().iter().any(|t| t.name == "web_search")) {
+            let found = self.harness_calls(chat, &turns, &mut made, vec![format::Call { name: "web_search".into(), arguments: serde_json::json!({ "query": query }) }]).await;
+            let pages: Vec<format::Call> = found
+                .lines()
+                .map(str::trim)
+                .filter(|l| l.starts_with("https://"))
+                .take(PREFETCH_PAGES)
+                .map(|url| format::Call { name: "fetch_url".into(), arguments: serde_json::json!({ "url": url }) })
+                .collect();
+            if !pages.is_empty() && !stop.load(Ordering::Relaxed) {
+                self.harness_calls(chat, &turns, &mut made, pages).await;
+            }
+        }
         let mut total = Stats::default();
         let mut steps = 0;
         let mut decode_ms = 0.0;
+        let mut stuck = 0;
         while steps < MAX_STEPS && !stop.load(Ordering::Relaxed) {
             steps += 1;
             self.fit(chat, &turns)?;
@@ -270,7 +322,23 @@ impl Agent {
                 let _ = self.memory.save(&chat.conv);
                 break;
             }
-            let results = futures_util::future::join_all(calls.iter().map(|(view, call)| self.handle(view, call.as_ref(), settings, &chat.allowed))).await;
+            // A small model can call the same thing again and again; the second time it hears
+            // so, and a second answer of nothing but repeats ends the turn.
+            let repeated: Vec<bool> = calls.iter().map(|(_, c)| c.as_ref().is_some_and(|c| !made.insert(call_key(c)))).collect();
+            let allowed = &chat.allowed;
+            let results = futures_util::future::join_all(calls.iter().zip(&repeated).map(|((view, call), &again)| async move {
+                if again {
+                    let text = "You already made this exact call; its result is above. Answer from it, or try something different.".to_string();
+                    (self.events)(Event::Result { id: view.id.clone(), name: view.name.clone(), ok: false, text: text.clone() });
+                    text
+                } else {
+                    self.handle(view, call.as_ref(), settings, allowed).await
+                }
+            }))
+            .await;
+            if repeated.iter().all(|&r| r) {
+                stuck += 1;
+            }
             let mut pairs = Vec::new();
             for ((view, _), text) in calls.iter().zip(results) {
                 chat.conv.messages.push(Message { role: "tool".into(), content: text.clone(), name: Some(view.name.clone()) });
@@ -278,6 +346,10 @@ impl Agent {
             }
             chat.ids.extend(tk.encode_segment(&turns.results(&pairs)));
             let _ = self.memory.save(&chat.conv);
+            if stuck >= 2 {
+                (self.events)(Event::Error { message: "Stopped: the model kept repeating the same call. Send another message to go on.".into() });
+                break;
+            }
             if steps == MAX_STEPS {
                 (self.events)(Event::Error { message: format!("Stopped after {MAX_STEPS} steps. Send another message to let it go on.") });
             }
@@ -285,6 +357,37 @@ impl Agent {
         let tokens_per_s = if decode_ms > 0.0 { total.generated as f64 / (decode_ms / 1000.0) } else { 0.0 };
         (self.events)(Event::Done { steps, prompt_tokens: total.prompt_tokens, cached_tokens: total.cached_tokens, generated: total.generated, tokens_per_s });
         Ok(())
+    }
+
+    /// Calls the harness makes for the model, written into the conversation as if the model
+    /// had made them: the window shows them as calls, and the model reads the results as
+    /// its own. They come from the person's own words, so they are not asked about. Gives
+    /// the results, joined.
+    async fn harness_calls(&self, chat: &mut Chat, turns: &Turns<'_>, made: &mut HashSet<String>, calls: Vec<format::Call>) -> String {
+        let tk = turns.tokenizer;
+        let raw: String = calls.iter().map(|c| format!("<tool_call>\n{}\n</tool_call>", serde_json::json!({ "name": c.name, "arguments": c.arguments }))).collect::<Vec<_>>().join("\n");
+        chat.ids.extend(tk.encode_segment(&format!("{raw}{}", turns.close())));
+        chat.conv.messages.push(Message { role: "assistant".into(), content: raw, name: None });
+        let views: Vec<CallView> = calls.iter().map(|c| CallView { id: format!("{:016x}", rand::random::<u64>()), name: c.name.clone(), arguments: c.arguments.clone(), error: None }).collect();
+        (self.events)(Event::Reply { text: String::new(), thought: String::new(), calls: views.clone() });
+        let results = futures_util::future::join_all(calls.iter().zip(&views).map(|(c, view)| async move {
+            let (ok, text) = match self.tools.call(&c.name, &c.arguments).await {
+                Ok(t) => (true, t),
+                Err(e) => (false, format!("Error: {e:#}")),
+            };
+            let text = head_tail(&text, tools::OUTPUT_CHARS);
+            (self.events)(Event::Result { id: view.id.clone(), name: c.name.clone(), ok, text: text.clone() });
+            text
+        }))
+        .await;
+        let mut pairs = Vec::new();
+        for (c, text) in calls.iter().zip(&results) {
+            made.insert(call_key(c));
+            chat.conv.messages.push(Message { role: "tool".into(), content: text.clone(), name: Some(c.name.clone()) });
+            pairs.push((c.name.clone(), text.clone()));
+        }
+        chat.ids.extend(tk.encode_segment(&turns.results(&pairs)));
+        results.join("\n")
     }
 
     /// Makes room for the next answer: the oldest tool results are cut down first. The
@@ -439,14 +542,21 @@ mod tests {
         let tail = r.brain.tk.decode(&fed[1][fed[0].len()..]);
         assert!(tail.starts_with(WRITE) && tail.contains("<tool_response>\nWrote 2 bytes to a.txt.\n</tool_response>"), "{tail}");
         // Saved, and the same tokens come back from the saved messages. Only the system
-        // prompt differs: it lists the folder as it is now, a.txt included.
+        // prompt differs (it lists the folder as it is now, a.txt included), and the
+        // message's sending time, which is not saved.
         let saved = r.agent.memory.load(&chat.conv.id).unwrap();
         assert_eq!(saved.messages, chat.conv.messages);
         let mut reopened = Chat::new(saved);
         let turns = Turns { tokenizer: &r.brain.tk, think: false };
         reopened.ids = r.agent.render(&reopened, &turns);
         let im_end = r.brain.tk.token_id("<|im_end|>").unwrap();
-        let after_system = |ids: &[u32]| ids[ids.iter().position(|&t| t == im_end).unwrap()..].to_vec();
+        let after_system = |ids: &[u32]| {
+            let text = r.brain.tk.decode(&ids[ids.iter().position(|&t| t == im_end).unwrap()..]);
+            match (text.find("\n\n(Sent "), text.find("local time)")) {
+                (Some(a), Some(b)) => format!("{}{}", &text[..a], &text[b + "local time)".len()..]),
+                _ => text,
+            }
+        };
         assert_eq!(after_system(&reopened.ids), after_system(&chat.ids));
         assert!(r.brain.tk.decode(&reopened.ids).contains("a.txt (2 bytes)"));
     }
@@ -467,13 +577,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_agent_stops_after_the_step_limit_or_when_told() {
+    async fn the_agent_stops_a_repeating_model_or_when_told() {
+        // The same call again is not run; the model hears so, and a second answer of only
+        // repeats ends the turn.
         let looping = "<tool_call>{\"name\": \"list_dir\", \"arguments\": {}}</tool_call>";
         let r = agent(&[looping], Decision::Allow);
         let mut chat = Chat::new(Conversation::new(None));
         r.agent.turn(&mut chat, "go", Settings::default(), Arc::default()).await.unwrap();
-        assert_eq!(r.brain.fed.lock().unwrap().len(), MAX_STEPS);
-        assert!(r.seen.lock().unwrap().iter().any(|e| matches!(e, Event::Error { message } if message.contains("Stopped after"))));
+        assert_eq!(r.brain.fed.lock().unwrap().len(), 3);
+        assert!(chat.conv.messages[4].content.starts_with("You already made this exact call"));
+        assert!(r.seen.lock().unwrap().iter().any(|e| matches!(e, Event::Error { message } if message.contains("kept repeating"))));
         // Told to stop while the first call waits for approval: no second step.
         let stop = Arc::new(AtomicBool::new(false));
         let r = agent(&[WRITE], Decision::Allow);
@@ -482,6 +595,15 @@ mod tests {
         let mut chat = Chat::new(Conversation::new(None));
         agent.turn(&mut chat, "go", Settings::default(), stop).await.unwrap();
         assert_eq!(r.brain.fed.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn asking_for_news_or_the_web_gives_a_search_of_the_question() {
+        assert_eq!(web_query("can you check for today’s cybersecurity news on the web").as_deref(), Some("cybersecurity news"));
+        assert_eq!(web_query("just give me the latest F1 grand prix results").as_deref(), Some("latest F1 grand prix results"));
+        assert_eq!(web_query("what's the weather in Pune?").as_deref(), Some("what's weather in Pune"));
+        assert_eq!(web_query("read the README and fix the build"), None);
+        assert_eq!(web_query("search the project for TODO"), None);
     }
 
     #[tokio::test]
