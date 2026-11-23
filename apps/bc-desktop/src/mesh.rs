@@ -19,6 +19,13 @@ pub struct MeshState {
     starting: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
 
+impl MeshState {
+    /// The running model, for the Agent page.
+    pub async fn session(&self) -> Option<Arc<Session>> {
+        self.running.lock().await.as_ref().map(|r| r.session.clone())
+    }
+}
+
 struct Running {
     session: Arc<Session>,
     port: u16,
@@ -225,9 +232,9 @@ pub async fn mesh_start(app: AppHandle, state: State<'_, AppState>, mesh: State<
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.map_err(|e| format!("port {port}: {e}"))?;
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let home = state.home.clone();
-    let served = Arc::new(bc_cli::serve::Served {
-        session: session.clone(),
-        targets: Arc::new(move || {
+    let served = Arc::new(bc_cli::serve::Served::new(
+        session.clone(),
+        Arc::new(move || {
             let home = home.clone();
             Box::pin(async move {
                 let me = bc_net::load_or_create_key(&bc_cli::flows::key_path(&home))?.public().to_string();
@@ -235,7 +242,7 @@ pub async fn mesh_start(app: AppHandle, state: State<'_, AppState>, mesh: State<
                 mesh_targets(&cloud, &me, &home).await
             })
         }),
-    });
+    ));
     let balancer = session.clone();
     tokio::spawn(async move {
         let server = axum::serve(listener, bc_cli::serve::router(served)).with_graceful_shutdown(async {
@@ -268,32 +275,6 @@ pub async fn mesh_stop(mesh: State<'_, MeshState>) -> CmdResult<()> {
         r.session.llm.set_replicas(Vec::new());
     }
     Ok(())
-}
-
-#[derive(Serialize)]
-pub struct ChatStats {
-    prompt_tokens: usize,
-    generated: usize,
-    passes: usize,
-    first_token_ms: f64,
-    tokens_per_s: f64,
-}
-
-/// Answers one message with the running model, sending `mesh-text` events as it writes.
-#[tauri::command]
-pub async fn mesh_chat(app: AppHandle, mesh: State<'_, MeshState>, prompt: String) -> CmdResult<ChatStats> {
-    let session = mesh.running.lock().await.as_ref().map(|r| r.session.clone()).ok_or("no model is running")?;
-    let llm = session.llm.clone();
-    let ids = llm.tokenizer.encode(&llm.tokenizer.chat_prompt(&[("user".into(), prompt)]));
-    let max = 512.min(llm.cfg.context.saturating_sub(ids.len()));
-    let (_, s) = llm
-        .generate(&ids, max, bc_infer::Sampling::default(), |t| {
-            let _ = app.emit("mesh-text", t.to_string());
-        })
-        .await
-        .map_err(err_chain)?;
-    let decode_s = (s.total_ms - s.first_token_ms).max(1.0) / 1000.0;
-    Ok(ChatStats { prompt_tokens: s.prompt_tokens, generated: s.generated, passes: s.passes, first_token_ms: s.first_token_ms, tokens_per_s: s.generated.saturating_sub(1) as f64 / decode_s })
 }
 
 /// What this device runs for other devices' meshes, loading or running, for its Overview

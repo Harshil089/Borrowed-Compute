@@ -335,11 +335,53 @@ pub fn model_spec(name: &str, h: &Header) -> Result<Model> {
 #[derive(Debug, Clone, Default)]
 pub struct Stats {
     pub prompt_tokens: usize,
+    /// Prompt tokens the stages already held from this conversation's earlier requests.
+    pub cached_tokens: usize,
     pub generated: usize,
     /// Trips through the pipeline after the prompt.
     pub passes: usize,
     pub first_token_ms: f64,
     pub total_ms: f64,
+}
+
+/// What one conversation's stream already holds on a pipeline's stages, so its next
+/// request sends only the tokens after that (an agent's next step: a tool result and a
+/// new turn) instead of the whole history again.
+#[derive(Default)]
+pub struct Cached {
+    stream: u64,
+    client: Option<Arc<Client>>,
+    ids: Vec<u32>,
+    stop: Option<Arc<AtomicBool>>,
+}
+
+impl Cached {
+    /// Ends the request in progress, cleanly, at its next token once `flag` is set.
+    pub fn stop_with(&mut self, flag: Arc<AtomicBool>) {
+        self.stop = Some(flag);
+    }
+
+    /// Tokens the stages hold for this conversation.
+    pub fn held(&self) -> &[u32] {
+        &self.ids
+    }
+
+    /// Forgets what the stages hold: the next request starts at position 0.
+    pub fn reset(&mut self) {
+        self.ids.clear();
+    }
+}
+
+/// How much of `prompt` can be skipped because the stages already hold it. At least one
+/// token is always fed, to get the next one. A running state (`recurrent`) cannot go back,
+/// so it continues only when the prompt extends exactly what it holds.
+fn reusable(held: &[u32], prompt: &[u32], recurrent: bool) -> usize {
+    let common = held.iter().zip(prompt).take_while(|(a, b)| a == b).count();
+    if recurrent {
+        if common == held.len() && common < prompt.len() { common } else { 0 }
+    } else {
+        common.min(prompt.len().saturating_sub(1))
+    }
 }
 
 pub struct Llm {
@@ -419,7 +461,7 @@ impl Llm {
         stats: &mut Stats,
         meta: &impl Fn(usize, bool) -> Meta,
         push: &mut impl FnMut(u32, &mut Vec<u32>, &mut Vec<u32>) -> bool,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         let mut d = match draft {
             Some(draft) => Some(draft_run((draft.clone(), draft.new_kv()), prompt.to_vec(), 0).await?.0),
             None => None,
@@ -508,11 +550,19 @@ impl Llm {
                 break;
             }
         }
-        Ok(())
+        // The last tree is still whole in the stages' caches (the next batch's `keep` would
+        // have compacted it): only the tokens before it are known to be in place.
+        Ok(keep.map_or(*target_len, |(base, _)| base as usize))
     }
 
     /// Generates up to `max_tokens` after `prompt`, calling `on_text` with each new piece.
-    pub async fn generate(&self, prompt: &[u32], max_tokens: usize, sampling: Sampling, mut on_text: impl FnMut(&str)) -> Result<(Vec<u32>, Stats)> {
+    pub async fn generate(&self, prompt: &[u32], max_tokens: usize, sampling: Sampling, on_text: impl FnMut(&str)) -> Result<(Vec<u32>, Stats)> {
+        self.generate_cached(&mut Cached::default(), prompt, max_tokens, sampling, on_text).await
+    }
+
+    /// [`generate`](Self::generate) on a conversation's own stream: the part of `prompt`
+    /// the stages already hold from earlier requests (see [`Cached`]) is not sent again.
+    pub async fn generate_cached(&self, cache: &mut Cached, prompt: &[u32], max_tokens: usize, sampling: Sampling, mut on_text: impl FnMut(&str)) -> Result<(Vec<u32>, Stats)> {
         if prompt.is_empty() {
             bail!("the prompt is empty");
         }
@@ -520,17 +570,31 @@ impl Llm {
             bail!("{} prompt tokens plus {max_tokens} to write exceed the model's context of {}", prompt.len(), self.cfg.context);
         }
         let started = Instant::now();
-        let client = self.pick()?;
-        let stream: u64 = rand::random();
-        let mut stats = Stats { prompt_tokens: prompt.len(), ..Default::default() };
+        // A stream lives on one pipeline: on another (or a restarted one) it starts over.
+        let client = match &cache.client {
+            Some(c) if c.alive() && self.replicas().iter().any(|r| Arc::ptr_eq(r, c)) => c.clone(),
+            _ => {
+                cache.ids.clear();
+                self.pick()?
+            }
+        };
+        if cache.stream == 0 {
+            cache.stream = rand::random::<u64>() | 1;
+        }
+        let stream = cache.stream;
+        let skip = reusable(&cache.ids, prompt, self.cfg.recurrent());
+        // Until this request ends well, the stages' state is unknown: start over next time.
+        cache.ids.clear();
+        cache.client = Some(client.clone());
+        let mut stats = Stats { prompt_tokens: prompt.len(), cached_tokens: skip, ..Default::default() };
         let meta = |pos: usize, all_rows: bool| Meta { stream, pos: pos as u32, all_rows, sampling, ..Default::default() };
 
         // Prompt: every chunk sent before any answer is read.
         client.in_flight.fetch_add(1, Ordering::Relaxed);
         let first = async {
             let mut waits = Vec::new();
-            for (i, chunk) in prompt.chunks(PREFILL_CHUNK).enumerate() {
-                waits.push(client.submit(meta(i * PREFILL_CHUNK, false), Activation::Tokens(chunk.to_vec())).await?);
+            for (i, chunk) in prompt[skip..].chunks(PREFILL_CHUNK).enumerate() {
+                waits.push(client.submit(meta(skip + i * PREFILL_CHUNK, false), Activation::Tokens(chunk.to_vec())).await?);
             }
             let mut last = None;
             for w in waits {
@@ -550,8 +614,9 @@ impl Llm {
         let mut target_len = prompt.len(); // tokens in the stages' caches
         let mut out: Vec<u32> = Vec::new();
         let mut shown = String::new();
+        let stop = cache.stop.clone();
         let mut push = |id: u32, out: &mut Vec<u32>, seq: &mut Vec<u32>| -> bool {
-            if self.tokenizer.is_stop(id) || out.len() >= max_tokens {
+            if self.tokenizer.is_stop(id) || out.len() >= max_tokens || stop.as_ref().is_some_and(|s| s.load(Ordering::Relaxed)) {
                 return false;
             }
             out.push(id);
@@ -565,6 +630,7 @@ impl Llm {
         };
         if !push(first, &mut out, &mut seq) {
             stats.total_ms = started.elapsed().as_secs_f64() * 1000.0;
+            cache.ids = prompt.to_vec();
             return Ok((out, stats));
         }
 
@@ -584,6 +650,8 @@ impl Llm {
             // as keep the link's share of a token small; the first trip measures both.
             let whole = client.local.is_none() && client.plan.stages.len() == 1;
             let mut run = 1;
+            // Every token the stages were given, including ones past a stop or the limit.
+            let mut fed: Vec<u32> = seq.clone();
             'text: while out.len() < max_tokens {
                 stats.passes += 1;
                 let m = Meta { run: run as u32, stops: if run > 1 { self.tokenizer.stops().to_vec() } else { Vec::new() }, ..meta(target_len, false) };
@@ -595,6 +663,8 @@ impl Llm {
                 }
                 // The stage has fed itself every token but the last.
                 target_len = seq.len() + ids.len() - 1;
+                fed.truncate(seq.len());
+                fed.extend_from_slice(&ids);
                 if whole {
                     let compute: f64 = back.stage_ms.iter().map(|&ms| ms as f64).sum();
                     run = burst(sent.elapsed().as_secs_f64() * 1000.0 - compute, compute / ids.len() as f64).min(max_tokens - out.len());
@@ -610,6 +680,8 @@ impl Llm {
             if greedy {
                 record(Mode::Plain, &stats);
             }
+            fed.truncate(target_len);
+            cache.ids = fed;
             return Ok((out, stats));
         }
 
@@ -617,10 +689,11 @@ impl Llm {
             client.in_flight.fetch_add(1, Ordering::Relaxed);
             let tree = self.tree_decode(&client, self.draft.as_ref().filter(|_| mode == Mode::Tree), prompt, &mut seq, &mut target_len, &mut out, max_tokens, &mut stats, &meta, &mut push).await;
             client.in_flight.fetch_sub(1, Ordering::Relaxed);
-            tree?;
+            let before_last = tree?;
             stats.generated = out.len();
             stats.total_ms = started.elapsed().as_secs_f64() * 1000.0;
             record(mode, &stats);
+            cache.ids = seq[..before_last.min(seq.len())].to_vec();
             return Ok((out, stats));
         }
 
@@ -718,6 +791,11 @@ impl Llm {
         stats.generated = out.len();
         stats.total_ms = started.elapsed().as_secs_f64() * 1000.0;
         record(Mode::Chain, &stats);
+        // A token is confirmed only once the row after it was scored, so every confirmed
+        // token but the newest went through the stages; wrong guesses past it are cut back
+        // when the next request starts there.
+        seq.pop();
+        cache.ids = seq;
         Ok((out, stats))
     }
 }
@@ -725,6 +803,22 @@ impl Llm {
 #[cfg(test)]
 mod tests {
     use super::Speed;
+
+    #[test]
+    fn a_conversation_sends_only_what_the_stages_lack() {
+        use super::reusable;
+        // A new turn after the held history: only the new part goes.
+        assert_eq!(reusable(&[1, 2, 3], &[1, 2, 3, 4, 5], false), 3);
+        // An edit earlier on: the stages go back to where it differs.
+        assert_eq!(reusable(&[1, 2, 3, 9], &[1, 2, 7, 4], false), 2);
+        // The same prompt again still feeds its last token, to get the next one.
+        assert_eq!(reusable(&[1, 2, 3], &[1, 2, 3], false), 2);
+        // A running state only continues, never goes back.
+        assert_eq!(reusable(&[1, 2, 3], &[1, 2, 3, 4], true), 3);
+        assert_eq!(reusable(&[1, 2, 3, 9], &[1, 2, 3, 4], true), 0);
+        assert_eq!(reusable(&[1, 2, 3], &[1, 2, 3], true), 0);
+        assert_eq!(reusable(&[], &[1], false), 0);
+    }
 
     #[test]
     fn a_slow_link_gets_several_tokens_a_trip() {

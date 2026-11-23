@@ -89,7 +89,6 @@ function renderPlan(pipelines, unused = [], drafters = []) {
 function renderRunning(s) {
   running = s.running ? s : null;
   $("mesh-running").classList.toggle("hidden", !running);
-  $("mesh-try").classList.toggle("hidden", !running);
   $("mesh-live").classList.toggle("hidden", !running);
   $("mesh-run").classList.toggle("hidden", !!running);
   $("mesh-measure").classList.toggle("hidden", !!running);
@@ -157,30 +156,6 @@ document.querySelectorAll("[data-goal]").forEach((b) => b.addEventListener("clic
   goal = b.dataset.goal;
   document.querySelectorAll("[data-goal]").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
 }));
-
-let answering = false;
-listen("mesh-text", (e) => {
-  if (answering) $("mesh-answer").textContent += e.payload;
-});
-$("mesh-chat-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const prompt = $("mesh-prompt").value.trim();
-  if (!prompt || answering) return;
-  answering = true;
-  $("mesh-send").disabled = true;
-  $("mesh-answer").textContent = "";
-  $("mesh-answer").classList.remove("hidden");
-  $("mesh-stats").textContent = "Thinking…";
-  try {
-    const s = await invoke("mesh_chat", { prompt });
-    $("mesh-stats").textContent = `${s.generated} tokens in ${s.passes} trips through the devices; first token after ${fmt(s.first_token_ms)} ms, then ${fmt(s.tokens_per_s, 1)} tokens/s.`;
-  } catch (err) {
-    $("mesh-stats").textContent = String(err);
-  } finally {
-    answering = false;
-    $("mesh-send").disabled = false;
-  }
-});
 
 // Stage timings while serving and the page is on screen.
 setInterval(async () => {

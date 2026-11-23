@@ -176,5 +176,46 @@ div.setting { cursor: default; }
 .mesh-layers { position: relative; height: 4px; border-radius: 2px; background: var(--fill); margin-top: 6px; overflow: hidden; }
 .mesh-layers span { position: absolute; top: 0; bottom: 0; background: var(--accent); border-radius: 2px; }
 .mesh-sum { padding: 11px 16px; border-top: 1px solid var(--border); font-size: 12px; color: var(--ink-3); background: var(--subtle); }
-.mesh-chat { display: flex; flex-direction: column; gap: 12px; padding: 16px; }
-.mesh-answer { white-space: pre-wrap; font-size: 13.5px; line-height: 1.6; color: var(--ink); -webkit-user-select: text; user-select: text; }
+/* Agent: conversations on the left, the open one on the right. */
+.agent { display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 14px; align-items: start; }
+.agent-side { display: flex; flex-direction: column; gap: 8px; padding: 10px; position: sticky; top: 12px; }
+.agent-list { display: flex; flex-direction: column; gap: 2px; max-height: 60vh; overflow-y: auto; }
+.a-conv { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 4px; padding: 7px 8px; border-radius: var(--radius-sm); background: transparent; box-shadow: none; text-align: left; font-size: 13px; }
+.a-conv[aria-current="true"] { background: var(--fill-2); }
+.a-conv-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.a-conv-when { grid-column: 1; font-size: 11px; color: var(--ink-3); }
+.a-conv-del { grid-row: 1 / span 2; grid-column: 2; padding: 2px 6px; background: transparent; box-shadow: none; color: var(--ink-3); visibility: hidden; }
+.a-conv:hover .a-conv-del, .a-conv:focus-within .a-conv-del { visibility: visible; }
+.agent-main { display: flex; flex-direction: column; min-height: 60vh; }
+#agent-memory { gap: 12px; padding: 16px; }
+#agent-memory textarea { width: 100%; font: 13px/1.55 var(--mono); }
+.agent-forget { margin-left: auto; }
+.agent-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+#agent-memory .agent-head { padding: 0 0 10px; }
+.agent-folder { display: inline-flex; align-items: center; gap: 6px; max-width: 55%; font-size: 12px; }
+.agent-folder span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-log { flex: 1; display: flex; flex-direction: column; gap: 12px; padding: 16px; overflow-y: auto; max-height: 62vh; }
+.agent-log:empty::before { content: "It can read and edit the folder's files, run commands on this computer or a paired device, read web pages, and remember what you tell it. Changes ask first."; color: var(--ink-3); font-size: 13px; line-height: 1.55; }
+.a-msg { white-space: pre-wrap; font-size: 13.5px; line-height: 1.6; color: var(--ink); overflow-wrap: anywhere; }
+.a-user { align-self: flex-end; max-width: 80%; padding: 8px 12px; border-radius: 12px; background: var(--fill-2); }
+.a-live { color: var(--ink-2); }
+.a-thought summary, .a-call summary { cursor: pointer; font-size: 12px; color: var(--ink-3); }
+.a-thought p { white-space: pre-wrap; font-size: 12.5px; line-height: 1.55; color: var(--ink-2); margin: 6px 0 0; }
+.a-call { display: flex; flex-direction: column; gap: 6px; padding: 9px 12px; border-radius: var(--radius-sm); box-shadow: inset 0 0 0 1px var(--border); background: var(--subtle); }
+.a-call-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.a-call-name { font: 500 12px/1.4 var(--mono); color: var(--ink); flex: none; }
+.a-call-arg { font: 12px/1.4 var(--mono); color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+.a-call pre { margin: 6px 0 0; max-height: 260px; overflow: auto; font: 12px/1.5 var(--mono); color: var(--ink-2); white-space: pre-wrap; }
+.a-approve { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.a-approve .hint { margin-right: auto; }
+.agent-compose { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border); }
+.agent-compose textarea { width: 100%; resize: vertical; min-height: 44px; font-size: 13.5px; line-height: 1.5; }
+.agent-compose-foot { display: flex; align-items: center; gap: 14px; }
+.agent-spacer { flex: 1; }
+.agent-stats { margin: 0; }
+.agent-stats:empty { display: none; }
+@media (max-width: 860px) {
+  .agent { grid-template-columns: minmax(0, 1fr); }
+  .agent-side { position: static; }
+  .agent-list { max-height: 160px; }
+}

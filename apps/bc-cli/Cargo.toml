@@ -29,9 +29,9 @@ ignore.workspace = true
 globset.workspace = true
 clap.workspace = true
 tempfile.workspace = true
+reqwest.workspace = true
 
 [dev-dependencies]
 bc-agent = { path = "../bc-agent" }
 bc-net = { path = "../../crates/bc-net", features = ["test-utils"] }
 iroh-relay = { workspace = true, features = ["server"] }
-reqwest.workspace = true
