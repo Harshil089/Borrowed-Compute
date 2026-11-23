@@ -5,6 +5,15 @@ use crate::quant::quantize_q8_0;
 
 /// A small random Llama-shaped model as a GGUF file: `layers` layers, width 64.
 pub fn tiny_model(layers: u32, neox: bool) -> Vec<u8> {
+    llama_like(layers, if neox { "qwen2" } else { "llama" })
+}
+
+/// [`tiny_model`] shaped like Qwen3: no query bias, each head's query and key normed.
+pub fn tiny_qwen3(layers: u32) -> Vec<u8> {
+    llama_like(layers, "qwen3")
+}
+
+fn llama_like(layers: u32, arch: &str) -> Vec<u8> {
     let (d, ff, vocab, heads, kv_heads) = (64u64, 128u64, 96u64, 4u32, 2u32);
     let mut seed = 0x9e3779b97f4a7c15u64;
     let mut rnd = |n: u64, scale: f32| -> Vec<f32> {
@@ -27,7 +36,13 @@ pub fn tiny_model(layers: u32, neox: bool) -> Vec<u8> {
         tensors.push((p("attn_q.weight"), vec![d, d], 8, q8(rnd(d * d, 0.15))));
         tensors.push((p("attn_k.weight"), vec![d, kvd], 8, q8(rnd(d * kvd, 0.15))));
         tensors.push((p("attn_v.weight"), vec![d, kvd], 8, q8(rnd(d * kvd, 0.15))));
-        tensors.push((p("attn_q.bias"), vec![d], 0, f32b(rnd(d, 0.1))));
+        if arch == "qwen3" {
+            let hd = d / heads as u64;
+            tensors.push((p("attn_q_norm.weight"), vec![hd], 0, f32b(rnd(hd, 0.2).iter().map(|v| v + 1.0).collect())));
+            tensors.push((p("attn_k_norm.weight"), vec![hd], 0, f32b(rnd(hd, 0.2).iter().map(|v| v + 1.0).collect())));
+        } else {
+            tensors.push((p("attn_q.bias"), vec![d], 0, f32b(rnd(d, 0.1))));
+        }
         tensors.push((p("attn_output.weight"), vec![d, d], 8, q8(rnd(d * d, 0.15))));
         tensors.push((p("ffn_norm.weight"), vec![d], 0, f32b(rnd(d, 0.2).iter().map(|v| v + 1.0).collect())));
         tensors.push((p("ffn_gate.weight"), vec![d, ff], 8, q8(rnd(d * ff, 0.15))));
@@ -36,25 +51,25 @@ pub fn tiny_model(layers: u32, neox: bool) -> Vec<u8> {
     }
     tensors.push(("output_norm.weight".into(), vec![d], 0, f32b(vec![1.0; d as usize])));
     tensors.push(("output.weight".into(), vec![d, vocab], 8, q8(rnd(d * vocab, 0.3))));
-    let arch = if neox { "qwen2" } else { "llama" };
     // Tokens: specials, then printable characters (the test tokenizer is per character).
     let mut tokens: Vec<String> = vec!["<unk>".into(), "<s>".into(), "</s>".into()];
     tokens.extend((0..(vocab as usize - 3)).map(|i| char::from(b' ' + (i % 95) as u8).to_string()));
     let meta = vec![
-        ("general.architecture", Meta::Str(arch.into())),
-        ("general.name", Meta::Str("tiny".into())),
-        (if neox { "qwen2.embedding_length" } else { "llama.embedding_length" }, Meta::U32(d as u32)),
-        (if neox { "qwen2.block_count" } else { "llama.block_count" }, Meta::U32(layers)),
-        (if neox { "qwen2.attention.head_count" } else { "llama.attention.head_count" }, Meta::U32(heads)),
-        (if neox { "qwen2.attention.head_count_kv" } else { "llama.attention.head_count_kv" }, Meta::U32(kv_heads)),
-        (if neox { "qwen2.feed_forward_length" } else { "llama.feed_forward_length" }, Meta::U32(ff as u32)),
-        (if neox { "qwen2.context_length" } else { "llama.context_length" }, Meta::U32(2048)),
-        ("tokenizer.ggml.model", Meta::Str("llama".into())),
-        ("tokenizer.ggml.tokens", Meta::Strs(tokens)),
-        ("tokenizer.ggml.scores", Meta::F32s(vec![0.0; vocab as usize])),
-        ("tokenizer.ggml.bos_token_id", Meta::U32(1)),
-        ("tokenizer.ggml.eos_token_id", Meta::U32(2)),
+        ("general.architecture".to_string(), Meta::Str(arch.into())),
+        ("general.name".to_string(), Meta::Str("tiny".into())),
+        (format!("{arch}.embedding_length"), Meta::U32(d as u32)),
+        (format!("{arch}.block_count"), Meta::U32(layers)),
+        (format!("{arch}.attention.head_count"), Meta::U32(heads)),
+        (format!("{arch}.attention.head_count_kv"), Meta::U32(kv_heads)),
+        (format!("{arch}.feed_forward_length"), Meta::U32(ff as u32)),
+        (format!("{arch}.context_length"), Meta::U32(2048)),
+        ("tokenizer.ggml.model".to_string(), Meta::Str("llama".into())),
+        ("tokenizer.ggml.tokens".to_string(), Meta::Strs(tokens)),
+        ("tokenizer.ggml.scores".to_string(), Meta::F32s(vec![0.0; vocab as usize])),
+        ("tokenizer.ggml.bos_token_id".to_string(), Meta::U32(1)),
+        ("tokenizer.ggml.eos_token_id".to_string(), Meta::U32(2)),
     ];
+    let meta: Vec<(&str, Meta)> = meta.into_iter().map(|(k, v)| (&*Box::leak(k.into_boxed_str()), v)).collect();
     let tensors: Vec<(&str, Vec<u64>, u32, Vec<u8>)> = tensors.iter().map(|(n, d, t, b)| (n.as_str(), d.clone(), *t, b.clone())).collect();
     gguf(&meta, &tensors)
 }

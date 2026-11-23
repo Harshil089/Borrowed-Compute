@@ -8,7 +8,8 @@
 //! softmax(q·kᵀ/√d)·v over every earlier position. Several query heads share one key/value
 //! head (grouped-query attention). RoPE rotates each pair of a head's dimensions by the
 //! angle p·θᵢ, θᵢ = base^(−2i/d): Llama pairs neighbours (2i, 2i+1), Qwen2 pairs i with
-//! i + d/2 ("NeoX" order).
+//! i + d/2 ("NeoX" order). Qwen3 (`qwen3`) is Qwen2 without the biases, with q and k
+//! RMS-normed per head before RoPE.
 //!
 //! Qwen3.5 (`qwen35`) differs in three ways:
 //! - Three layers in four replace attention with a gated DeltaNet: a short causal
@@ -96,8 +97,8 @@ impl Delta {
 impl Config {
     pub fn from_header(h: &Header) -> Result<Self> {
         let arch = h.arch().to_string();
-        if !matches!(arch.as_str(), "llama" | "qwen2" | "mistral" | "qwen35" | "qwen35moe") {
-            bail!("the {arch} architecture is not supported yet (llama, qwen2, qwen35 and qwen35moe are)");
+        if !matches!(arch.as_str(), "llama" | "qwen2" | "qwen3" | "mistral" | "qwen35" | "qwen35moe") {
+            bail!("the {arch} architecture is not supported yet (llama, qwen2, qwen3, qwen35 and qwen35moe are)");
         }
         let qwen35 = matches!(arch.as_str(), "qwen35" | "qwen35moe");
         // Multi-token-prediction blocks come after the model's own layers and are not run.
@@ -142,7 +143,7 @@ impl Config {
             head_dim,
             rope_dim: h.arch_u64("rope.dimension_count").map(|v| v as usize).unwrap_or(head_dim),
             rope_base: h.arch_f64("rope.freq_base").unwrap_or(10000.0) as f32,
-            rope_neox: arch == "qwen2" || qwen35,
+            rope_neox: matches!(arch.as_str(), "qwen2" | "qwen3") || qwen35,
             eps: h.arch_f64("attention.layer_norm_rms_epsilon").unwrap_or(1e-5) as f32,
             vocab,
             context: h.arch_u64("context_length").unwrap_or(4096) as usize,
@@ -1059,8 +1060,7 @@ pub(crate) mod tests {
             eprintln!("no GPU here: skipped");
             return;
         }
-        for neox in [false, true] {
-            let file = tiny_model(4, neox);
+        for file in [tiny_model(4, false), tiny_model(4, true), crate::fixtures::tiny_qwen3(4)] {
             let gpu = load_all(&file, 0..4, true, true);
             assert_eq!(gpu.gpu_layers(), (4, true), "all of a small model goes on the GPU");
             let cpu = load_all(&file, 0..4, true, true).without_gpu();
