@@ -88,6 +88,9 @@ pub fn catalog() -> Vec<Model> {
         Model { read: 0.13, ..m("qwen3.6-35b-a3b", 40, 20.61, 0.7, 2048, hf("unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"), None) },
         // The same at 3 bits (Q3_K_M): 16 GB, for two devices that cannot hold 21.
         Model { read: 0.13, ..m("qwen3.6-35b-a3b-q3", 40, 15.94, 0.6, 2048, hf("bartowski/Qwen_Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen_Qwen3.6-35B-A3B-Q3_K_M.gguf"), None) },
+        // Qwen3: plain attention, so its 0.6B (same vocabulary) drafts guesses for the 8B.
+        m("qwen3-0.6b", 28, 0.40, 0.15, 1024, hf("unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf"), None),
+        m("qwen3-8b", 36, 5.03, 0.7, 4096, hf("unsloth/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf"), Some("qwen3-0.6b")),
         m("qwen2.5-0.5b", 24, 0.46, 0.13, 896, hf("Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf"), None),
         m("llama-3.2-1b", 16, 0.75, 0.2, 2048, hf("bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf"), None),
         m("qwen2.5-1.5b", 28, 1.04, 0.2, 1536, hf("Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf"), Some("qwen2.5-0.5b")),
