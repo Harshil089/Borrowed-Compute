@@ -53,7 +53,7 @@ model text, tool results and fetched pages, always treated as untrusted and kept
 |---|---|---|
 | Loop, approvals, stop | Steps until no call, 25-step cap, a 16,384-token budget per turn, repeat guard, Allow / Always / Deny, Stop at the next token | `agent/mod.rs` |
 | Prompt and KV reuse | Conversations kept as token ids, append-only; the stages keep the stream; a step sends only new tokens (98–99% reuse measured in the app); per-message notes (time, context use, related lines) go at the end of the user turn, never into the prefix | `Cached` in `bc-mesh/src/llm.rs`, `agent/mod.rs` |
-| Router | Fast paths read the message (a reminder with a time; news or the web). Otherwise the **decision step**: the model picks one numbered action with decoding held to those digit tokens (`Sampling::allow`), and the harness makes the calls itself: a search and its top 2 pages, the files the message names (or a small folder's top level), or recall | `agent/route.rs`, `harness_calls`, `files_for` |
+| Router | Shortcuts that read the message: a reminder with a time; news or the web; past-conversation phrases ("I mentioned", "we discussed"); folder words or a named file; and on a conversation's first message, a small folder (at most 4 files of 16 KB) is read whatever the words. The harness then makes the calls itself: a search and its top 2 pages, the files, or recall. A **decision step** (the model picks one numbered action, decoding held to those digit tokens by `Sampling::allow`) is built but off by default: see the measurements below | `agent/route.rs`, `harness_calls`, `files_for` |
 | Run log | `<home>/runs/<conversation>.jsonl`: message, route, each answer with token counts, each call before and after, compaction, end reason. A turn cut off by a crash is reported, with the calls that may have run, to the person and the model. `bc agent list`, `bc agent log <id>` | `agent/log.rs` |
 | Context | Tool output past its room is kept whole as an artifact (`read_artifact`); old tool results trimmed; then everything before the current turn replaced by the model's summary | `run_call`, `fit`, `summarize` |
 | Model gateway | The mesh `Llm`, or any OpenAI-compatible server (Ollama, LM Studio, llama.cpp, vLLM) through `/v1/completions` with a byte-level vocabulary in the model's chat format, used when no mesh model runs | `agent/http.rs`, `Tokenizer::byte_level` |
@@ -65,11 +65,26 @@ model text, tool results and fetched pages, always treated as untrusted and kept
 | Streaming API | OpenAI-compatible endpoint with tool calls and prompt reuse | `apps/bc-cli/src/serve.rs` |
 | Sandbox | Per-job Seatbelt or AppContainer, workspace deleted after each job | `apps/bc-agent` |
 
+Measured with `bc agent eval docs/agent-evals/cases.json --mesh qwen3-0.6b` on an M-series
+MacBook Air, the model on this computer alone (2026-11-23):
+
+| Harness | Passed | Time |
+|---|---|---|
+| Before the shortcuts below, decision step on | 11 of 20 | |
+| Before the shortcuts, decision step off | 6 of 20 | |
+| Past-conversation and folder shortcuts, worked examples in the decision prompt | 17 of 20 (on), 18 of 20 (off) | |
+| Plus reading a small folder on the first message: decision step off | **20 of 20** | 393 s |
+| The same, decision step on | 18 of 20 | 614 s |
+
+The decision step picked "answer" for every message before it had worked examples, and
+afterwards added time without a pass the shortcuts missed, so it is off by default
+(`Settings::decision`; `bc agent eval --decision` measures it for other models). One run
+with it on stopped with "the GPU stopped with status Error" on a long web-results prompt,
+an engine bug to chase. qwen3-8b is not measured yet.
+
 Not built yet, in the order they would pay off:
 
-1. **Real-model numbers.** Nothing above has run on real weights in this repository's
-   tests; `bc agent eval` against qwen3-0.6b and qwen3-8b (with and without the decision
-   step) gives the baseline the phases were meant to beat.
+1. **The engine's GPU error** on a long prompt, seen once in the evals above.
 2. **Grammar-constrained tool arguments.** The decision step holds one token to a range;
    holding a whole JSON object to a schema needs a token mask per step sent to the last
    stage, a wire change.
@@ -223,13 +238,13 @@ and MCP tools share it.
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Public-pages-only `fetch_url` and `web_search`; reminders; context use | Built |
-| 1 | Run log, cut-off turns, turn budget, the constrained decision step | Built; real-model accuracy not yet measured |
+| 1 | Run log, cut-off turns, turn budget, the constrained decision step | Built; measured on qwen3-0.6b (20 of 20 with the shortcuts; the decision step off by default) |
 | 2 | Artifacts and compaction, the model-server brain, MCP with `find_tools` | Built; fallback only when no mesh model runs |
 | 3 | Sub-agents, skills, evals | Built; replay, a folder index and script-rendered pages remain |
 
 Each part has tests with the scripted brain (and a stand-in model server and MCP
-server); the next check is `bc agent eval docs/agent-evals/cases.json` against a real
-model, with its numbers recorded here.
+server), and the eval set has run on real qwen3-0.6b weights (section 2); qwen3-8b is
+next.
 
 ## Not doing
 

@@ -140,9 +140,9 @@ enum AgentAction {
         /// The server model's context in tokens.
         #[arg(long, default_value_t = 8192)]
         context: usize,
-        /// Leave out the decision step, to measure what it adds.
+        /// Run the decision step too, to measure what it adds.
         #[arg(long)]
-        no_decision: bool,
+        decision: bool,
     },
 }
 
@@ -446,7 +446,7 @@ async fn agent(action: AgentAction) -> Result<()> {
             }
             println!("{}", bc_cli::agent::log::describe(&events).trim_start());
         }
-        AgentAction::Eval { cases, url, model, mesh, context, no_decision } => {
+        AgentAction::Eval { cases, url, model, mesh, context, decision } => {
             use bc_cli::agent::http::{HttpBrain, ModelServer};
             use bc_cli::agent::Brain;
             let list: Vec<bc_cli::agent::eval::Case> = serde_json::from_slice(&std::fs::read(&cases).with_context(|| format!("cannot read {}", cases.display()))?)?;
@@ -466,7 +466,7 @@ async fn agent(action: AgentAction) -> Result<()> {
             };
             let scratch = tempfile::tempdir()?;
             let base = cases.parent().unwrap_or(std::path::Path::new("."));
-            let settings = bc_cli::agent::Settings { skip_decision: no_decision, ..Default::default() };
+            let settings = bc_cli::agent::Settings { decision, ..Default::default() };
             let started = std::time::Instant::now();
             let out = bc_cli::agent::eval::run(brain, &list, base, scratch.path(), settings).await?;
             drop(session);

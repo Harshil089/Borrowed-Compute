@@ -157,9 +157,11 @@ pub struct Settings {
     /// Run every call without asking.
     #[serde(default)]
     pub auto_approve: bool,
-    /// Leave out the decision step (`bc agent eval --no-decision` measures what it adds).
+    /// Run the decision step for messages no shortcut routes. Off by default: on real
+    /// qwen3-0.6b weights it added time and no passes (`docs/harness.md`); `bc agent eval
+    /// --decision` measures it again for other models.
     #[serde(default)]
-    pub skip_decision: bool,
+    pub decision: bool,
 }
 
 /// One open conversation: what it says, and what the model has been fed of it.
@@ -334,7 +336,7 @@ impl Agent {
             // The first message with a small folder chosen: its few files are read once, so
             // a question about them needs neither the right words nor the model's choice.
             Some(Route::Files)
-        } else if settings.skip_decision {
+        } else if !settings.decision {
             None
         } else {
             let mut options = vec![Route::Answer];
@@ -852,7 +854,7 @@ mod tests {
         // Not the first message, which reads a small folder without asking.
         chat.conv.messages.push(Message { role: "user".into(), content: "hi".into(), name: None });
         chat.conv.messages.push(Message { role: "assistant".into(), content: "Hello.".into(), name: None });
-        r.agent.turn(&mut chat, "what does the note say", Settings::default(), Arc::default()).await.unwrap();
+        r.agent.turn(&mut chat, "what does the note say", Settings { decision: true, ..Default::default() }, Arc::default()).await.unwrap();
         let roles: Vec<&str> = chat.conv.messages.iter().map(|m| m.role.as_str()).collect();
         assert_eq!(roles, ["user", "assistant", "user", "assistant", "tool", "assistant"]);
         assert!(chat.conv.messages[4].content.contains("hello"), "{:?}", chat.conv.messages);
