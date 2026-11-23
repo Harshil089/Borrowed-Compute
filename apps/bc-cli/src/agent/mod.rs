@@ -204,6 +204,11 @@ impl Agent {
         if !recent.is_empty() {
             base.push_str(&format!("\n\nWhat the person said in their latest other conversations, newest first (use recall to search all of them):\n{recent}"));
         }
+        let skills = self.memory.skills();
+        if !skills.is_empty() {
+            let list: String = skills.iter().map(|(n, d)| format!("\n- {n}: {d}")).collect();
+            base.push_str(&format!("\n\nThe person's skills, instructions for tasks of theirs; load one with use_skill before such a task:{list}"));
+        }
         let notes = self.memory.notes_for_prompt();
         if !notes.is_empty() {
             base.push_str(&format!("\n\nNotes from earlier conversations (use recall to search them in full):\n{notes}"));
@@ -453,7 +458,7 @@ impl Agent {
         let views: Vec<CallView> = calls.iter().map(|c| CallView { id: format!("{:016x}", rand::random::<u64>()), name: c.name.clone(), arguments: c.arguments.clone(), error: None }).collect();
         (self.events)(Event::Reply { text: String::new(), thought: String::new(), calls: views.clone() });
         let results = futures_util::future::join_all(calls.iter().zip(&views).map(|(c, view)| async move {
-            let (ok, text) = self.run_call(&chat_id_of(&self.tools), &view.id, c, true, tools::OUTPUT_CHARS).await;
+            let (ok, text) = self.run_call(&chat_id_of(&self.tools), &view.id, c, true, tools::OUTPUT_CHARS, Settings::default()).await;
             (self.events)(Event::Result { id: view.id.clone(), name: c.name.clone(), ok, text: text.clone() });
             text
         }))
@@ -466,6 +471,38 @@ impl Agent {
         }
         chat.ids.extend(tk.encode_segment(&turns.results(&pairs)));
         results.join("\n")
+    }
+
+    /// Runs `goal` as a conversation of its own with the same model and tools, less `task`,
+    /// and gives its final answer. The window sees its calls (and approves them) but not
+    /// its text; the helper's conversation is not kept, and its steps are in this run log
+    /// only as the task's call and result.
+    fn subtask<'a>(&'a self, goal: &'a str, settings: Settings) -> BoxFuture<'a, Result<String>> {
+        Box::pin(async move {
+            let mut tools = self.tools.clone();
+            tools.subagents = false;
+            let mut conv = Conversation::new(tools.root.as_ref().map(|r| r.display().to_string()));
+            conv.title = format!("Task: {}", format::clip(goal, 50));
+            tools.conversation = conv.id.clone();
+            let events = self.events.clone();
+            let helper = Agent {
+                brain: self.brain.clone(),
+                tools,
+                memory: self.memory.clone(),
+                events: Arc::new(move |e| match e {
+                    Event::Reply { calls, .. } if !calls.is_empty() => events(Event::Reply { text: String::new(), thought: String::new(), calls }),
+                    Event::Approve(_) | Event::Result { .. } => events(e),
+                    _ => {}
+                }),
+                approve: self.approve.clone(),
+            };
+            let mut chat = Chat::new(conv);
+            let done = helper.turn(&mut chat, goal, settings, Arc::default()).await;
+            let _ = self.memory.delete(&chat.conv.id);
+            done?;
+            let answer = chat.conv.messages.iter().rev().find(|m| m.role == "assistant").map(|m| parse(&m.content).text).unwrap_or_default();
+            Ok(if answer.trim().is_empty() { "The helper finished without an answer.".into() } else { answer })
+        })
     }
 
     /// Files to read for a question about the folder: those the message names, else the
@@ -497,10 +534,18 @@ impl Agent {
     /// Runs one call, recorded in the run log before and after. Output longer than `keep`
     /// characters is kept whole as an artifact and the model gets its start and end, with
     /// the artifact's id to read the rest.
-    async fn run_call(&self, conversation: &str, id: &str, call: &format::Call, by_harness: bool, keep: usize) -> (bool, String) {
+    async fn run_call(&self, conversation: &str, id: &str, call: &format::Call, by_harness: bool, keep: usize, settings: Settings) -> (bool, String) {
         let log = self.memory.run_log(conversation);
         log.append(&RunEvent::Started { at: memory::now(), call: id.to_string(), name: call.name.clone(), arguments: call.arguments.clone(), by_harness });
-        let (ok, text) = match self.tools.call(&call.name, &call.arguments).await {
+        let result = if call.name == "task" && self.tools.subagents {
+            match call.arguments["goal"].as_str() {
+                Some(goal) => self.subtask(goal, settings).await,
+                None => Err(anyhow::anyhow!("task needs \"goal\"")),
+            }
+        } else {
+            self.tools.call(&call.name, &call.arguments).await
+        };
+        let (ok, text) = match result {
             Ok(t) => (true, t),
             Err(e) => (false, format!("Error: {e:#}")),
         };
@@ -598,7 +643,7 @@ impl Agent {
                 Decision::Allow => {}
             }
         }
-        let (ok, text) = self.run_call(&chat_id_of(&self.tools), &view.id, call, false, tools::OUTPUT_CHARS * 2).await;
+        let (ok, text) = self.run_call(&chat_id_of(&self.tools), &view.id, call, false, tools::OUTPUT_CHARS * 2, settings).await;
         (self.events)(Event::Result { id: view.id.clone(), name: call.name.clone(), ok, text: text.clone() });
         text
     }
@@ -811,6 +856,34 @@ mod tests {
         assert!(r.brain.tk.decode(&fed[0]).contains(&"a".repeat(400)));
         assert!(!r.brain.tk.decode(&fed[1]).contains(&"a".repeat(400)));
         assert!(log::describe(&r.agent.memory.run_log(&chat.conv.id).read()).contains("compacted 4 older messages"));
+    }
+
+    #[tokio::test]
+    async fn a_task_runs_in_a_helper_and_only_its_answer_comes_back() {
+        let task = "<tool_call>{\"name\": \"task\", \"arguments\": {\"goal\": \"count the files\"}}</tool_call>";
+        let r = agent(&[task, "The helper found 42.", "There are 42."], Decision::Allow);
+        let mut chat = Chat::new(Conversation::new(None));
+        r.agent.turn(&mut chat, "how many files?", Settings::default(), Arc::default()).await.unwrap();
+        assert_eq!(chat.conv.messages[2].content, "The helper found 42.");
+        assert_eq!(chat.conv.messages[3].content, "There are 42.");
+        let fed = r.brain.fed.lock().unwrap();
+        let helper = r.brain.tk.decode(&fed[1]);
+        assert!(helper.contains("count the files") && !helper.contains("how many files") && !helper.contains("\"name\":\"task\""), "{helper}");
+        // The helper's conversation is not kept.
+        assert_eq!(r.agent.memory.list().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn skills_are_listed_and_loaded_by_name() {
+        let r = agent(&["ok"], Decision::Allow);
+        let dir = r.dir.path().join("home/skills/deploy");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), "---\nname: deploy\ndescription: Ship the website to production.\n---\nRun `vercel deploy --prod` inside website/.").unwrap();
+        std::fs::write(dir.join("check.sh"), "echo ok").unwrap();
+        assert!(r.agent.system("c").contains("- deploy: Ship the website to production."));
+        let text = r.agent.tools.call("use_skill", &serde_json::json!({"name": "deploy"})).await.unwrap();
+        assert!(text.contains("vercel deploy --prod") && text.contains("check.sh"), "{text}");
+        assert!(r.agent.tools.call("use_skill", &serde_json::json!({"name": "../deploy"})).await.is_err());
     }
 
     #[tokio::test]

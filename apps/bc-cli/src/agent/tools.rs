@@ -67,6 +67,8 @@ pub struct Tools {
     pub devices: Vec<String>,
     /// The person's MCP servers, whose tools are named `<server>__<tool>`.
     pub mcp: Vec<Arc<super::mcp::McpServer>>,
+    /// Whether `task` may hand work to a sub-agent; a sub-agent's own tools leave it out.
+    pub subagents: bool,
 }
 
 /// MCP tools listed in the prompt; past this many, the prompt lists `find_tools` instead
@@ -84,7 +86,7 @@ impl Tools {
             Some(r) => Some(r.canonicalize().with_context(|| format!("the folder {} is not there", r.display()))?),
             None => None,
         };
-        Ok(Tools { root, memory, conversation, runner, devices, mcp: Vec::new() })
+        Ok(Tools { root, memory, conversation, runner, devices, mcp: Vec::new(), subagents: true })
     }
 
     /// The tools this conversation offers the model.
@@ -132,6 +134,18 @@ impl Tools {
             &["when", "text"],
         ));
         out.push(spec("remember", "Keep a short note for every future conversation: a fact about the person, a preference, a decision.", json!({ "note": p("The note, one line.") }), &["note"]));
+        let skills = self.memory.skills();
+        if !skills.is_empty() {
+            out.push(spec("use_skill", "Load one of the person's skills (listed in the prompt): its instructions in full.", json!({ "name": p("The skill's name.") }), &["name"]));
+        }
+        if self.subagents {
+            out.push(spec(
+                "task",
+                "Hand a self-contained part of the work to a helper with the same tools and a fresh context: research, reading many files, a long check. Only its final answer comes back.",
+                json!({ "goal": p("What the helper should find or do, and what to answer with; it sees nothing of this conversation.") }),
+                &["goal"],
+            ));
+        }
         let mcp: Vec<&ToolSpec> = self.mcp.iter().flat_map(|s| &s.tools).collect();
         if mcp.len() <= MCP_LISTED {
             out.extend(mcp.into_iter().cloned());
@@ -230,6 +244,7 @@ impl Tools {
                 Ok("Noted.".to_string())
             }
             "find_tools" => Ok(self.find_tools(&need("query")?)),
+            "use_skill" => self.memory.skill(&need("name")?),
             _ => match self.server(name) {
                 Some((server, tool)) => server.call(&tool, args).await,
                 None => bail!("there is no tool called {name}"),
@@ -662,7 +677,7 @@ mod tests {
         // Without a runner there is no `run`, and without a folder no file tools.
         assert!(!t.specs().iter().any(|s| s.name == "run"));
         let bare = Tools::new(None, Memory::at(dir.path()), "c".into(), None, Vec::new()).unwrap();
-        assert_eq!(bare.specs().iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["read_artifact", "web_search", "fetch_url", "recall", "remind", "remember"]);
+        assert_eq!(bare.specs().iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["read_artifact", "web_search", "fetch_url", "recall", "remind", "remember", "task"]);
         assert!(bare.call("read_file", &json!({"path": "b.txt"})).await.is_err());
     }
 

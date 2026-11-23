@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// Notes go into every system prompt, so they are kept short: the newest this many
@@ -188,6 +188,40 @@ impl Memory {
     }
 
     /// The notes for a system prompt: the newest lines that fit.
+    /// The person's skills: `<home>/skills/<name>/SKILL.md`, each with the one line that
+    /// says what it is for (a `description:` line, else its first line of text).
+    pub fn skills(&self) -> Vec<(String, String)> {
+        let Ok(dir) = std::fs::read_dir(self.root.join("skills")) else { return Vec::new() };
+        let mut out: Vec<(String, String)> = dir
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let text = std::fs::read_to_string(e.path().join("SKILL.md")).ok()?;
+                let line = |l: &str| l.trim().trim_start_matches('#').trim().to_string();
+                let about = text
+                    .lines()
+                    .find_map(|l| l.trim().strip_prefix("description:").map(|d| d.trim().trim_matches('"').to_string()))
+                    .or_else(|| text.lines().map(line).find(|l| !l.is_empty() && l != "---" && !l.contains(':')))
+                    .unwrap_or_default();
+                valid_id(&name).then(|| (name, super::format::clip(&about, 200)))
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// A skill's instructions, and the other files beside them.
+    pub fn skill(&self, name: &str) -> Result<String> {
+        if !valid_id(name) {
+            bail!("no skill called {name}");
+        }
+        let dir = self.root.join("skills").join(name);
+        let text = std::fs::read_to_string(dir.join("SKILL.md")).with_context(|| format!("no skill called {name}"))?;
+        let others: Vec<String> = std::fs::read_dir(&dir).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n != "SKILL.md").collect();
+        let files = if others.is_empty() { String::new() } else { format!("\n\n[Other files of this skill, in {}: {}]", dir.display(), others.join(", ")) };
+        Ok(format!("{}{files}", super::format::head_tail(&text, 12_000)))
+    }
+
     pub fn notes_for_prompt(&self) -> String {
         let notes = self.notes();
         let mut kept: Vec<&str> = Vec::new();
@@ -256,6 +290,11 @@ fn split(text: &str, max: usize) -> Vec<String> {
         out.push(cur);
     }
     out
+}
+
+/// A name safe to join to a folder: letters, digits, `-`, `_` and `.` not leading.
+fn valid_id(name: &str) -> bool {
+    !name.is_empty() && !name.starts_with('.') && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 /// Words that say nothing about what a message is about; matching on them would recall
