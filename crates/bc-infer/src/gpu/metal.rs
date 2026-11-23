@@ -377,8 +377,28 @@ impl Backend {
             cb.wait_until_completed();
             match cb.status() {
                 metal::MTLCommandBufferStatus::Completed => Ok(()),
-                s => bail!("the GPU stopped with status {s:?}"),
+                s => bail!("the GPU stopped with status {s:?}: {}", error_text(cb)),
             }
         })
+    }
+}
+
+/// Why a command buffer failed, in Metal's words (a timeout, a fault, memory), which
+/// metal-rs does not expose.
+#[allow(unexpected_cfgs)] // objc's msg_send! checks a cfg this crate does not declare
+fn error_text(cb: &metal::CommandBufferRef) -> String {
+    use metal::objc::runtime::Object;
+    use metal::objc::{msg_send, sel, sel_impl};
+    // SAFETY: `error` and `localizedDescription` are plain NSError accessors; nil is checked.
+    unsafe {
+        let err: *mut Object = msg_send![cb, error];
+        if err.is_null() {
+            return "no reason given".into();
+        }
+        let text: *mut Object = msg_send![err, localizedDescription];
+        let code: isize = msg_send![err, code];
+        let utf8: *const std::os::raw::c_char = msg_send![text, UTF8String];
+        let what = if utf8.is_null() { String::new() } else { std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned() };
+        format!("{what} (code {code})")
     }
 }

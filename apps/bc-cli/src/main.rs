@@ -458,6 +458,7 @@ async fn agent(action: AgentAction) -> Result<()> {
                     let s = bc_cli::mesh::Session::start(endpoint, Vec::new(), &name, bc_mesh::plan::Goal::Latency, Some("none"), Vec::new(), |s| eprint!("\r\x1b[Kbc: {s}")).await?;
                     eprintln!();
                     let llm = s.llm.clone();
+                    eprintln!("bc: {name} with a context of {} tokens", llm.cfg.context);
                     session = Some(s);
                     llm
                 }

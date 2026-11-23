@@ -48,6 +48,12 @@ const SUMMARY_TOKENS: usize = 512;
 /// Room kept for the next answer when the conversation nears the model's context.
 const ANSWER_ROOM: usize = 1024;
 
+/// Room kept for the answer: [`ANSWER_ROOM`], or a quarter of a small context (the
+/// devices may hold only a few thousand tokens when memory is short).
+fn answer_room(context: usize) -> usize {
+    ANSWER_ROOM.min(context / 4)
+}
+
 /// A model the agent thinks with: the mesh's [`Llm`], or a scripted one in tests.
 pub trait Brain: Send + Sync {
     fn tokenizer(&self) -> &Tokenizer;
@@ -98,6 +104,7 @@ const FILES_READ: usize = 4;
 /// Pages the harness opens from its own search, so the model reads articles, not only
 /// their snippets.
 const PREFETCH_PAGES: usize = 2;
+const SMALL_CONTEXT: usize = 8192;
 
 fn call_key(c: &format::Call) -> String {
     format!("{} {}", c.name, c.arguments)
@@ -368,7 +375,8 @@ impl Agent {
                 .lines()
                 .map(str::trim)
                 .filter(|l| l.starts_with("https://"))
-                .take(PREFETCH_PAGES)
+                // One page when the context is small, so the answer still has room.
+                .take(if brain.context() < SMALL_CONTEXT { 1 } else { PREFETCH_PAGES })
                 .map(|url| format::Call { name: "fetch_url".into(), arguments: serde_json::json!({ "url": url }) })
                 .collect();
             if !pages.is_empty() && !stop.load(Ordering::Relaxed) {
@@ -431,8 +439,12 @@ impl Agent {
                 }
             }))
             .await;
-            if repeated.iter().all(|&r| r) {
+            // No progress: every call a repeat or unreadable (a small model can write a run
+            // of broken calls until the context fills).
+            if calls.iter().zip(&repeated).all(|((_, c), &r)| r || c.is_none()) {
                 stuck += 1;
+            } else {
+                stuck = 0;
             }
             let mut pairs = Vec::new();
             for ((view, _), text) in calls.iter().zip(results) {
@@ -442,7 +454,7 @@ impl Agent {
             chat.ids.extend(tk.encode_segment(&turns.results(&pairs)));
             let _ = self.memory.save(&chat.conv);
             if stuck >= 2 {
-                (self.events)(Event::Error { message: "Stopped: the model kept repeating the same call. Send another message to go on.".into() });
+                (self.events)(Event::Error { message: "Stopped: the model kept repeating itself or writing calls it could not finish. Send another message to go on.".into() });
                 reason = "repeating".into();
                 break;
             }
@@ -591,7 +603,7 @@ impl Agent {
     /// everything before this turn is replaced by the model's summary of it. The tokens
     /// then change from that point, so the next step sends them again.
     async fn fit(&self, chat: &mut Chat, turns: &Turns<'_>) -> Result<()> {
-        let limit = self.brain.context().saturating_sub(ANSWER_ROOM);
+        let limit = self.brain.context().saturating_sub(answer_room(self.brain.context()));
         if chat.ids.len() <= limit {
             return Ok(());
         }
@@ -607,7 +619,7 @@ impl Agent {
                 }
             }
         }
-        if turn_start >= 2 {
+        if turn_start >= 2 && chat.conv.messages[..turn_start].iter().any(|m| m.content != TRIMMED) {
             let summary = self.summarize(&chat.conv.messages[..turn_start], turns).await?;
             self.memory.run_log(&chat.conv.id).append(&RunEvent::Compacted { at: memory::now(), messages: turn_start, summary: summary.clone() });
             let mut kept = vec![
@@ -619,6 +631,20 @@ impl Agent {
             chat.ids = self.render(chat, turns);
             if chat.ids.len() <= limit {
                 return Ok(());
+            }
+        }
+        // Last, this turn's own results, oldest first, keeping the newest: a small context
+        // can fill within one turn (a search and the pages it opened).
+        let turn_start = chat.conv.messages.iter().rposition(|m| m.role == "user").unwrap_or(0);
+        let newest = chat.conv.messages.iter().rposition(|m| m.role == "tool");
+        for i in turn_start..chat.conv.messages.len() {
+            let m = &mut chat.conv.messages[i];
+            if m.role == "tool" && m.content != TRIMMED && Some(i) != newest {
+                m.content = TRIMMED.into();
+                chat.ids = self.render(chat, turns);
+                if chat.ids.len() <= limit {
+                    return Ok(());
+                }
             }
         }
         bail!("this conversation no longer fits in the model's context of {} tokens; start a new one", self.brain.context())
@@ -938,6 +964,28 @@ mod tests {
         let out = eval::run(r.brain.clone(), &cases, r.dir.path(), &r.dir.path().join("scratch"), Settings::default()).await.unwrap();
         assert!(out[0].pass, "{:?}", out[0]);
         assert_eq!(out[1].misses, ["route \"files\", wanted \"web\"", "the answer lacks \"friday\""]);
+    }
+
+    #[tokio::test]
+    async fn a_small_context_drops_this_turns_older_results_first() {
+        let read = |p: &str| format!("<tool_call>{{\"name\": \"read_file\", \"arguments\": {{\"path\": \"{p}\"}}}}</tool_call>");
+        let r = agent(&[&read("a.txt"), &read("b.txt"), "Both read."], Decision::Allow);
+        for (f, c) in [("a.txt", 'a'), ("b.txt", 'b')] {
+            std::fs::write(r.dir.path().join(format!("project/{f}")), c.to_string().repeat(600)).unwrap();
+        }
+        for i in 0..5 {
+            std::fs::write(r.dir.path().join(format!("project/o{i}.txt")), "x").unwrap();
+        }
+        let mut chat = Chat::new(Conversation::new(None));
+        let turns = Turns { tokenizer: &r.brain.tk, think: false };
+        let empty = r.agent.render(&chat, &turns).len();
+        // Room for the message and one file's result, not both.
+        r.brain.context.store(empty + ANSWER_ROOM + 1200, Ordering::Relaxed);
+        r.agent.turn(&mut chat, "read both", Settings::default(), Arc::default()).await.unwrap();
+        let tools: Vec<&str> = chat.conv.messages.iter().filter(|m| m.role == "tool").map(|m| m.content.as_str()).collect();
+        assert_eq!(tools[0], "[left out to save room]");
+        assert!(tools[1].contains(&"b".repeat(100)));
+        assert_eq!(chat.conv.messages.last().unwrap().content, "Both read.");
     }
 
     #[tokio::test]

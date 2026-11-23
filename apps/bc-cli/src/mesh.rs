@@ -203,6 +203,32 @@ pub fn resolve_model(name: &str) -> Result<(String, String, Option<String>)> {
     bail!("unknown model {name:?}: give a name from `bc mesh plan` or an https address of a .gguf file")
 }
 
+/// Context kept for a conversation even when the measured room is smaller, since a model
+/// needs some to be of use; the engine then reports running out of memory plainly.
+const MIN_CONTEXT: usize = 2048;
+
+/// Tokens of context the planned stages can hold: each device's memory left after its
+/// weights, over the key/value cache a token takes in its layers. The cache grows by a
+/// quarter at a time and the old one stays until copied, so a token needs 2.25 times
+/// its share at the moment of growing.
+fn context_room(spec: &Model, plan: &Plan, devices: &[&MeshDevice], kv_per_token_layer: u64) -> usize {
+    let mut room = usize::MAX;
+    for p in &plan.pipelines {
+        for (i, st) in p.stages.iter().enumerate() {
+            let Some(d) = devices.get(st.device) else { continue };
+            let Ok(r) = &d.report else { continue };
+            let dev = device_spec(&d.name, r);
+            let mem = if dev.gpu_bytes > 0 { dev.gpu_bytes } else { dev.mem_bytes };
+            let layers = u64::from(st.layers.end - st.layers.start);
+            let ends = (i == 0) as u64 + (i + 1 == p.stages.len()) as u64;
+            let weights = spec.layer_bytes * layers + spec.extra_bytes / 2 * ends;
+            let per_token = (layers.max(1) * kv_per_token_layer * 9).div_ceil(4);
+            room = room.min((mem.saturating_sub(weights) / per_token.max(1)) as usize);
+        }
+    }
+    room
+}
+
 fn stage_devices(devices: &[MeshDevice]) -> Vec<&MeshDevice> {
     devices.iter().filter(|d| d.report.as_ref().is_ok_and(|r| r.device.engine)).collect()
 }
@@ -291,7 +317,12 @@ impl Session {
             status(&format!("Downloading layers: {line}"));
         })
         .await?;
-        let llm = Arc::new(Llm::new(&header, clients, draft)?);
+        let mut llm = Llm::new(&header, clients, draft)?;
+        // The model's own limit can far exceed what the stages hold: the agent keeps under
+        // this one, summarizing before the GPU runs out of room.
+        let room = context_room(&spec, &plan, &usable, llm.cfg.kv_bytes_per_token_layer());
+        llm.cfg.context = llm.cfg.context.min(room.max(MIN_CONTEXT));
+        let llm = Arc::new(llm);
         // The swarm: devices the model does not need each run the draft model and grow a
         // branch of every tree of guesses (docs/frontier.md, phase 1).
         let mut drafter_names = Vec::new();
@@ -382,5 +413,45 @@ impl Session {
         self.llm.set_replicas(clients);
         *self.state.lock().await = SessionState { devices, pairs, plan };
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bc_mesh::msg::{DeviceReport, GpuReport};
+    use bc_mesh::plan::{PipelinePlan, StagePlan};
+
+    fn device(name: &str, free_gb: u64) -> MeshDevice {
+        let device = DeviceReport {
+            name: name.into(),
+            os: "macos".into(),
+            cores: 8,
+            mem_total: 16 << 30,
+            mem_available: free_gb << 30,
+            mem_bw: 1e11,
+            engine: true,
+            gpu: Some(GpuReport { name: "Apple M2".into(), mem_bytes: 0, unified: true, bw: 1e11 }),
+        };
+        MeshDevice { name: name.into(), addr: iroh::SecretKey::generate().public().into(), report: Ok(LinkReport { rtt_ms: 1.0, up_bytes_s: 1e8, via_relay: false, device }), local: false }
+    }
+
+    #[test]
+    fn the_context_stops_where_the_smallest_stage_runs_out_of_room() {
+        let spec = find_model("qwen3-0.6b").unwrap();
+        // qwen3-0.6b: 28 layers, 8 key/value heads of 128, f32: 8 KiB a token a layer.
+        let kv = 2 * 8 * 128 * 4;
+        let stage = |device, layers| StagePlan { device, layers };
+        let pipe = |stages| PipelinePlan { stages, token_ms: 0.0, network_ms: 0.0, tokens_per_s: 0.0, prefill_net_ms_per_1k: 0.0 };
+        let (big, small) = (device("big", 8), device("small", 1));
+        let whole = Plan { pipelines: vec![pipe(vec![stage(0, 0..28)])], unused: vec![] };
+        let room = context_room(&spec, &whole, &[&big], kv);
+        // 85% of 8 GiB less the weights, over 28 layers × 8 KiB × 2.25.
+        let free = (8u64 << 30) as f64 * MEMORY_SHARE - (spec.layer_bytes * 28 + spec.extra_bytes) as f64;
+        assert!((room as f64 - free / (28.0 * kv as f64 * 2.25)).abs() < 2.0, "{room}");
+        // Split, the device with less memory decides, for its own layers only.
+        let split = Plan { pipelines: vec![pipe(vec![stage(0, 0..14), stage(1, 14..28)])], unused: vec![] };
+        let small_room = context_room(&spec, &split, &[&big, &small], kv);
+        assert!(small_room < room && small_room > 0, "{small_room} vs {room}");
     }
 }
