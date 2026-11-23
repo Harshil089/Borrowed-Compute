@@ -22,6 +22,8 @@ pub enum RunEvent {
     /// Written before a call runs: one with no `Finished` was cut off and may have run.
     Started { at: u64, call: String, name: String, arguments: Value, by_harness: bool },
     Finished { at: u64, call: String, ok: bool, text: String },
+    /// Older messages were replaced by this summary to fit the context.
+    Compacted { at: u64, messages: usize, summary: String },
     Ended { at: u64, reason: String },
 }
 
@@ -112,6 +114,7 @@ pub fn describe(events: &[RunEvent]) -> String {
             }
             RunEvent::Started { name, arguments, by_harness, .. } => format!("  {} {name} {}", if *by_harness { "harness calls" } else { "calls" }, clip(&arguments.to_string(), 200)),
             RunEvent::Finished { ok, text, .. } => format!("    {} {}", if *ok { "->" } else { "-> failed:" }, clip(text, 200)),
+            RunEvent::Compacted { messages, summary, .. } => format!("  compacted {messages} older messages: {}", clip(summary, 300)),
             RunEvent::Ended { reason, .. } => format!("  ended: {reason}"),
         })
         .collect::<Vec<_>>()

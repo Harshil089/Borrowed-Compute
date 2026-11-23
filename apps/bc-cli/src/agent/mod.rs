@@ -39,6 +39,9 @@ const STEP_TOKENS: usize = 2048;
 /// Most tokens the model writes in one turn, all steps together: a runaway model stops
 /// here instead of filling the context.
 const TURN_TOKENS: usize = 16_384;
+/// What a summary to make room is written from, and its length.
+const SUMMARY_SOURCE_CHARS: usize = 24_000;
+const SUMMARY_TOKENS: usize = 512;
 /// Room kept for the next answer when the conversation nears the model's context.
 const ANSWER_ROOM: usize = 1024;
 
@@ -349,7 +352,7 @@ impl Agent {
         let mut reason = "stopped".to_string();
         while steps < MAX_STEPS && !stop.load(Ordering::Relaxed) {
             steps += 1;
-            self.fit(chat, &turns)?;
+            self.fit(chat, &turns).await?;
             let max = (brain.context() - chat.ids.len()).min(STEP_TOKENS);
             let events = self.events.clone();
             let mut on_text = move |t: &str| events(Event::Text { text: t.to_string() });
@@ -511,17 +514,19 @@ impl Agent {
         (ok, text)
     }
 
-    /// Makes room for the next answer: the oldest tool results are cut down first. The
-    /// tokens then change from that point, so the next step sends them again.
-    fn fit(&self, chat: &mut Chat, turns: &Turns) -> Result<()> {
+    /// Makes room for the next answer: the oldest tool results are cut down first, then
+    /// everything before this turn is replaced by the model's summary of it. The tokens
+    /// then change from that point, so the next step sends them again.
+    async fn fit(&self, chat: &mut Chat, turns: &Turns<'_>) -> Result<()> {
         let limit = self.brain.context().saturating_sub(ANSWER_ROOM);
         if chat.ids.len() <= limit {
             return Ok(());
         }
         const TRIMMED: &str = "[left out to save room]";
+        let turn_start = chat.conv.messages.iter().rposition(|m| m.role == "user").unwrap_or(0);
         for i in 0..chat.conv.messages.len() {
             let m = &mut chat.conv.messages[i];
-            if m.role == "tool" && m.content != TRIMMED {
+            if m.role == "tool" && m.content != TRIMMED && i < turn_start {
                 m.content = TRIMMED.into();
                 chat.ids = self.render(chat, turns);
                 if chat.ids.len() <= limit {
@@ -529,7 +534,43 @@ impl Agent {
                 }
             }
         }
+        if turn_start >= 2 {
+            let summary = self.summarize(&chat.conv.messages[..turn_start], turns).await?;
+            self.memory.run_log(&chat.conv.id).append(&RunEvent::Compacted { at: memory::now(), messages: turn_start, summary: summary.clone() });
+            let mut kept = vec![
+                Message { role: "user".into(), content: format!("[The conversation so far, summarized to save room]\n{summary}"), name: None },
+                Message { role: "assistant".into(), content: "Understood; I will go on from that summary.".into(), name: None },
+            ];
+            kept.extend(chat.conv.messages.drain(turn_start..));
+            chat.conv.messages = kept;
+            chat.ids = self.render(chat, turns);
+            if chat.ids.len() <= limit {
+                return Ok(());
+            }
+        }
         bail!("this conversation no longer fits in the model's context of {} tokens; start a new one", self.brain.context())
+    }
+
+    /// The model's summary of `messages`, on a stream of its own.
+    async fn summarize(&self, messages: &[Message], turns: &Turns<'_>) -> Result<String> {
+        let tk = turns.tokenizer;
+        let transcript: String = messages
+            .iter()
+            .map(|m| {
+                let text = if m.role == "assistant" { let r = parse(&m.content); format!("{}{}", r.text, r.calls.iter().flatten().map(|c| format!(" [called {} {}]", c.name, c.arguments)).collect::<String>()) } else { m.content.clone() };
+                format!("{}: {}\n", m.role, format::clip(&text, 1500))
+            })
+            .collect();
+        let transcript = head_tail(&transcript, SUMMARY_SOURCE_CHARS);
+        let quiet = Turns { tokenizer: tk, think: false };
+        let mut ids = tk.encode(&quiet.open("Summarize this conversation for the assistant who will continue it: what the person wants, what was found and done (files, commands, results), decisions, and what is left. Plain sentences, at most 250 words."));
+        ids.extend(tk.encode_segment(&quiet.user(&transcript)));
+        let (out, _) = self.brain.complete(&mut Cached::default(), &ids, SUMMARY_TOKENS, &mut |_| {}).await?;
+        let summary = parse(&tk.decode(&out)).text.trim().to_string();
+        if summary.is_empty() {
+            bail!("the model gave no summary to make room with");
+        }
+        Ok(summary)
     }
 
     async fn handle(&self, view: &CallView, call: Option<&format::Call>, settings: Settings, allowed: &Mutex<HashSet<String>>) -> String {
@@ -598,6 +639,7 @@ mod tests {
         /// The digit the decision step picks; none picks the first option, Answer.
         choice: Mutex<Option<u32>>,
         chose: Mutex<Vec<Vec<u32>>>,
+        context: std::sync::atomic::AtomicUsize,
     }
 
     impl Brain for Script {
@@ -605,7 +647,7 @@ mod tests {
             &self.tk
         }
         fn context(&self) -> usize {
-            1 << 16
+            self.context.load(Ordering::Relaxed)
         }
         fn complete<'a>(&'a self, _: &'a mut Cached, ids: &'a [u32], _: usize, on_text: &'a mut (dyn FnMut(&str) + Send)) -> BoxFuture<'a, Result<(Vec<u32>, Stats)>> {
             self.fed.lock().unwrap().push(ids.to_vec());
@@ -631,7 +673,7 @@ mod tests {
 
     fn agent(answers: &[&str], decision: Decision) -> Run {
         let dir = tempfile::tempdir().unwrap();
-        let brain = Arc::new(Script { tk: tokenizer(), answers: Mutex::new(answers.iter().map(|s| s.to_string()).collect()), fed: Mutex::default(), choice: Mutex::default(), chose: Mutex::default() });
+        let brain = Arc::new(Script { tk: tokenizer(), answers: Mutex::new(answers.iter().map(|s| s.to_string()).collect()), fed: Mutex::default(), choice: Mutex::default(), chose: Mutex::default(), context: (1 << 16).into() });
         let seen = Arc::new(Mutex::new(Vec::new()));
         let s = seen.clone();
         let memory = Memory::at(&dir.path().join("home"));
@@ -745,6 +787,28 @@ mod tests {
         assert_eq!(r.agent.files_for("what does `note.txt` say?").len(), 1);
         assert!(r.agent.files_for("what is here").is_empty());
         assert!(r.agent.files_for("read ../../etc/passwd").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_full_context_is_summarized_instead_of_refused() {
+        let r = agent(&["The person asked about apples and pears.", "Pears are sweeter."], Decision::Allow);
+        let mut chat = Chat::new(Conversation::new(None));
+        let turns = Turns { tokenizer: &r.brain.tk, think: false };
+        let empty = r.agent.render(&chat, &turns).len();
+        for (role, fill) in [("user", 'a'), ("assistant", 'b'), ("user", 'c'), ("assistant", 'd')] {
+            chat.conv.messages.push(Message { role: role.into(), content: fill.to_string().repeat(400), name: None });
+        }
+        r.brain.context.store(empty + ANSWER_ROOM + 700, Ordering::Relaxed);
+        r.agent.turn(&mut chat, "which is sweeter?", Settings::default(), Arc::default()).await.unwrap();
+        let roles: Vec<&str> = chat.conv.messages.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, ["user", "assistant", "user", "assistant"]);
+        assert!(chat.conv.messages[0].content.contains("apples and pears"));
+        assert_eq!(chat.conv.messages[3].content, "Pears are sweeter.");
+        // The summary was written from the old messages, and the answer from the summary.
+        let fed = r.brain.fed.lock().unwrap();
+        assert!(r.brain.tk.decode(&fed[0]).contains(&"a".repeat(400)));
+        assert!(!r.brain.tk.decode(&fed[1]).contains(&"a".repeat(400)));
+        assert!(log::describe(&r.agent.memory.run_log(&chat.conv.id).read()).contains("compacted 4 older messages"));
     }
 
     #[tokio::test]
