@@ -224,3 +224,12 @@ div.setting { cursor: default; }
 .agent-sub { font-size: 14px; font-weight: 600; margin: 20px 0 4px; }
 .agent-server { display: grid; grid-template-columns: 2fr 1.4fr 1fr; gap: 8px; margin: 8px 0; }
 @media (max-width: 720px) { .agent-server { grid-template-columns: 1fr; } }
+.a-md { white-space: normal; }
+.a-md p { margin: 0 0 10px; }
+.a-md p:last-child, .a-md ul:last-child, .a-md ol:last-child { margin-bottom: 0; }
+.a-md .a-h { font-weight: 600; margin-top: 14px; }
+.a-md ul, .a-md ol { margin: 0 0 10px; padding-left: 22px; }
+.a-md li { margin: 2px 0; }
+.a-md code { font-family: var(--mono, "Geist Mono", ui-monospace, monospace); font-size: 12.5px; background: var(--fill); padding: 1px 4px; border-radius: 4px; }
+.a-md pre.a-code { margin: 0 0 10px; padding: 10px 12px; background: var(--fill); border-radius: var(--radius-sm); overflow-x: auto; white-space: pre; }
+.a-md pre.a-code code { background: none; padding: 0; }
