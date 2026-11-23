@@ -330,6 +330,10 @@ impl Agent {
             Some(Route::Past)
         } else if self.tools.root.is_some() && (route::refers_to_folder(text) || self.files_named(text)) {
             Some(Route::Files)
+        } else if chat.conv.messages.len() == 1 && !self.files_for(text).is_empty() {
+            // The first message with a small folder chosen: its few files are read once, so
+            // a question about them needs neither the right words nor the model's choice.
+            Some(Route::Files)
         } else if settings.skip_decision {
             None
         } else {
@@ -815,6 +819,10 @@ mod tests {
         let r = agent(&[search, "Found them."], Decision::Allow);
         let line = format!("needle {}\n", "x".repeat(180));
         std::fs::write(r.dir.path().join("project/big.txt"), line.repeat(60)).unwrap();
+        // More files than the harness reads up front on a first message.
+        for i in 0..5 {
+            std::fs::write(r.dir.path().join(format!("project/other{i}.txt")), "x").unwrap();
+        }
         let mut chat = Chat::new(Conversation::new(None));
         chat.conv.id = "c".into();
         // The last turn was cut off while writing a file.
@@ -841,10 +849,19 @@ mod tests {
         // Answer, Web, Files, Past: the model picks 3.
         *r.brain.choice.lock().unwrap() = Some(3);
         let mut chat = Chat::new(Conversation::new(None));
+        // Not the first message, which reads a small folder without asking.
+        chat.conv.messages.push(Message { role: "user".into(), content: "hi".into(), name: None });
+        chat.conv.messages.push(Message { role: "assistant".into(), content: "Hello.".into(), name: None });
         r.agent.turn(&mut chat, "what does the note say", Settings::default(), Arc::default()).await.unwrap();
         let roles: Vec<&str> = chat.conv.messages.iter().map(|m| m.role.as_str()).collect();
-        assert_eq!(roles, ["user", "assistant", "tool", "assistant"]);
-        assert!(chat.conv.messages[2].content.contains("hello"), "{:?}", chat.conv.messages);
+        assert_eq!(roles, ["user", "assistant", "user", "assistant", "tool", "assistant"]);
+        assert!(chat.conv.messages[4].content.contains("hello"), "{:?}", chat.conv.messages);
+        // A first message reads it without the decision step.
+        let mut first = Chat::new(Conversation::new(None));
+        let asked_before = r.brain.chose.lock().unwrap().len();
+        r.agent.turn(&mut first, "and so?", Settings::default(), Arc::default()).await.unwrap();
+        assert_eq!(r.brain.chose.lock().unwrap().len(), asked_before);
+        assert!(first.conv.messages[2].content.contains("hello"));
         let asked = r.brain.tk.decode(&r.brain.chose.lock().unwrap()[0]);
         assert!(asked.contains("3. Look in the chosen project folder") && asked.contains("what does the note say") && asked.contains("\"summarize the readme\" -> 3"), "{asked}");
         // A file named in the message is read even in a big folder; nothing else is.
