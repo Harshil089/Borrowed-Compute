@@ -8,6 +8,7 @@
 //! sends only the tool results and the start of the next answer, not the history again.
 //! Calls in one answer run at the same time.
 
+pub mod eval;
 pub mod format;
 pub mod http;
 pub mod log;
@@ -884,6 +885,21 @@ mod tests {
         let text = r.agent.tools.call("use_skill", &serde_json::json!({"name": "deploy"})).await.unwrap();
         assert!(text.contains("vercel deploy --prod") && text.contains("check.sh"), "{text}");
         assert!(r.agent.tools.call("use_skill", &serde_json::json!({"name": "../deploy"})).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn an_eval_reports_what_matched_and_what_did_not() {
+        let r = agent(&["The notes say Thursday."], Decision::Allow);
+        std::fs::write(r.dir.path().join("project/notes.txt"), "moved to Thursday").unwrap();
+        *r.brain.choice.lock().unwrap() = Some(3);
+        let cases: Vec<eval::Case> = serde_json::from_value(serde_json::json!([
+            { "message": "when is it?", "folder": "project", "expect_route": "files", "expect_tool": "read_file", "expect_text": "thursday" },
+            { "message": "when is it?", "folder": "project", "expect_route": "web", "expect_text": "friday" },
+        ]))
+        .unwrap();
+        let out = eval::run(r.brain.clone(), &cases, r.dir.path(), &r.dir.path().join("scratch")).await.unwrap();
+        assert!(out[0].pass, "{:?}", out[0]);
+        assert_eq!(out[1].misses, ["route \"files\", wanted \"web\"", "the answer lacks \"friday\""]);
     }
 
     #[tokio::test]

@@ -122,6 +122,20 @@ enum AgentAction {
     List,
     /// Show a conversation's run step by step: messages, model answers, calls and results.
     Log { conversation: String },
+    /// Run a file of cases (docs/agent-evals/cases.json) against a model on an
+    /// OpenAI-compatible server and report what passed. Calls that change files or run
+    /// commands are denied.
+    Eval {
+        cases: std::path::PathBuf,
+        /// Such as http://127.0.0.1:11434/v1.
+        #[arg(long)]
+        url: String,
+        #[arg(long)]
+        model: String,
+        /// The model's context in tokens.
+        #[arg(long, default_value_t = 8192)]
+        context: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -402,12 +416,12 @@ async fn main() -> Result<()> {
             std::process::exit(outcome.exit.status());
         }
         Command::Mesh { action } => mesh(&cloud, &key_path, action).await?,
-        Command::Agent { action } => agent(action)?,
+        Command::Agent { action } => agent(action).await?,
     }
     Ok(())
 }
 
-fn agent(action: AgentAction) -> Result<()> {
+async fn agent(action: AgentAction) -> Result<()> {
     // The desktop app's home: on a Mac where the old Mac app kept it, elsewhere the CLI's.
     let home = if cfg!(target_os = "macos") { bc_net::home_dir()?.join("agent") } else { bc_cli::flows::client_home()? };
     let memory = bc_cli::agent::memory::Memory::at(&home);
@@ -423,6 +437,22 @@ fn agent(action: AgentAction) -> Result<()> {
                 bail!("no run log for {conversation}; `bc agent list` shows the conversations");
             }
             println!("{}", bc_cli::agent::log::describe(&events).trim_start());
+        }
+        AgentAction::Eval { cases, url, model, context } => {
+            use bc_cli::agent::http::{HttpBrain, ModelServer};
+            let list: Vec<bc_cli::agent::eval::Case> = serde_json::from_slice(&std::fs::read(&cases).with_context(|| format!("cannot read {}", cases.display()))?)?;
+            let brain = std::sync::Arc::new(HttpBrain::new(ModelServer { url, model, context })?);
+            let scratch = tempfile::tempdir()?;
+            let base = cases.parent().unwrap_or(std::path::Path::new("."));
+            let out = bc_cli::agent::eval::run(brain, &list, base, scratch.path()).await?;
+            for o in &out {
+                println!("{} {}  [{}{}]", if o.pass { "pass" } else { "FAIL" }, o.message, o.route, if o.tools.is_empty() { String::new() } else { format!("; {}", o.tools.join(", ")) });
+                for m in &o.misses {
+                    println!("       {m}");
+                }
+            }
+            let passed = out.iter().filter(|o| o.pass).count();
+            println!("\n{passed} of {} passed", out.len());
         }
     }
     Ok(())

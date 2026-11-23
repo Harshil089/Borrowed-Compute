@@ -1,0 +1,22 @@
+[
+  { "message": "hi there", "expect_route": "answer" },
+  { "message": "what is 17 times 23?", "expect_route": "answer", "expect_text": "391" },
+  { "message": "write a haiku about rain", "expect_route": "answer" },
+  { "message": "explain what a hash function is in two sentences", "expect_route": "answer" },
+  { "message": "translate 'good morning' to French", "expect_route": "answer", "expect_text": "bonjour" },
+  { "message": "who won the last Formula 1 race?", "expect_route": "web", "expect_tool": "web_search" },
+  { "message": "what is the price of bitcoin right now", "expect_route": "web", "expect_tool": "web_search" },
+  { "message": "any big cybersecurity incidents this week?", "expect_route": "web", "expect_tool": "web_search" },
+  { "message": "what's the weather in Mumbai tomorrow", "expect_route": "web", "expect_tool": "web_search" },
+  { "message": "who is the current CEO of OpenAI?", "expect_route": "web", "expect_tool": "web_search" },
+  { "message": "what's the latest version of Rust?", "expect_route": "web", "expect_tool": "web_search" },
+  { "message": "find me a good recipe for paneer tikka", "expect_route": "web" },
+  { "message": "what do you see in this folder?", "folder": "sample", "expect_route": "files", "expect_tool": "read_file" },
+  { "message": "when was the meeting moved to?", "folder": "sample", "expect_route": "files", "expect_text": "thursday" },
+  { "message": "who has the highest score?", "folder": "sample", "expect_route": "files", "expect_text": "asha" },
+  { "message": "summarize notes.txt", "folder": "sample", "expect_route": "files", "expect_tool": "read_file" },
+  { "message": "what did I ask you yesterday?", "expect_route": "past conversations", "expect_tool": "recall" },
+  { "message": "remember what we discussed about the deployment last week?", "expect_route": "past conversations", "expect_tool": "recall" },
+  { "message": "what was that restaurant I mentioned before?", "expect_route": "past conversations", "expect_tool": "recall" },
+  { "message": "remind me to call Ayush at 9pm", "expect_tool": "remind" }
+]
