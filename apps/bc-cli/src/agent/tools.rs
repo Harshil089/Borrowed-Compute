@@ -13,7 +13,7 @@ use futures_util::future::BoxFuture;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use super::format::{head_tail, ToolSpec};
+use super::format::ToolSpec;
 use super::memory::Memory;
 
 /// Most characters of a command's output or a page the model sees.
@@ -109,6 +109,12 @@ impl Tools {
                 ));
             }
         }
+        out.push(spec(
+            "read_artifact",
+            "Read more of a long tool output that was kept whole as an artifact, with line numbers.",
+            json!({ "id": p("The artifact's id, as the clipped output names it."), "offset": { "type": "integer", "description": "First line to read, from 1." } }),
+            &["id"],
+        ));
         out.push(spec("web_search", "Search the web. Gives titles, addresses and snippets of the top results; read one in full with fetch_url.", json!({ "query": p("What to search for.") }), &["query"]));
         out.push(spec("fetch_url", "Read a web page (https) as text.", json!({ "url": p("The https address.") }), &["url"]));
         out.push(spec("recall", "Search the past conversations for something said before.", json!({ "query": p("Words to look for.") }), &["query"]));
@@ -173,10 +179,12 @@ impl Tools {
                     }
                 }
                 let (code, out) = runner(RunRequest { folder, argv, device }).await?;
-                Ok(format!("Exit code {code}.\n{}", head_tail(&out, OUTPUT_CHARS)))
+                // Long output is kept whole as an artifact by the agent, which clips it.
+                Ok(format!("Exit code {code}.\n{out}"))
             }
             "fetch_url" => fetch(&need("url")?).await,
             "web_search" => web_search(&need("query")?).await,
+            "read_artifact" => self.read_artifact(&need("id")?, num("offset").unwrap_or(1), READ_LINES),
             "recall" => Ok(self.memory.recall(&need("query")?, Some(&self.conversation))),
             "remind" => self.memory.reminders().add(&need("when")?, &need("text")?),
             "remember" => {
@@ -250,26 +258,17 @@ impl Tools {
         if bytes.contains(&0) {
             bail!("{} is not a text file", self.shown(&file));
         }
-        let text = String::from_utf8_lossy(&bytes);
-        let lines: Vec<&str> = text.lines().collect();
-        let first = offset.max(1);
-        let mut out = String::new();
-        let mut last = first - 1;
-        for (i, line) in lines.iter().enumerate().skip(first - 1).take(limit.clamp(1, READ_LINES)) {
-            let l = format!("{:>5}  {line}\n", i + 1);
-            if out.len() + l.len() > READ_CHARS {
-                break;
-            }
-            out.push_str(&l);
-            last = i + 1;
+        Ok(numbered(&String::from_utf8_lossy(&bytes), &self.shown(&file), offset, limit))
+    }
+
+    /// The rest of a long tool output the agent kept (see `Agent::run_call`).
+    fn read_artifact(&self, id: &str, offset: usize, limit: usize) -> Result<String> {
+        if id.is_empty() || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+            bail!("no artifact called {id}");
         }
-        if lines.is_empty() {
-            return Ok(format!("{} is empty.", self.shown(&file)));
-        }
-        if last < lines.len() {
-            out.push_str(&format!("[lines {first}–{last} of {}; read on with offset {}]", lines.len(), last + 1));
-        }
-        Ok(out)
+        let file = self.memory.run_log(&self.conversation).artifacts().join(format!("{id}.txt"));
+        let text = std::fs::read_to_string(&file).with_context(|| format!("no artifact called {id} in this conversation"))?;
+        Ok(numbered(&text, &format!("artifact {id}"), offset, limit))
     }
 
     fn search(&self, text: &str, path: &str) -> Result<String> {
@@ -301,10 +300,33 @@ impl Tools {
     }
 }
 
+/// Lines `offset..` of a text, numbered, within [`READ_LINES`] and [`READ_CHARS`].
+fn numbered(text: &str, name: &str, offset: usize, limit: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let first = offset.max(1);
+    let mut out = String::new();
+    let mut last = first - 1;
+    for (i, line) in lines.iter().enumerate().skip(first - 1).take(limit.clamp(1, READ_LINES)) {
+        let l = format!("{:>5}  {line}\n", i + 1);
+        if out.len() + l.len() > READ_CHARS {
+            break;
+        }
+        out.push_str(&l);
+        last = i + 1;
+    }
+    if lines.is_empty() {
+        return format!("{name} is empty.");
+    }
+    if last < lines.len() {
+        out.push_str(&format!("[lines {first}–{last} of {}; read on with offset {}]", lines.len(), last + 1));
+    }
+    out
+}
+
 /// A web page as text: https only, at most 1 MB read.
 async fn fetch(url: &str) -> Result<String> {
     let parsed = reqwest::Url::parse(url.trim()).context("not a web address")?;
-    Ok(head_tail(&download(parsed).await?, OUTPUT_CHARS))
+    download(parsed).await
 }
 
 /// Whether an address is on the public internet. Everything else (this computer, the home
@@ -598,7 +620,7 @@ mod tests {
         // Without a runner there is no `run`, and without a folder no file tools.
         assert!(!t.specs().iter().any(|s| s.name == "run"));
         let bare = Tools::new(None, Memory::at(dir.path()), "c".into(), None, Vec::new()).unwrap();
-        assert_eq!(bare.specs().iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["web_search", "fetch_url", "recall", "remind", "remember"]);
+        assert_eq!(bare.specs().iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["read_artifact", "web_search", "fetch_url", "recall", "remind", "remember"]);
         assert!(bare.call("read_file", &json!({"path": "b.txt"})).await.is_err());
     }
 

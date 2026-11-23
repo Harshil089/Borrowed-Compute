@@ -79,6 +79,11 @@ impl Memory {
         Memory { root: home.to_path_buf() }
     }
 
+    /// What happened in a conversation's turns, and its large tool outputs.
+    pub fn run_log(&self, conversation: &str) -> super::log::RunLog {
+        super::log::RunLog::at(&self.root, conversation)
+    }
+
     /// The reminders kept beside the conversations.
     pub fn reminders(&self) -> super::remind::Reminders {
         super::remind::Reminders::at(&self.root)
@@ -112,10 +117,13 @@ impl Memory {
     }
 
     pub fn delete(&self, id: &str) -> Result<()> {
-        std::fs::remove_file(self.path(id)?).context("deleting the conversation")
+        let path = self.path(id)?;
+        self.run_log(id).delete();
+        std::fs::remove_file(path).context("deleting the conversation")
     }
 
     pub fn delete_all(&self) -> Result<()> {
+        let _ = std::fs::remove_dir_all(self.root.join("runs"));
         match std::fs::remove_dir_all(self.dir()) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
             _ => Ok(()),

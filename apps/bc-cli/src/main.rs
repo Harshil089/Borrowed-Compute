@@ -109,6 +109,19 @@ enum Command {
         #[command(subcommand)]
         action: MeshAction,
     },
+    /// The desktop app's Agent page: its conversations and what happened in each.
+    Agent {
+        #[command(subcommand)]
+        action: AgentAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentAction {
+    /// List the saved conversations, newest first.
+    List,
+    /// Show a conversation's run step by step: messages, model answers, calls and results.
+    Log { conversation: String },
 }
 
 #[derive(Subcommand)]
@@ -389,6 +402,28 @@ async fn main() -> Result<()> {
             std::process::exit(outcome.exit.status());
         }
         Command::Mesh { action } => mesh(&cloud, &key_path, action).await?,
+        Command::Agent { action } => agent(action)?,
+    }
+    Ok(())
+}
+
+fn agent(action: AgentAction) -> Result<()> {
+    // The desktop app's home: on a Mac where the old Mac app kept it, elsewhere the CLI's.
+    let home = if cfg!(target_os = "macos") { bc_net::home_dir()?.join("agent") } else { bc_cli::flows::client_home()? };
+    let memory = bc_cli::agent::memory::Memory::at(&home);
+    match action {
+        AgentAction::List => {
+            for c in memory.list() {
+                println!("{}  {}  {}", c.id, bc_cli::agent::memory::day_of(c.updated), c.title);
+            }
+        }
+        AgentAction::Log { conversation } => {
+            let events = memory.run_log(&conversation).read();
+            if events.is_empty() {
+                bail!("no run log for {conversation}; `bc agent list` shows the conversations");
+            }
+            println!("{}", bc_cli::agent::log::describe(&events).trim_start());
+        }
     }
     Ok(())
 }

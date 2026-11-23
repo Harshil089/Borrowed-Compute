@@ -9,6 +9,7 @@
 //! Calls in one answer run at the same time.
 
 pub mod format;
+pub mod log;
 pub mod memory;
 pub mod remind;
 pub mod tools;
@@ -25,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use format::{head_tail, parse, system_prompt, Turns};
+use log::RunEvent;
 use memory::{Conversation, Memory, Message};
 use tools::{Risk, Tools};
 
@@ -32,6 +34,9 @@ use tools::{Risk, Tools};
 pub const MAX_STEPS: usize = 25;
 /// Most tokens the model writes in one step.
 const STEP_TOKENS: usize = 2048;
+/// Most tokens the model writes in one turn, all steps together: a runaway model stops
+/// here instead of filling the context.
+const TURN_TOKENS: usize = 16_384;
 /// Room kept for the next answer when the conversation nears the model's context.
 const ANSWER_ROOM: usize = 1024;
 
@@ -55,6 +60,11 @@ impl Brain for Llm {
         // Greedy, so the draft model's guesses can be checked several at a time.
         Box::pin(self.generate_cached(cache, ids, max, bc_infer::Sampling::default(), on_text))
     }
+}
+
+/// The conversation a set of tools works for: the one whose run log records its calls.
+fn chat_id_of(tools: &Tools) -> String {
+    tools.conversation.clone()
 }
 
 /// Pages the harness opens from its own search, so the model reads articles, not only
@@ -242,16 +252,22 @@ impl Agent {
     /// tool, `stop` is set, or [`MAX_STEPS`] pass. The conversation is saved after each step.
     pub async fn turn(&self, chat: &mut Chat, text: &str, settings: Settings, stop: Arc<AtomicBool>) -> Result<()> {
         let result = self.steps(chat, text, settings, stop).await;
-        if let Err(e) = &result {
-            // The stages' state is unknown after a failure: start the stream over next time.
-            chat.cache.reset();
-            (self.events)(Event::Error { message: format!("{e:#}") });
-        }
+        let reason = match &result {
+            Ok(reason) => reason.clone(),
+            Err(e) => {
+                // The stages' state is unknown after a failure: start the stream over next time.
+                chat.cache.reset();
+                (self.events)(Event::Error { message: format!("{e:#}") });
+                format!("error: {e:#}")
+            }
+        };
+        self.memory.run_log(&chat.conv.id).append(&RunEvent::Ended { at: memory::now(), reason });
         let _ = self.memory.save(&chat.conv);
-        result
+        result.map(|_| ())
     }
 
-    async fn steps(&self, chat: &mut Chat, text: &str, settings: Settings, stop: Arc<AtomicBool>) -> Result<()> {
+    /// Gives why the turn ended.
+    async fn steps(&self, chat: &mut Chat, text: &str, settings: Settings, stop: Arc<AtomicBool>) -> Result<String> {
         let brain = self.brain.clone();
         let tk = brain.tokenizer();
         let turns = Turns { tokenizer: tk, think: settings.think };
@@ -268,6 +284,14 @@ impl Agent {
         if chat.conv.title.is_empty() {
             chat.conv.title = format::clip(text.lines().next().unwrap_or(text).trim(), 60);
         }
+        let log = self.memory.run_log(&chat.conv.id);
+        // A turn cut off by a crash or a quit: its unfinished calls may or may not have run.
+        let cut: Vec<String> = log.interrupted().iter().map(|(name, args)| format!("{name} {args}")).collect();
+        log.close_interrupted();
+        if !cut.is_empty() {
+            (self.events)(Event::Error { message: format!("The last answer was cut off while running {}; it may or may not have finished.", cut.join(", ")) });
+        }
+        log.append(&RunEvent::Turn { at: memory::now(), text: text.to_string() });
         chat.conv.messages.push(Message { role: "user".into(), content: text.to_string(), name: None });
         chat.conv.updated = memory::now();
         // shortcut: the time and related lines go to the model but not into the saved
@@ -279,6 +303,9 @@ impl Agent {
             chat.ids.len(),
             brain.context()
         );
+        if !cut.is_empty() {
+            read.push_str(&format!("\n\n(The app stopped during your last answer while running: {}. It may or may not have finished; check before doing it again.)", cut.join("; ")));
+        }
         if let Some(lines) = self.memory.related(text, Some(&chat.conv.id)) {
             read.push_str(&format!("\n\n<earlier_conversations>\n{lines}\n</earlier_conversations>"));
         }
@@ -309,6 +336,7 @@ impl Agent {
         let mut steps = 0;
         let mut decode_ms = 0.0;
         let mut stuck = 0;
+        let mut reason = "stopped".to_string();
         while steps < MAX_STEPS && !stop.load(Ordering::Relaxed) {
             steps += 1;
             self.fit(chat, &turns)?;
@@ -321,6 +349,7 @@ impl Agent {
             total.generated += stats.generated;
             decode_ms += (stats.total_ms - stats.first_token_ms).max(0.0);
             let raw = tk.decode(&out);
+            log.append(&RunEvent::Model { at: memory::now(), text: raw.clone(), prompt_tokens: stats.prompt_tokens, cached_tokens: stats.cached_tokens, generated: stats.generated });
             chat.ids.extend(&out);
             chat.ids.extend(tk.encode_segment(turns.close()));
             chat.conv.messages.push(Message { role: "assistant".into(), content: raw.clone(), name: None });
@@ -340,6 +369,9 @@ impl Agent {
             (self.events)(Event::Reply { text: reply.text, thought: reply.thought, calls: calls.iter().map(|c| c.0.clone()).collect() });
             if calls.is_empty() || stop.load(Ordering::Relaxed) {
                 let _ = self.memory.save(&chat.conv);
+                if calls.is_empty() {
+                    reason = "answered".into();
+                }
                 break;
             }
             // A small model can call the same thing again and again; the second time it hears
@@ -368,10 +400,17 @@ impl Agent {
             let _ = self.memory.save(&chat.conv);
             if stuck >= 2 {
                 (self.events)(Event::Error { message: "Stopped: the model kept repeating the same call. Send another message to go on.".into() });
+                reason = "repeating".into();
+                break;
+            }
+            if total.generated >= TURN_TOKENS {
+                (self.events)(Event::Error { message: format!("Stopped: this answer reached its budget of {TURN_TOKENS} written tokens. Send another message to go on.") });
+                reason = "budget".into();
                 break;
             }
             if steps == MAX_STEPS {
                 (self.events)(Event::Error { message: format!("Stopped after {MAX_STEPS} steps. Send another message to let it go on.") });
+                reason = "step limit".into();
             }
         }
         let tokens_per_s = if decode_ms > 0.0 { total.generated as f64 / (decode_ms / 1000.0) } else { 0.0 };
@@ -384,7 +423,7 @@ impl Agent {
             context_used: chat.ids.len(),
             context: brain.context(),
         });
-        Ok(())
+        Ok(reason)
     }
 
     /// Calls the harness makes for the model, written into the conversation as if the model
@@ -399,11 +438,7 @@ impl Agent {
         let views: Vec<CallView> = calls.iter().map(|c| CallView { id: format!("{:016x}", rand::random::<u64>()), name: c.name.clone(), arguments: c.arguments.clone(), error: None }).collect();
         (self.events)(Event::Reply { text: String::new(), thought: String::new(), calls: views.clone() });
         let results = futures_util::future::join_all(calls.iter().zip(&views).map(|(c, view)| async move {
-            let (ok, text) = match self.tools.call(&c.name, &c.arguments).await {
-                Ok(t) => (true, t),
-                Err(e) => (false, format!("Error: {e:#}")),
-            };
-            let text = head_tail(&text, tools::OUTPUT_CHARS);
+            let (ok, text) = self.run_call(&chat_id_of(&self.tools), &view.id, c, true, tools::OUTPUT_CHARS).await;
             (self.events)(Event::Result { id: view.id.clone(), name: c.name.clone(), ok, text: text.clone() });
             text
         }))
@@ -416,6 +451,28 @@ impl Agent {
         }
         chat.ids.extend(tk.encode_segment(&turns.results(&pairs)));
         results.join("\n")
+    }
+
+    /// Runs one call, recorded in the run log before and after. Output longer than `keep`
+    /// characters is kept whole as an artifact and the model gets its start and end, with
+    /// the artifact's id to read the rest.
+    async fn run_call(&self, conversation: &str, id: &str, call: &format::Call, by_harness: bool, keep: usize) -> (bool, String) {
+        let log = self.memory.run_log(conversation);
+        log.append(&RunEvent::Started { at: memory::now(), call: id.to_string(), name: call.name.clone(), arguments: call.arguments.clone(), by_harness });
+        let (ok, text) = match self.tools.call(&call.name, &call.arguments).await {
+            Ok(t) => (true, t),
+            Err(e) => (false, format!("Error: {e:#}")),
+        };
+        let text = if text.chars().count() > keep {
+            let dir = log.artifacts();
+            let kept = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join(format!("{id}.txt")), &text)).is_ok();
+            let note = if kept { format!("\n[The whole output is {} characters, kept as artifact {id}: read the rest with read_artifact.]", text.chars().count()) } else { String::new() };
+            format!("{}{note}", head_tail(&text, keep))
+        } else {
+            text
+        };
+        log.append(&RunEvent::Finished { at: memory::now(), call: id.to_string(), ok, text: format::clip(&text, 2000) });
+        (ok, text)
     }
 
     /// Makes room for the next answer: the oldest tool results are cut down first. The
@@ -462,12 +519,7 @@ impl Agent {
                 Decision::Allow => {}
             }
         }
-        let (ok, text) = match self.tools.call(&call.name, &call.arguments).await {
-            Ok(t) => (true, t),
-            Err(e) => (false, format!("Error: {e:#}")),
-        };
-        // Results go into the model's context, so they are kept short.
-        let text = head_tail(&text, tools::OUTPUT_CHARS * 2);
+        let (ok, text) = self.run_call(&chat_id_of(&self.tools), &view.id, call, false, tools::OUTPUT_CHARS * 2).await;
         (self.events)(Event::Result { id: view.id.clone(), name: call.name.clone(), ok, text: text.clone() });
         text
     }
@@ -602,6 +654,31 @@ mod tests {
         r.agent.turn(&mut chat, "make a.txt", Settings { auto_approve: true, think: false }, Arc::default()).await.unwrap();
         assert!(r.dir.path().join("project/a.txt").exists());
         assert!(!r.seen.lock().unwrap().iter().any(|e| matches!(e, Event::Approve(_))));
+    }
+
+    #[tokio::test]
+    async fn long_output_is_kept_whole_and_every_step_is_logged() {
+        let search = "<tool_call>{\"name\": \"search\", \"arguments\": {\"text\": \"needle\"}}</tool_call>";
+        let r = agent(&[search, "Found them."], Decision::Allow);
+        let line = format!("needle {}\n", "x".repeat(180));
+        std::fs::write(r.dir.path().join("project/big.txt"), line.repeat(60)).unwrap();
+        let mut chat = Chat::new(Conversation::new(None));
+        chat.conv.id = "c".into();
+        // The last turn was cut off while writing a file.
+        let log = r.agent.memory.run_log("c");
+        log.append(&RunEvent::Turn { at: 1, text: "write it".into() });
+        log.append(&RunEvent::Started { at: 2, call: "0".into(), name: "write_file".into(), arguments: serde_json::json!({"path": "a.txt"}), by_harness: false });
+        r.agent.turn(&mut chat, "find the needles", Settings::default(), Arc::default()).await.unwrap();
+        assert!(r.seen.lock().unwrap().iter().any(|e| matches!(e, Event::Error { message } if message.contains("cut off while running write_file"))));
+        assert!(r.brain.tk.decode(&r.brain.fed.lock().unwrap()[0]).contains("may or may not have finished"));
+        let result = &chat.conv.messages[2].content;
+        let id = result.split("kept as artifact ").nth(1).and_then(|t| t.split(':').next()).expect(result).to_string();
+        assert!(r.agent.tools.call("read_artifact", &serde_json::json!({"id": id, "offset": 50})).await.unwrap().starts_with("   50  "));
+        assert!(r.agent.tools.call("read_artifact", &serde_json::json!({"id": "../c"})).await.is_err());
+        let text = log::describe(&log.read());
+        assert!(text.contains("ended: cut off") && text.contains("calls search") && text.contains("ended: answered"), "{text}");
+        r.agent.memory.delete("c").ok();
+        assert!(log.read().is_empty());
     }
 
     #[tokio::test]
