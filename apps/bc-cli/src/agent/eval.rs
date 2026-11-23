@@ -45,7 +45,7 @@ pub struct Outcome {
 
 /// Runs every case in turn; `base` is where case folders are found, `scratch` where
 /// each case gets its own home.
-pub async fn run(brain: Arc<dyn Brain>, cases: &[Case], base: &Path, scratch: &Path) -> Result<Vec<Outcome>> {
+pub async fn run(brain: Arc<dyn Brain>, cases: &[Case], base: &Path, scratch: &Path, settings: Settings) -> Result<Vec<Outcome>> {
     let mut out = Vec::new();
     for (i, case) in cases.iter().enumerate() {
         let home = scratch.join(format!("case-{i}"));
@@ -71,7 +71,7 @@ pub async fn run(brain: Arc<dyn Brain>, cases: &[Case], base: &Path, scratch: &P
             }),
         };
         let mut chat = Chat::new(conv);
-        let ended = agent.turn(&mut chat, &case.message, Settings::default(), Arc::default()).await;
+        let ended = agent.turn(&mut chat, &case.message, settings, Arc::default()).await;
         let route = memory.run_log(&chat.conv.id).read().iter().find_map(|e| if let RunEvent::Route { route, .. } = e { Some(route.clone()) } else { None }).unwrap_or_default();
         let answer = chat.conv.messages.iter().rev().find(|m| m.role == "assistant").map(|m| super::format::parse(&m.content).text).unwrap_or_default();
         let tools: Vec<String> = called.lock().unwrap().clone();

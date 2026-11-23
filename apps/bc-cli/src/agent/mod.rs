@@ -150,6 +150,9 @@ pub struct Settings {
     /// Run every call without asking.
     #[serde(default)]
     pub auto_approve: bool,
+    /// Leave out the decision step (`bc agent eval --no-decision` measures what it adds).
+    #[serde(default)]
+    pub skip_decision: bool,
 }
 
 /// One open conversation: what it says, and what the model has been fed of it.
@@ -316,6 +319,8 @@ impl Agent {
             None
         } else if has_web && route::web_query(text).is_some() {
             Some(Route::Web)
+        } else if settings.skip_decision {
+            None
         } else {
             let mut options = vec![Route::Answer];
             if has_web {
@@ -897,7 +902,7 @@ mod tests {
             { "message": "when is it?", "folder": "project", "expect_route": "web", "expect_text": "friday" },
         ]))
         .unwrap();
-        let out = eval::run(r.brain.clone(), &cases, r.dir.path(), &r.dir.path().join("scratch")).await.unwrap();
+        let out = eval::run(r.brain.clone(), &cases, r.dir.path(), &r.dir.path().join("scratch"), Settings::default()).await.unwrap();
         assert!(out[0].pass, "{:?}", out[0]);
         assert_eq!(out[1].misses, ["route \"files\", wanted \"web\"", "the answer lacks \"friday\""]);
     }

@@ -127,14 +127,22 @@ enum AgentAction {
     /// commands are denied.
     Eval {
         cases: std::path::PathBuf,
-        /// Such as http://127.0.0.1:11434/v1.
+        /// A model server, such as http://127.0.0.1:11434/v1 (with --model).
         #[arg(long)]
-        url: String,
+        url: Option<String>,
+        /// The server's name for the model.
         #[arg(long)]
-        model: String,
-        /// The model's context in tokens.
+        model: Option<String>,
+        /// Or a catalog model run by Borrowed Compute's own engine on this computer, its
+        /// weights fetched into memory only, such as qwen3-0.6b.
+        #[arg(long, conflicts_with = "url")]
+        mesh: Option<String>,
+        /// The server model's context in tokens.
         #[arg(long, default_value_t = 8192)]
         context: usize,
+        /// Leave out the decision step, to measure what it adds.
+        #[arg(long)]
+        no_decision: bool,
     },
 }
 
@@ -438,13 +446,31 @@ async fn agent(action: AgentAction) -> Result<()> {
             }
             println!("{}", bc_cli::agent::log::describe(&events).trim_start());
         }
-        AgentAction::Eval { cases, url, model, context } => {
+        AgentAction::Eval { cases, url, model, mesh, context, no_decision } => {
             use bc_cli::agent::http::{HttpBrain, ModelServer};
+            use bc_cli::agent::Brain;
             let list: Vec<bc_cli::agent::eval::Case> = serde_json::from_slice(&std::fs::read(&cases).with_context(|| format!("cannot read {}", cases.display()))?)?;
-            let brain = std::sync::Arc::new(HttpBrain::new(ModelServer { url, model, context })?);
+            // Kept until the end: dropping the session stops the model.
+            let mut session = None;
+            let brain: std::sync::Arc<dyn Brain> = match (mesh, url, model) {
+                (Some(name), _, _) => {
+                    let endpoint = bc_net::bind(iroh::SecretKey::generate(), bc_net::NetConfig::default()).await?;
+                    let s = bc_cli::mesh::Session::start(endpoint, Vec::new(), &name, bc_mesh::plan::Goal::Latency, Some("none"), Vec::new(), |s| eprint!("\r\x1b[Kbc: {s}")).await?;
+                    eprintln!();
+                    let llm = s.llm.clone();
+                    session = Some(s);
+                    llm
+                }
+                (None, Some(url), Some(model)) => std::sync::Arc::new(HttpBrain::new(ModelServer { url, model, context })?),
+                _ => bail!("give --mesh <model>, or --url and --model for a model server"),
+            };
             let scratch = tempfile::tempdir()?;
             let base = cases.parent().unwrap_or(std::path::Path::new("."));
-            let out = bc_cli::agent::eval::run(brain, &list, base, scratch.path()).await?;
+            let settings = bc_cli::agent::Settings { skip_decision: no_decision, ..Default::default() };
+            let started = std::time::Instant::now();
+            let out = bc_cli::agent::eval::run(brain, &list, base, scratch.path(), settings).await?;
+            drop(session);
+            eprintln!("({:.0} s)", started.elapsed().as_secs_f64());
             for o in &out {
                 println!("{} {}  [{}{}]", if o.pass { "pass" } else { "FAIL" }, o.message, o.route, if o.tools.is_empty() { String::new() } else { format!("; {}", o.tools.join(", ")) });
                 for m in &o.misses {
