@@ -45,7 +45,8 @@ pub async fn paired_devices(cloud: &CloudClient, me: &str) -> Result<Vec<(String
         .collect();
     let mut out = Vec::new();
     for d in cloud.devices().await? {
-        if !approved.contains(&d.endpoint_id) {
+        // An offline device would only cost a wait before it is counted as away.
+        if !approved.contains(&d.endpoint_id) || !d.online {
             continue;
         }
         let Ok(id) = d.endpoint_id.parse::<EndpointId>() else { continue };
@@ -368,8 +369,8 @@ impl Session {
     /// After a pipeline fails: measure again, leave out devices that do not answer, plan
     /// and start again.
     pub async fn recover(&self, targets: Vec<(String, EndpointAddr)>) -> Result<()> {
-        let mut devices = probe_all(&self.endpoint, targets).await;
-        devices.push(this_computer(&self.endpoint).await);
+        let (mut devices, me) = tokio::join!(probe_all(&self.endpoint, targets), this_computer(&self.endpoint));
+        devices.push(me);
         let usable = stage_devices(&devices);
         let owned: Vec<MeshDevice> = usable.iter().map(|d| (*d).clone()).collect();
         let pairs = probe_pairs(&self.endpoint, &owned).await;

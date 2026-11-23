@@ -118,11 +118,14 @@ pub struct Chat {
     ids: Vec<u32>,
     cache: Cached,
     allowed: Arc<Mutex<HashSet<String>>>,
+    /// The model `ids` were made for: its tokenizer's address, which changes when another
+    /// model (or the same one again) starts on the Mesh page.
+    brain: usize,
 }
 
 impl Chat {
     pub fn new(conv: Conversation) -> Self {
-        Chat { conv, ids: Vec::new(), cache: Cached::default(), allowed: Arc::default() }
+        Chat { conv, ids: Vec::new(), cache: Cached::default(), allowed: Arc::default(), brain: 0 }
     }
 }
 
@@ -134,9 +137,14 @@ pub struct Agent {
     pub approve: Approver,
 }
 
-const BASE_PROMPT: &str = "You are the assistant in Borrowed Compute, running on the person's own devices. \
-Work in small steps: look with the tools before you change anything, make exact edits, and check your work by running it when you can. \
-When the task is done, say briefly what you did. If something is unclear, ask.";
+const BASE_PROMPT: &str = "You are the assistant in Borrowed Compute, running on the person's own devices.\n\
+- When a tool can answer or do what the person asks, call it at once. Do not describe what you could do, and do not ask which details they want when a sensible choice exists.\n\
+- For anything current or that you do not know (news, results, prices, weather, docs), call web_search, then fetch_url on the best result when the snippets are not enough. Say where the answer came from.\n\
+- When the person tells you something to keep (a fact, a preference, a plan) or asks you to remember it, call remember.\n\
+- Lines from earlier conversations may come with a message, marked as such. When the person refers to something from before that is not there, call recall.\n\
+- Never claim to have done something you did not do with a tool. You cannot act later on your own: you cannot set reminders, alarms or timers. Say so, and keep a note with remember instead.\n\
+- In a project: look with the tools before you change anything, make exact edits, and check your work by running it when you can. When done, say briefly what you did.\n\
+- Ask only when you cannot go on without an answer.";
 
 impl Agent {
     fn system(&self) -> String {
@@ -193,6 +201,13 @@ impl Agent {
         let brain = self.brain.clone();
         let tk = brain.tokenizer();
         let turns = Turns { tokenizer: tk, think: settings.think };
+        // Another model's token ids mean nothing to this one, and its stages are gone.
+        let brain_id = tk as *const Tokenizer as usize;
+        if chat.brain != brain_id {
+            chat.brain = brain_id;
+            chat.ids.clear();
+            chat.cache = Cached::default();
+        }
         if chat.ids.is_empty() {
             chat.ids = self.render(chat, &turns);
         }
@@ -201,7 +216,13 @@ impl Agent {
         }
         chat.conv.messages.push(Message { role: "user".into(), content: text.to_string(), name: None });
         chat.conv.updated = memory::now();
-        chat.ids.extend(tk.encode_segment(&turns.user(text)));
+        // shortcut: the related lines go to the model but not into the saved message, so a
+        // re-render (reopening, trimming) drops them; store them if answers need them later.
+        let read = match self.memory.related(text, Some(&chat.conv.id)) {
+            Some(lines) => format!("{text}\n\n<earlier_conversations>\n{lines}\n</earlier_conversations>"),
+            None => text.to_string(),
+        };
+        chat.ids.extend(tk.encode_segment(&turns.user(&read)));
         chat.cache.stop_with(stop.clone());
         let mut total = Stats::default();
         let mut steps = 0;

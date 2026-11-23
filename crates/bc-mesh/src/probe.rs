@@ -14,7 +14,12 @@ use crate::msg::{DeviceReport, GpuReport, MeshMsg};
 const PINGS: usize = 5;
 const BULK_BYTES: usize = 2 << 20;
 const BULK_CHUNK: usize = 64 << 10;
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+/// Measuring should take seconds: a device that has not answered by then is counted as
+/// away rather than holding up every other result.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// The upload rate is read from at most this long of sending, so a slow link costs a
+/// second, not the time a fixed amount would take.
+const BULK_BUDGET: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LinkReport {
@@ -60,8 +65,12 @@ pub(crate) async fn measure(send: &mut iroh::endpoint::SendStream, recv: &mut ir
     }
     rtts.sort_by(f64::total_cmp);
     let chunk = vec![0x5a; BULK_CHUNK];
+    let start = Instant::now();
     for _ in 0..bulk / BULK_CHUNK {
         send_msg(send, &MeshMsg::Bulk { data: chunk.clone() }).await?;
+        if start.elapsed() > BULK_BUDGET {
+            break;
+        }
     }
     send_msg(send, &MeshMsg::BulkDone).await?;
     let up = match recv_msg::<MeshMsg>(recv).await? {
@@ -85,7 +94,7 @@ pub async fn probe_link(endpoint: &Endpoint, a: EndpointAddr, b: EndpointAddr) -
         .context("connecting")?;
     let (mut send, mut recv) = conn.open_bi().await?;
     send_msg(&mut send, &MeshMsg::ProbePeer { addr: b, ticket }).await?;
-    let reply = tokio::time::timeout(Duration::from_secs(60), recv_msg::<MeshMsg>(&mut recv)).await.context("no answer in time")??;
+    let reply = tokio::time::timeout(Duration::from_secs(10), recv_msg::<MeshMsg>(&mut recv)).await.context("no answer in time")??;
     conn.close(0u32.into(), b"done");
     match reply {
         MeshMsg::PeerLink { rtt_ms, up_bytes_s, via_relay } => Ok((rtt_ms, up_bytes_s, via_relay)),
