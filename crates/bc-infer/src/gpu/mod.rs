@@ -602,7 +602,10 @@ impl Layers {
             return Ok(());
         }
         let kvd = cfg.n_head_kv * cfg.head_dim;
-        let cap = need.max(c.cap * 2).max(256).min(cfg.context.max(need));
+        // A quarter more each time, not double: the old cache stays until copied, and on a
+        // long conversation doubling asked for more than the GPU had (16k tokens of f32
+        // keys and values next to 8k for qwen3-0.6b).
+        let cap = need.max(c.cap + c.cap / 4).max(256).next_multiple_of(256).min(cfg.context.max(need));
         // DeltaNet layers keep no keys or values: a float each, never read.
         let fresh = |i: usize| b.zeros(if matches!(self.layers[i].mix, Mix::Attn { .. }) { cap * kvd } else { 1 });
         let (k, v): (Vec<Buf>, Vec<Buf>) = (0..self.layers.len()).map(|i| Ok((fresh(i)?, fresh(i)?))).collect::<Result<Vec<_>>>()?.into_iter().unzip();
