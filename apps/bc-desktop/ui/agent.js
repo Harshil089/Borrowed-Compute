@@ -291,6 +291,7 @@ $("agent-memory-open").addEventListener("click", async () => {
   $("agent-server-model").value = server.model || "";
   $("agent-server-context").value = server.context || "";
   $("agent-server-msg").textContent = "";
+  showMcp(await invoke("mcp_get").catch(() => ({ text: "" })));
   $("agent-chat").classList.add("hidden");
   $("agent-memory").classList.remove("hidden");
 });
@@ -314,6 +315,19 @@ $("agent-server-save").addEventListener("click", async () => {
     checkModel();
   } catch (e) {
     $("agent-server-msg").textContent = String(e);
+  }
+});
+function showMcp(m) {
+  $("agent-mcp").value = m.text || "";
+  const ok = (m.servers || []).map((s) => `${s.name}: ${s.tools} ${s.tools === 1 ? "tool" : "tools"}`);
+  $("agent-mcp-msg").textContent = [...ok, ...(m.failed || [])].join(" · ");
+}
+$("agent-mcp-save").addEventListener("click", async () => {
+  $("agent-mcp-msg").textContent = "Starting…";
+  try {
+    showMcp(await invoke("mcp_set", { text: $("agent-mcp").value }));
+  } catch (e) {
+    $("agent-mcp-msg").textContent = String(e);
   }
 });
 $("agent-forget").addEventListener("click", async () => {

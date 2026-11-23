@@ -1152,6 +1152,8 @@ fn main() {
             agent::agent_model,
             agent::model_server_get,
             agent::model_server_set,
+            agent::mcp_get,
+            agent::mcp_set,
             mesh::mesh_hosted,
             lend::keep_account_here,
             lend::set_lending,

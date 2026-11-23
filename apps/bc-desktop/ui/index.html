@@ -393,6 +393,10 @@
               <input id="agent-server-context" type="number" min="0" step="1024" placeholder="Context (8192)" aria-label="Context in tokens">
             </div>
             <div class="row"><button id="agent-server-save">Save server</button><span id="agent-server-msg" class="hint"></span></div>
+            <h3 class="agent-sub">MCP servers</h3>
+            <p class="hint">Tools from your own MCP servers, in the usual mcp.json shape: <span class="mono">{"mcpServers": {"name": {"command": "npx", "args": […]}}}</span>, or <span class="mono">"url"</span> for one already running. They run as you, outside the job sandbox, and ask before each call unless a server has <span class="mono">"readOnly": true</span>.</p>
+            <textarea id="agent-mcp" rows="7" class="mono" spellcheck="false" aria-label="MCP servers"></textarea>
+            <div class="row"><button id="agent-mcp-save">Save and start</button><span id="agent-mcp-msg" class="hint"></span></div>
           </section>
         </div>
       </div>

@@ -268,13 +268,13 @@ const STOPWORDS: &[&str] = &[
 ];
 
 /// Lowercase words of two characters or more, leaving out [`STOPWORDS`].
-fn words(text: &str) -> Vec<String> {
+pub(super) fn words(text: &str) -> Vec<String> {
     text.split(|c: char| !c.is_alphanumeric()).filter(|w| w.chars().count() >= 2).map(str::to_lowercase).filter(|w| !STOPWORDS.contains(&w.as_str())).collect()
 }
 
 /// The `k` best documents for `query` by BM25 (k1 = 1.2, b = 0.75), best first; only
 /// documents sharing a word with the query.
-fn bm25(query: &[String], docs: &[Vec<String>], k: usize) -> Vec<usize> {
+pub(super) fn bm25(query: &[String], docs: &[Vec<String>], k: usize) -> Vec<usize> {
     if docs.is_empty() || query.is_empty() {
         return Vec::new();
     }

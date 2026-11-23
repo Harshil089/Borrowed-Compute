@@ -11,6 +11,7 @@
 pub mod format;
 pub mod http;
 pub mod log;
+pub mod mcp;
 pub mod memory;
 pub mod remind;
 pub mod route;
@@ -580,7 +581,7 @@ impl Agent {
             (self.events)(Event::Result { id: view.id.clone(), name: String::new(), ok: false, text: text.clone() });
             return text;
         };
-        let risk = Tools::risk(&call.name);
+        let risk = self.tools.risk(&call.name);
         let asked = risk != Risk::Read && !settings.auto_approve && !allowed.lock().unwrap().contains(&call.name);
         if asked {
             let approval = Approval { id: view.id.clone(), name: call.name.clone(), arguments: call.arguments.clone(), risk };

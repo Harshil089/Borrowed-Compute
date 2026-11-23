@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use bc_cli::agent::format::parse;
 use bc_cli::agent::http::{HttpBrain, ModelServer};
+use bc_cli::agent::mcp::{McpConfig, McpServer};
 use bc_cli::agent::memory::{Conversation, Memory, Summary};
 use bc_cli::agent::tools::{RunRequest, Runner, Tools};
 use bc_cli::agent::{Agent, Brain, Chat, Decision, Settings};
@@ -24,6 +25,9 @@ use crate::{err_chain, AppState, CmdResult};
 const OPEN_CHATS: usize = 4;
 const THIS_COMPUTER: &str = "This computer";
 
+/// MCP servers started for one mcp.json: its text, the servers, and those that failed.
+type Started = (String, Vec<Arc<McpServer>>, Vec<String>);
+
 /// Calls waiting for the person: call id to (conversation, answer).
 type Pending = Arc<StdMutex<HashMap<String, (String, oneshot::Sender<Decision>)>>>;
 
@@ -35,6 +39,52 @@ pub struct AgentState {
     /// The model server's brain, kept while its settings stay the same, so conversations
     /// keep their token ids between messages.
     server: StdMutex<Option<(ModelServer, Arc<HttpBrain>)>>,
+    /// The MCP servers started for the current mcp.json: (its text, servers, failures).
+    mcp: Mutex<Option<Started>>,
+}
+
+fn mcp_file(state: &AppState) -> std::path::PathBuf {
+    state.home.join("mcp.json")
+}
+
+/// The MCP servers for mcp.json as it is now, started on first use and again after it
+/// changes (dropping the old ones stops their programs).
+async fn mcp_servers(state: &AppState, agent: &AgentState) -> Vec<Arc<McpServer>> {
+    let text = std::fs::read_to_string(mcp_file(state)).unwrap_or_default();
+    let mut running = agent.mcp.lock().await;
+    if running.as_ref().is_none_or(|(t, _, _)| *t != text) {
+        *running = None;
+        let (servers, failed) = match McpConfig::parse(&text) {
+            Ok(config) => bc_cli::agent::mcp::start_all(&config, bc_agent::runner::job_path().await.as_deref()).await,
+            Err(e) => (Vec::new(), vec![format!("{e:#}")]),
+        };
+        for f in &failed {
+            crate::log(format_args!("MCP server: {f}"));
+        }
+        *running = Some((text, servers, failed));
+    }
+    running.as_ref().map(|(_, s, _)| s.clone()).unwrap_or_default()
+}
+
+/// mcp.json and, once started, each server's tool count and any that failed.
+#[tauri::command]
+pub async fn mcp_get(state: State<'_, AppState>, agent: State<'_, AgentState>) -> CmdResult<Value> {
+    let text = std::fs::read_to_string(mcp_file(&state)).unwrap_or_default();
+    let running = agent.mcp.lock().await;
+    let (servers, failed) = match running.as_ref().filter(|(t, _, _)| *t == text) {
+        Some((_, s, f)) => (s.iter().map(|s| json!({ "name": s.name, "tools": s.tools.len() })).collect::<Vec<_>>(), f.clone()),
+        None => (Vec::new(), Vec::new()),
+    };
+    Ok(json!({ "text": text, "servers": servers, "failed": failed }))
+}
+
+/// Saves mcp.json once it reads, and starts its servers so the window can show them.
+#[tauri::command]
+pub async fn mcp_set(state: State<'_, AppState>, agent: State<'_, AgentState>, text: String) -> CmdResult<Value> {
+    McpConfig::parse(&text).map_err(err_chain)?;
+    std::fs::write(mcp_file(&state), &text).map_err(|e| e.to_string())?;
+    mcp_servers(&state, &agent).await;
+    mcp_get(state, agent).await
 }
 
 fn server_file(state: &AppState) -> std::path::PathBuf {
@@ -125,7 +175,8 @@ pub async fn agent_send(app: AppHandle, state: State<'_, AppState>, mesh: State<
     let mut chat = chat.try_lock().map_err(|_| "This conversation is still working; stop it or wait.".to_string())?;
     let devices = run_devices(&state).await;
     let folder = chat.conv.folder.clone().map(std::path::PathBuf::from);
-    let tools = Tools::new(folder.as_deref(), mem.clone(), conversation.clone(), Some(runner(&state)), devices).map_err(err_chain)?;
+    let mut tools = Tools::new(folder.as_deref(), mem.clone(), conversation.clone(), Some(runner(&state)), devices).map_err(err_chain)?;
+    tools.mcp = mcp_servers(&state, &agent).await;
     let stop = Arc::new(AtomicBool::new(false));
     agent.stops.lock().unwrap().insert(conversation.clone(), stop.clone());
     let (events_app, conv) = (app.clone(), conversation.clone());
