@@ -161,8 +161,9 @@ function header(folder) {
   const parts = (f || "").split(/[\\/]/).filter(Boolean);
   $("agent-folder-text").textContent = f ? (parts.length > 2 ? "…/" : "/") + parts.slice(-2).join("/") : current ? "No folder" : "Choose a folder";
   $("agent-folder").title = f || "The folder its file tools and commands work in";
-  // A conversation keeps the folder it started with.
+  // A conversation keeps the folder it started with, until it is detached.
   $("agent-folder").disabled = !!current;
+  $("agent-folder-clear").classList.toggle("hidden", !f);
 }
 
 function controls() {
@@ -353,6 +354,22 @@ $("agent-folder").addEventListener("click", async () => {
   draftFolder = picked;
   store.set("agent-folder", picked);
   header(null);
+});
+// Detaching: a new conversation simply forgets the choice; an open one drops its folder
+// for its next messages (its file tools and `run` go away).
+$("agent-folder-clear").addEventListener("click", async () => {
+  if (!current) {
+    draftFolder = null;
+    store.set("agent-folder", "");
+    header(null);
+    return;
+  }
+  try {
+    await invoke("agent_detach_folder", { conversation: current });
+    header(null);
+  } catch (e) {
+    add(`<div class="banner bad">${esc(e)}</div>`);
+  }
 });
 $("agent-to-mesh").addEventListener("click", () => window.lendUI.showPage("mesh"));
 

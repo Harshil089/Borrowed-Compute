@@ -181,6 +181,13 @@ impl Chat {
     pub fn new(conv: Conversation) -> Self {
         Chat { conv, ids: Vec::new(), cache: Cached::default(), allowed: Arc::default(), route_cache: Cached::default(), brain: 0 }
     }
+
+    /// Changes the folder its tools work in; the prompt names the folder, so it is laid
+    /// out again on the next message.
+    pub fn set_folder(&mut self, folder: Option<String>) {
+        self.conv.folder = folder;
+        self.ids.clear();
+    }
 }
 
 pub struct Agent {
