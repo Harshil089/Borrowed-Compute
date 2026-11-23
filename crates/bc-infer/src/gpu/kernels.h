@@ -300,7 +300,9 @@ DEVFN uint nth_bit(uint lo, uint hi, uint k) {
 // the same order as a line would walk them: list index k is cache slot k below pos, then
 // the (k - pos)-th visible slot. So a tree row is
 // summed in exactly the order a one-path pass would sum it, bit for bit.
-DEVFN void attention(GLOBAL const float* q, GLOBAL const float* kc, GLOBAL const float* vc, GLOBAL float* out, LOCAL float* sh,
+// The cache holds keys and values as f16 (half the memory and half the reads of f32);
+// they are widened to f32 as they are read, and every sum stays f32.
+DEVFN void attention(GLOBAL const float* q, GLOBAL const ushort* kc, GLOBAL const ushort* vc, GLOBAL float* out, LOCAL float* sh,
                      GLOBAL const uint* masks, uint tree,
                      uint n_head, uint n_head_kv, uint head_dim, uint pos, float scale, uint h, uint r, uint lane) {
     uint kvd = n_head_kv * head_dim;
@@ -316,9 +318,9 @@ DEVFN void attention(GLOBAL const float* q, GLOBAL const float* kc, GLOBAL const
         uint end = start + TILE < upto ? start + TILE : upto;
         float tmax = NEG_INF;
         for (uint t = start + lane; t < end; t += 32u) {
-            GLOBAL const float* kt = kc + (ulong)SLOT(t) * kvd + kvh * head_dim;
+            GLOBAL const ushort* kt = kc + (ulong)SLOT(t) * kvd + kvh * head_dim;
             float s = 0.0f;
-            for (uint d = 0; d < head_dim; d++) s += qh[d] * kt[d];
+            for (uint d = 0; d < head_dim; d++) s += qh[d] * H2F(kt[d]);
             s *= scale;
             sh[t - start] = s;
             tmax = s > tmax ? s : tmax;
@@ -339,10 +341,10 @@ DEVFN void attention(GLOBAL const float* q, GLOBAL const float* kc, GLOBAL const
         BARRIER();
         for (uint t = start; t < end; t++) {
             float p = sh[t - start];
-            GLOBAL const float* vt = vc + (ulong)SLOT(t) * kvd + kvh * head_dim;
+            GLOBAL const ushort* vt = vc + (ulong)SLOT(t) * kvd + kvh * head_dim;
             for (uint j = 0; j < MAX_HEAD / 32u; j++) {
                 uint d = lane + 32u * j;
-                if (d < head_dim) acc[j] += p * vt[d];
+                if (d < head_dim) acc[j] += p * H2F(vt[d]);
             }
         }
         m = mn;
@@ -364,6 +366,10 @@ DEVFN void add(GLOBAL float* x, GLOBAL const float* y, uint n, uint i) { if (i <
 DEVFN void copy(GLOBAL const float* src, GLOBAL float* dst, uint offset, uint n, uint i) { if (i < n) dst[offset + i] = src[i]; }
 // Within one buffer, `to` never after `from`: keeps an accepted tree row in the cache.
 DEVFN void move(GLOBAL float* b, uint from, uint to, uint n, uint i) { if (i < n) b[to + i] = b[from + i]; }
+// The f16 cache: new rows go in narrowed, and rows move or are copied as they are.
+DEVFN void copy_h(GLOBAL const float* src, GLOBAL ushort* dst, uint offset, uint n, uint i) { if (i < n) dst[offset + i] = F2H(src[i]); }
+DEVFN void copy16(GLOBAL const ushort* src, GLOBAL ushort* dst, uint offset, uint n, uint i) { if (i < n) dst[offset + i] = src[i]; }
+DEVFN void move16(GLOBAL ushort* b, uint from, uint to, uint n, uint i) { if (i < n) b[to + i] = b[from + i]; }
 
 // Qwen3.5's gated DeltaNet and gated attention.
 

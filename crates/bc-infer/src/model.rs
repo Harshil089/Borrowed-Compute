@@ -1113,7 +1113,8 @@ pub(crate) mod tests {
         let (g, c) = (&g[g.len() - v..], &c[c.len() - v..]);
         let err = g.iter().zip(c).map(|(x, y)| (x - y).abs()).fold(0f32, f32::max);
         assert!(err < 0.05, "{err}");
-        assert!(kg[0].bytes() >= 1100 * 2 * 2 * 32 * 4);
+        // f16 keys and values: two layers, keys and values, 32 wide, two bytes each.
+        assert!(kg[0].bytes() >= 1100 * 2 * 2 * 32 * 2 && kg[0].bytes() < 1100 * 2 * 2 * 32 * 4);
     }
 
     #[test]
