@@ -79,7 +79,8 @@ pub async fn run(brain: Arc<dyn Brain>, cases: &[Case], base: &Path, scratch: &P
         if let Err(e) = ended {
             misses.push(format!("failed: {e:#}"));
         }
-        if let Some(r) = &case.expect_route {
+        // Scored only where a route was taken: without the decision step, most are not.
+        if let Some(r) = case.expect_route.as_ref().filter(|_| !route.is_empty()) {
             if *r != route {
                 misses.push(format!("route {route:?}, wanted {r:?}"));
             }

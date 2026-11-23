@@ -85,6 +85,13 @@ fn chat_id_of(tools: &Tools) -> String {
     tools.conversation.clone()
 }
 
+/// Words of a message that look like file paths: `notes.txt`, `src/main.rs`.
+fn named_paths(text: &str) -> impl Iterator<Item = &str> {
+    text.split_whitespace()
+        .map(|w| w.trim_matches(|c: char| matches!(c, '`' | '"' | '\'' | ',' | '?' | '!' | '(' | ')' | ':' | ';')).trim_end_matches('.'))
+        .filter(|w| w.contains('.') || w.contains('/'))
+}
+
 /// Files the harness reads for a question about the folder.
 const FILES_READ: usize = 4;
 
@@ -319,6 +326,10 @@ impl Agent {
             None
         } else if has_web && route::web_query(text).is_some() {
             Some(Route::Web)
+        } else if route::refers_to_past(text) {
+            Some(Route::Past)
+        } else if self.tools.root.is_some() && (route::refers_to_folder(text) || self.files_named(text)) {
+            Some(Route::Files)
         } else if settings.skip_decision {
             None
         } else {
@@ -511,15 +522,18 @@ impl Agent {
         })
     }
 
+    /// Whether the message names a file in the folder.
+    fn files_named(&self, text: &str) -> bool {
+        named_paths(text).any(|w| self.tools.resolve(w).is_ok_and(|p| p.is_file()))
+    }
+
     /// Files to read for a question about the folder: those the message names, else the
     /// whole top level when it is a few small files.
     fn files_for(&self, text: &str) -> Vec<format::Call> {
         let Some(root) = &self.tools.root else { return Vec::new() };
         let read = |path: &str| format::Call { name: "read_file".into(), arguments: serde_json::json!({ "path": path }) };
-        let named: Vec<format::Call> = text
-            .split_whitespace()
-            .map(|w| w.trim_matches(|c: char| matches!(c, '`' | '"' | '\'' | ',' | '?' | '!' | '(' | ')')).trim_end_matches('.'))
-            .filter(|w| (w.contains('.') || w.contains('/')) && self.tools.resolve(w).is_ok_and(|p| p.is_file()))
+        let named: Vec<format::Call> = named_paths(text)
+            .filter(|w| self.tools.resolve(w).is_ok_and(|p| p.is_file()))
             .take(FILES_READ)
             .map(read)
             .collect();
@@ -827,12 +841,12 @@ mod tests {
         // Answer, Web, Files, Past: the model picks 3.
         *r.brain.choice.lock().unwrap() = Some(3);
         let mut chat = Chat::new(Conversation::new(None));
-        r.agent.turn(&mut chat, "what do you see in this", Settings::default(), Arc::default()).await.unwrap();
+        r.agent.turn(&mut chat, "what does the note say", Settings::default(), Arc::default()).await.unwrap();
         let roles: Vec<&str> = chat.conv.messages.iter().map(|m| m.role.as_str()).collect();
         assert_eq!(roles, ["user", "assistant", "tool", "assistant"]);
         assert!(chat.conv.messages[2].content.contains("hello"), "{:?}", chat.conv.messages);
         let asked = r.brain.tk.decode(&r.brain.chose.lock().unwrap()[0]);
-        assert!(asked.contains("3. Look in the chosen project folder") && asked.contains("what do you see in this"), "{asked}");
+        assert!(asked.contains("3. Look in the chosen project folder") && asked.contains("what does the note say") && asked.contains("\"summarize the readme\" -> 3"), "{asked}");
         // A file named in the message is read even in a big folder; nothing else is.
         for i in 0..6 {
             std::fs::write(r.dir.path().join(format!("project/f{i}.txt")), "x").unwrap();

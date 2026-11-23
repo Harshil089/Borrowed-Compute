@@ -46,7 +46,12 @@ pub async fn decide(brain: &dyn Brain, cache: &mut Cached, text: &str, options: 
     let tk = brain.tokenizer();
     let Some(range) = digits(tk, options.len()) else { return Route::Answer };
     let list: String = options.iter().enumerate().map(|(i, r)| format!("{}. {}\n", i + 1, r.option())).collect();
-    let system = format!("Pick what to do first for the person's message. Reply with the number only.\n{list}");
+    // Worked examples keep a small model from answering 1 to everything.
+    let examples: String = EXAMPLES
+        .iter()
+        .filter_map(|(message, route)| options.iter().position(|o| o == route).map(|i| format!("\"{message}\" -> {}\n", i + 1)))
+        .collect();
+    let system = format!("Pick what to do first for the person's message. Reply with the number only.\n{list}\nExamples:\n{examples}");
     let turns = Turns { tokenizer: tk, think: false };
     let mut ids = tk.encode(&turns.open(&system));
     ids.extend(tk.encode_segment(&turns.user(&super::format::clip(text, 2000))));
@@ -56,11 +61,41 @@ pub async fn decide(brain: &dyn Brain, cache: &mut Cached, text: &str, options: 
     }
 }
 
+const EXAMPLES: &[(&str, Route)] = &[
+    ("hello", Route::Answer),
+    ("who is the prime minister of Japan now?", Route::Web),
+    ("what does the main function do?", Route::Files),
+    ("write a short poem about the sea", Route::Answer),
+    ("what was the name of the hotel I told you about?", Route::Past),
+    ("how much does an iPhone 17 cost?", Route::Web),
+    ("summarize the readme", Route::Files),
+    ("what is 12 squared?", Route::Answer),
+];
+
 /// The token ids of "1" to "n", when they run consecutively, as byte-level vocabularies
 /// (Qwen, Llama 3) have them.
 fn digits(tk: &Tokenizer, n: usize) -> Option<[u32; 2]> {
     let first = tk.token_id("1")?;
     (1..n).all(|i| tk.token_id(&(i + 1).to_string()) == Some(first + i as u32)).then_some([first, first + n as u32])
+}
+
+/// Whether the message points back at something said in another conversation.
+pub fn refers_to_past(text: &str) -> bool {
+    let lower = text.to_lowercase().replace('’', "'");
+    [
+        "i mentioned", "i told you", "told you about", "we discussed", "we talked", "we spoke", "did i ask", "did i say", "did i tell", "did i mention", "you said",
+        "last time", "previous conversation", "earlier conversation", "other conversation", "remember what", "remember when", "remember the", "what was that",
+    ]
+    .iter()
+    .any(|p| lower.contains(p))
+}
+
+/// Whether the message is about the chosen folder by its words alone.
+pub fn refers_to_folder(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    let words: Vec<&str> = lower.split(|c: char| !c.is_alphanumeric()).collect();
+    ["folder", "folders", "file", "files", "directory", "project", "repo", "codebase", "readme"].iter().any(|w| words.contains(w))
+        || ["in this", "in here", "this code", "these files"].iter().any(|p| lower.contains(p))
 }
 
 /// What to search the web for, when a message asks for something only the web has: news,
@@ -114,6 +149,16 @@ mod tests {
         assert_eq!(reminder_request("Can you remind me in 20 minutes to stretch."), Some(("Can you remind me in 20 minutes to stretch.".into(), "in 20 minutes to stretch".into())));
         assert_eq!(reminder_request("remind me to call ayush"), None);
         assert_eq!(reminder_request("call ayush at 9pm"), None);
+    }
+
+    #[test]
+    fn some_messages_route_by_their_words_alone() {
+        assert!(refers_to_past("what was that restaurant I mentioned before?"));
+        assert!(refers_to_past("remember what we discussed about the deployment last week?"));
+        assert!(!refers_to_past("what is a restaurant?"));
+        assert!(refers_to_folder("what do you see in this folder?"));
+        assert!(refers_to_folder("summarize the README"));
+        assert!(!refers_to_folder("write a haiku about rain"));
     }
 
     #[test]
