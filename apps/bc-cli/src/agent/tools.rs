@@ -216,7 +216,7 @@ impl Tools {
         if rel.is_empty() { ".".into() } else { rel }
     }
 
-    fn list_dir(&self, path: &str) -> Result<String> {
+    pub fn list_dir(&self, path: &str) -> Result<String> {
         let dir = self.resolve(path)?;
         let mut entries: Vec<(bool, String, u64)> = std::fs::read_dir(&dir)
             .with_context(|| format!("{} is not a folder", self.shown(&dir)))?

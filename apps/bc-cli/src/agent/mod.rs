@@ -151,7 +151,13 @@ impl Agent {
         let mut base = BASE_PROMPT.to_string();
         base.push_str(&format!("\n\nToday is {}.", memory::day_of(memory::now())));
         if let Some(root) = &self.tools.root {
-            base.push_str(&format!(" The project folder is {}; file paths are relative to it.", root.display()));
+            // The top of the folder comes with the prompt, so "what is in this" needs no
+            // tool call and the model knows from the start which files it can open.
+            let top = self.tools.list_dir(".").unwrap_or_default();
+            base.push_str(&format!(
+                " The person chose the project folder {}: \"this\", \"here\" and \"the project\" mean it, and file paths are relative to it. Its top level:\n{top}",
+                root.display()
+            ));
         }
         let recent = self.memory.recent(Some(conversation));
         if !recent.is_empty() {
@@ -432,13 +438,17 @@ mod tests {
         assert!(fed[1].starts_with(&fed[0]) && fed[1].len() > fed[0].len());
         let tail = r.brain.tk.decode(&fed[1][fed[0].len()..]);
         assert!(tail.starts_with(WRITE) && tail.contains("<tool_response>\nWrote 2 bytes to a.txt.\n</tool_response>"), "{tail}");
-        // Saved, and the same tokens come back from the saved messages.
+        // Saved, and the same tokens come back from the saved messages. Only the system
+        // prompt differs: it lists the folder as it is now, a.txt included.
         let saved = r.agent.memory.load(&chat.conv.id).unwrap();
         assert_eq!(saved.messages, chat.conv.messages);
         let mut reopened = Chat::new(saved);
         let turns = Turns { tokenizer: &r.brain.tk, think: false };
         reopened.ids = r.agent.render(&reopened, &turns);
-        assert_eq!(reopened.ids, chat.ids);
+        let im_end = r.brain.tk.token_id("<|im_end|>").unwrap();
+        let after_system = |ids: &[u32]| ids[ids.iter().position(|&t| t == im_end).unwrap()..].to_vec();
+        assert_eq!(after_system(&reopened.ids), after_system(&chat.ids));
+        assert!(r.brain.tk.decode(&reopened.ids).contains("a.txt (2 bytes)"));
     }
 
     #[tokio::test]
@@ -488,6 +498,6 @@ mod tests {
         r.agent.memory.remember("the owner likes short answers").unwrap();
         let s = r.agent.system("c");
         assert!(s.contains("Notes from earlier conversations") && s.contains("- the owner likes short answers"));
-        assert!(s.contains("\"name\":\"edit_file\"") && s.contains("The project folder is"));
+        assert!(s.contains("\"name\":\"edit_file\"") && s.contains("chose the project folder"));
     }
 }
