@@ -17,6 +17,13 @@ pub const NOTES_IN_PROMPT: usize = 2000;
 /// Past conversations searched by `recall`, newest first.
 const RECALL_CONVERSATIONS: usize = 500;
 const RECALL_HITS: usize = 5;
+const RELATED_HITS: usize = 3;
+/// Other conversations every new one starts with, the last few things said in each.
+const RECENT_CONVERSATIONS: usize = 8;
+const RECENT_LINES: usize = 4;
+const RECENT_CHARS: usize = 160;
+/// Related lines come with every message, so they are kept short.
+const RELATED_CHARS: usize = 300;
 const CHUNK_CHARS: usize = 600;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -126,6 +133,25 @@ impl Memory {
         self.all().into_iter().map(|c| Summary { id: c.id, title: c.title, updated: c.updated, folder: c.folder }).collect()
     }
 
+    /// What the person said in the latest other conversations, newest first: every new
+    /// conversation starts knowing it, with nothing for the person to copy into notes.
+    pub fn recent(&self, except: Option<&str>) -> String {
+        self.all()
+            .into_iter()
+            .filter(|c| Some(c.id.as_str()) != except && c.messages.iter().any(|m| m.role == "user"))
+            .take(RECENT_CONVERSATIONS)
+            .map(|c| {
+                let said: Vec<&Message> = c.messages.iter().filter(|m| m.role == "user").collect();
+                let lines: Vec<String> = said[said.len().saturating_sub(RECENT_LINES)..]
+                    .iter()
+                    .map(|m| format!("- {}", super::format::clip(&m.content.trim().replace('\n', " "), RECENT_CHARS)))
+                    .collect();
+                format!("[{} · {}]\n{}", c.title, day_of(c.updated), lines.join("\n"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     pub fn notes(&self) -> String {
         std::fs::read_to_string(self.root.join("memory.md")).unwrap_or_default()
     }
@@ -166,6 +192,16 @@ impl Memory {
 
     /// The passages of past conversations (all but `except`) that best match `query`.
     pub fn recall(&self, query: &str, except: Option<&str>) -> String {
+        self.hits(query, except, RECALL_HITS, CHUNK_CHARS).unwrap_or_else(|| "Nothing in past conversations matches.".to_string())
+    }
+
+    /// Past conversations' lines that share a word with `message`, for the agent to read
+    /// with it, so it recalls them even when the model would not think to search.
+    pub fn related(&self, message: &str, except: Option<&str>) -> Option<String> {
+        self.hits(message, except, RELATED_HITS, RELATED_CHARS)
+    }
+
+    fn hits(&self, query: &str, except: Option<&str>, k: usize, chars: usize) -> Option<String> {
         let all: Vec<Conversation> = self.all().into_iter().filter(|c| Some(c.id.as_str()) != except).take(RECALL_CONVERSATIONS).collect();
         let mut chunks: Vec<(&Conversation, &str, String)> = Vec::new();
         for c in &all {
@@ -177,17 +213,19 @@ impl Memory {
             }
         }
         let docs: Vec<Vec<String>> = chunks.iter().map(|(_, _, t)| words(t)).collect();
-        let hits = bm25(&words(query), &docs, RECALL_HITS);
+        let hits = bm25(&words(query), &docs, k);
         if hits.is_empty() {
-            return "Nothing in past conversations matches.".to_string();
+            return None;
         }
-        hits.into_iter()
+        let out = hits
+            .into_iter()
             .map(|i| {
                 let (c, role, text) = &chunks[i];
-                format!("[{} · {}] {role}: {}", c.title, day_of(c.updated), text.trim())
+                format!("[{} · {}] {role}: {}", c.title, day_of(c.updated), super::format::clip(text.trim(), chars))
             })
             .collect::<Vec<_>>()
-            .join("\n\n")
+            .join("\n\n");
+        Some(out)
     }
 }
 
@@ -207,9 +245,18 @@ fn split(text: &str, max: usize) -> Vec<String> {
     out
 }
 
-/// Lowercase words of two characters or more.
+/// Words that say nothing about what a message is about; matching on them would recall
+/// every conversation.
+const STOPWORDS: &[&str] = &[
+    "am", "an", "as", "at", "be", "by", "do", "if", "in", "is", "it", "no", "or", "so", "up", "us", "about", "after", "again", "all", "also", "and", "any", "are", "but", "can", "could", "did", "does", "for", "from", "had", "has", "have", "her",
+    "him", "his", "how", "its", "just", "like", "me", "more", "my", "not", "now", "of", "off", "on", "one", "our", "out", "please", "she", "should",
+    "some", "than", "that", "the", "them", "then", "there", "they", "this", "to", "too", "was", "way", "we", "were", "what", "when", "where", "which",
+    "who", "why", "will", "with", "would", "you", "your",
+];
+
+/// Lowercase words of two characters or more, leaving out [`STOPWORDS`].
 fn words(text: &str) -> Vec<String> {
-    text.split(|c: char| !c.is_alphanumeric()).filter(|w| w.chars().count() >= 2).map(str::to_lowercase).collect()
+    text.split(|c: char| !c.is_alphanumeric()).filter(|w| w.chars().count() >= 2).map(str::to_lowercase).filter(|w| !STOPWORDS.contains(&w.as_str())).collect()
 }
 
 /// The `k` best documents for `query` by BM25 (k1 = 1.2, b = 0.75), best first; only
@@ -295,6 +342,15 @@ mod tests {
         // The conversation asking is left out.
         assert!(!m.recall("vercel", Some("6553f100-00000000")).contains("Deploy"));
         assert_eq!(m.list().iter().map(|s| s.title.as_str()).collect::<Vec<_>>(), ["Pasta", "Deploy"]);
+        // A message comes with what it refers to, but not with lines that only share words
+        // like "what" or "you".
+        m.save(&conv("Calls", 1_700_200_000, &[("user", "remind me to call Ayush at 9pm"), ("assistant", "I cannot set reminders; noted it.")])).unwrap();
+        assert!(m.related("what did i remind you of?", None).is_some_and(|r| r.contains("Ayush")));
+        assert_eq!(m.related("what would you do", None), None);
+        // A new conversation starts with what was said in the others, newest first.
+        let recent = m.recent(Some("6553f100-00000000"));
+        assert!(recent.starts_with("[Calls · 2023-11-17]\n- remind me to call Ayush at 9pm\n[Pasta"), "{recent}");
+        assert!(!recent.contains("Deploy"), "{recent}");
     }
 
     #[test]

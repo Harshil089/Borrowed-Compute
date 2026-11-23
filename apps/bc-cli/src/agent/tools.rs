@@ -23,6 +23,7 @@ const READ_CHARS: usize = 8000;
 const READ_LINES: usize = 200;
 const LIST_ENTRIES: usize = 200;
 const SEARCH_HITS: usize = 50;
+const SEARCH_RESULTS: usize = 8;
 const FETCH_BYTES: usize = 1 << 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -107,6 +108,7 @@ impl Tools {
                 ));
             }
         }
+        out.push(spec("web_search", "Search the web. Gives titles, addresses and snippets of the top results; read one in full with fetch_url.", json!({ "query": p("What to search for.") }), &["query"]));
         out.push(spec("fetch_url", "Read a web page (https) as text.", json!({ "url": p("The https address.") }), &["url"]));
         out.push(spec("recall", "Search the past conversations for something said before.", json!({ "query": p("Words to look for.") }), &["query"]));
         out.push(spec("remember", "Keep a short note for every future conversation: a fact about the person, a preference, a decision.", json!({ "note": p("The note, one line.") }), &["note"]));
@@ -117,7 +119,7 @@ impl Tools {
         match name {
             "write_file" | "edit_file" | "remember" => Risk::Write,
             "run" => Risk::Run,
-            "fetch_url" => Risk::Net,
+            "fetch_url" | "web_search" => Risk::Net,
             _ => Risk::Read,
         }
     }
@@ -167,6 +169,7 @@ impl Tools {
                 Ok(format!("Exit code {code}.\n{}", head_tail(&out, OUTPUT_CHARS)))
             }
             "fetch_url" => fetch(&need("url")?).await,
+            "web_search" => web_search(&need("query")?).await,
             "recall" => Ok(self.memory.recall(&need("query")?, Some(&self.conversation))),
             "remember" => {
                 self.memory.remember(&need("note")?)?;
@@ -213,7 +216,7 @@ impl Tools {
         if rel.is_empty() { ".".into() } else { rel }
     }
 
-    fn list_dir(&self, path: &str) -> Result<String> {
+    pub fn list_dir(&self, path: &str) -> Result<String> {
         let dir = self.resolve(path)?;
         let mut entries: Vec<(bool, String, u64)> = std::fs::read_dir(&dir)
             .with_context(|| format!("{} is not a folder", self.shown(&dir)))?
@@ -296,6 +299,44 @@ async fn fetch(url: &str) -> Result<String> {
     if parsed.scheme() != "https" {
         bail!("only https addresses");
     }
+    Ok(head_tail(&download(parsed).await?, OUTPUT_CHARS))
+}
+
+/// Bing's RSS results: no account or key, and plain XML. DuckDuckGo's keyless page puts
+/// automated clients behind a bot check, which the agent must not try to pass.
+async fn web_search(query: &str) -> Result<String> {
+    let mut url = reqwest::Url::parse("https://www.bing.com/search")?;
+    url.query_pairs_mut().append_pair("q", query.trim()).append_pair("format", "rss");
+    Ok(search_results(&download(url).await?))
+}
+
+/// The results of an RSS search page, numbered: title, address, snippet.
+fn search_results(xml: &str) -> String {
+    let tag = |item: &str, name: &str| -> String {
+        let open = format!("<{name}>");
+        let start = item.find(&open).map(|i| i + open.len());
+        let end = item.find(&format!("</{name}>"));
+        match (start, end) {
+            (Some(a), Some(b)) if a <= b => html_text(&html_text(&item[a..b])).replace('\n', " "),
+            _ => String::new(),
+        }
+    };
+    let out: Vec<String> = xml
+        .split("<item>")
+        .skip(1)
+        .take(SEARCH_RESULTS)
+        .enumerate()
+        .map(|(i, item)| format!("{}. {}\n   {}\n   {}", i + 1, tag(item, "title"), tag(item, "link"), tag(item, "description")))
+        .collect();
+    if out.is_empty() {
+        "No results.".to_string()
+    } else {
+        out.join("\n")
+    }
+}
+
+/// A page's text, HTML reduced to its words, at most [`FETCH_BYTES`] of it.
+async fn download(parsed: reqwest::Url) -> Result<String> {
     let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).build()?;
     let mut resp = client.get(parsed).header("user-agent", "BorrowedCompute-agent").send().await?;
     let status = resp.status();
@@ -313,7 +354,7 @@ async fn fetch(url: &str) -> Result<String> {
     if !status.is_success() {
         bail!("the page answered {status}: {}", super::format::clip(&text, 300));
     }
-    Ok(head_tail(&text, OUTPUT_CHARS))
+    Ok(text)
 }
 
 /// The readable text of a page: no scripts, styles or tags, whitespace collapsed.
@@ -399,7 +440,7 @@ mod tests {
         // Without a runner there is no `run`, and without a folder no file tools.
         assert!(!t.specs().iter().any(|s| s.name == "run"));
         let bare = Tools::new(None, Memory::at(dir.path()), "c".into(), None, Vec::new()).unwrap();
-        assert_eq!(bare.specs().iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["fetch_url", "recall", "remember"]);
+        assert_eq!(bare.specs().iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["web_search", "fetch_url", "recall", "remember"]);
         assert!(bare.call("read_file", &json!({"path": "b.txt"})).await.is_err());
     }
 
@@ -413,6 +454,13 @@ mod tests {
         assert!(fetch("http://example.com").await.unwrap_err().to_string().contains("only https"));
         assert_eq!(Tools::risk("run"), Risk::Run);
         assert_eq!(Tools::risk("read_file"), Risk::Read);
+    }
+
+    #[test]
+    fn search_results_read_rss_items() {
+        let xml = "<rss><channel><title>Bing</title><item><title>Race &amp; result</title><link>https://example.com/a</link><description>Winner &lt;b&gt;took&lt;/b&gt;\nit</description></item><item><title>Two</title><link>https://example.com/b</link></item></channel></rss>";
+        assert_eq!(search_results(xml), "1. Race & result\n   https://example.com/a\n   Winner took it\n2. Two\n   https://example.com/b\n   ");
+        assert_eq!(search_results("<rss></rss>"), "No results.");
     }
 
     #[test]

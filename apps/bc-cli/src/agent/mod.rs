@@ -118,11 +118,14 @@ pub struct Chat {
     ids: Vec<u32>,
     cache: Cached,
     allowed: Arc<Mutex<HashSet<String>>>,
+    /// The model `ids` were made for: its tokenizer's address, which changes when another
+    /// model (or the same one again) starts on the Mesh page.
+    brain: usize,
 }
 
 impl Chat {
     pub fn new(conv: Conversation) -> Self {
-        Chat { conv, ids: Vec::new(), cache: Cached::default(), allowed: Arc::default() }
+        Chat { conv, ids: Vec::new(), cache: Cached::default(), allowed: Arc::default(), brain: 0 }
     }
 }
 
@@ -134,16 +137,31 @@ pub struct Agent {
     pub approve: Approver,
 }
 
-const BASE_PROMPT: &str = "You are the assistant in Borrowed Compute, running on the person's own devices. \
-Work in small steps: look with the tools before you change anything, make exact edits, and check your work by running it when you can. \
-When the task is done, say briefly what you did. If something is unclear, ask.";
+const BASE_PROMPT: &str = "You are the assistant in Borrowed Compute, running on the person's own devices.\n\
+- When a tool can answer or do what the person asks, call it at once. Do not describe what you could do, and do not ask which details they want when a sensible choice exists.\n\
+- For anything current or that you do not know (news, results, prices, weather, docs), call web_search, then fetch_url on the best result when the snippets are not enough. Say where the answer came from.\n\
+- When the person tells you something to keep (a fact, a preference, a plan) or asks you to remember it, call remember.\n\
+- You remember the person's other conversations: the latest are listed below, and related lines may come with a message. They are background, which the person cannot see: never bring them up, quote or list them on your own. Use them only when the person asks about or refers to something from before; when it is not there, call recall.\n\
+- Never claim to have done something you did not do with a tool. You cannot act later on your own: you cannot set reminders, alarms or timers. Say so, and keep a note with remember instead.\n\
+- In a project: look with the tools before you change anything, make exact edits, and check your work by running it when you can. When done, say briefly what you did.\n\
+- Ask only when you cannot go on without an answer.";
 
 impl Agent {
-    fn system(&self) -> String {
+    fn system(&self, conversation: &str) -> String {
         let mut base = BASE_PROMPT.to_string();
         base.push_str(&format!("\n\nToday is {}.", memory::day_of(memory::now())));
         if let Some(root) = &self.tools.root {
-            base.push_str(&format!(" The project folder is {}; file paths are relative to it.", root.display()));
+            // The top of the folder comes with the prompt, so "what is in this" needs no
+            // tool call and the model knows from the start which files it can open.
+            let top = self.tools.list_dir(".").unwrap_or_default();
+            base.push_str(&format!(
+                " The person chose the project folder {}: \"this\", \"here\" and \"the project\" mean it, and file paths are relative to it. Its top level:\n{top}",
+                root.display()
+            ));
+        }
+        let recent = self.memory.recent(Some(conversation));
+        if !recent.is_empty() {
+            base.push_str(&format!("\n\nWhat the person said in their latest other conversations, newest first (use recall to search all of them):\n{recent}"));
         }
         let notes = self.memory.notes_for_prompt();
         if !notes.is_empty() {
@@ -155,7 +173,7 @@ impl Agent {
     /// The tokens of a conversation as the model reads it, from its messages.
     fn render(&self, chat: &Chat, turns: &Turns) -> Vec<u32> {
         let tk = turns.tokenizer;
-        let mut ids = tk.encode(&turns.open(&self.system()));
+        let mut ids = tk.encode(&turns.open(&self.system(&chat.conv.id)));
         let mut results: Vec<(String, String)> = Vec::new();
         for m in &chat.conv.messages {
             if m.role == "tool" {
@@ -193,6 +211,13 @@ impl Agent {
         let brain = self.brain.clone();
         let tk = brain.tokenizer();
         let turns = Turns { tokenizer: tk, think: settings.think };
+        // Another model's token ids mean nothing to this one, and its stages are gone.
+        let brain_id = tk as *const Tokenizer as usize;
+        if chat.brain != brain_id {
+            chat.brain = brain_id;
+            chat.ids.clear();
+            chat.cache = Cached::default();
+        }
         if chat.ids.is_empty() {
             chat.ids = self.render(chat, &turns);
         }
@@ -201,7 +226,13 @@ impl Agent {
         }
         chat.conv.messages.push(Message { role: "user".into(), content: text.to_string(), name: None });
         chat.conv.updated = memory::now();
-        chat.ids.extend(tk.encode_segment(&turns.user(text)));
+        // shortcut: the related lines go to the model but not into the saved message, so a
+        // re-render (reopening, trimming) drops them; store them if answers need them later.
+        let read = match self.memory.related(text, Some(&chat.conv.id)) {
+            Some(lines) => format!("{text}\n\n<earlier_conversations>\n{lines}\n</earlier_conversations>"),
+            None => text.to_string(),
+        };
+        chat.ids.extend(tk.encode_segment(&turns.user(&read)));
         chat.cache.stop_with(stop.clone());
         let mut total = Stats::default();
         let mut steps = 0;
@@ -407,13 +438,17 @@ mod tests {
         assert!(fed[1].starts_with(&fed[0]) && fed[1].len() > fed[0].len());
         let tail = r.brain.tk.decode(&fed[1][fed[0].len()..]);
         assert!(tail.starts_with(WRITE) && tail.contains("<tool_response>\nWrote 2 bytes to a.txt.\n</tool_response>"), "{tail}");
-        // Saved, and the same tokens come back from the saved messages.
+        // Saved, and the same tokens come back from the saved messages. Only the system
+        // prompt differs: it lists the folder as it is now, a.txt included.
         let saved = r.agent.memory.load(&chat.conv.id).unwrap();
         assert_eq!(saved.messages, chat.conv.messages);
         let mut reopened = Chat::new(saved);
         let turns = Turns { tokenizer: &r.brain.tk, think: false };
         reopened.ids = r.agent.render(&reopened, &turns);
-        assert_eq!(reopened.ids, chat.ids);
+        let im_end = r.brain.tk.token_id("<|im_end|>").unwrap();
+        let after_system = |ids: &[u32]| ids[ids.iter().position(|&t| t == im_end).unwrap()..].to_vec();
+        assert_eq!(after_system(&reopened.ids), after_system(&chat.ids));
+        assert!(r.brain.tk.decode(&reopened.ids).contains("a.txt (2 bytes)"));
     }
 
     #[tokio::test]
@@ -461,8 +496,8 @@ mod tests {
     fn the_system_prompt_carries_the_notes_and_the_tools() {
         let r = agent(&["x"], Decision::Allow);
         r.agent.memory.remember("the owner likes short answers").unwrap();
-        let s = r.agent.system();
+        let s = r.agent.system("c");
         assert!(s.contains("Notes from earlier conversations") && s.contains("- the owner likes short answers"));
-        assert!(s.contains("\"name\":\"edit_file\"") && s.contains("The project folder is"));
+        assert!(s.contains("\"name\":\"edit_file\"") && s.contains("chose the project folder"));
     }
 }

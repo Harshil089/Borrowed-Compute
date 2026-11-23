@@ -145,8 +145,8 @@ async fn endpoint(state: &AppState) -> CmdResult<iroh::Endpoint> {
 pub async fn mesh_probe(state: State<'_, AppState>, model: Option<String>, throughput: bool, include: Vec<String>) -> CmdResult<Probe> {
     let targets = targets(&state).await?;
     let ep = endpoint(&state).await?;
-    let mut devices = probe_all(&ep, targets).await;
-    devices.push(this_computer(&ep).await);
+    let (mut devices, me) = tokio::join!(probe_all(&ep, targets), this_computer(&ep));
+    devices.push(me);
     let mut out = Probe { devices: rows(&devices, &state.home), pipelines: Vec::new(), unused: Vec::new() };
     let usable: Vec<MeshDevice> = devices.into_iter().filter(|d| d.report.as_ref().is_ok_and(|r| r.device.engine)).collect();
     let pairs = probe_pairs(&ep, &usable).await;
