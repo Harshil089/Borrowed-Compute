@@ -71,9 +71,80 @@ function setResult(card, ok, text) {
   card.querySelector(".a-approve")?.classList.add("hidden");
 }
 
+// The model writes Markdown; it is shown formatted, never as raw marks. Everything is
+// escaped first, so nothing the model writes becomes live HTML, and links stay text:
+// following one would take the app's own window to the page.
+function inline(s) {
+  // Code spans first, untouched by the marks around them.
+  return String(s).split(/`([^`]+)`/).map((p, i) => (i % 2 ? `<code>${esc(p)}</code>` : marks(p))).join("");
+}
+
+function marks(s) {
+  return esc(s)
+    .replace(/\*\*(.+?)\*\*|__(.+?)__/g, (_, a, b) => `<strong>${a ?? b}</strong>`)
+    .replace(/(^|[^\w*])\*(?!\s)([^*]+?)\*(?!\w)/g, "$1<em>$2</em>")
+    .replace(/(^|[^\w])_(?!\s)([^_]+?)_(?!\w)/g, "$1<em>$2</em>")
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '$1 (<span class="mono">$2</span>)')
+    .replace(/\*\*|__/g, "");
+}
+
+function md(text) {
+  const out = [];
+  let list = null; // "ul" or "ol" while inside one
+  let para = [];
+  const flush = () => {
+    if (para.length) out.push(`<p>${para.join("<br>")}</p>`);
+    para = [];
+  };
+  const close = () => {
+    if (list) out.push(`</${list}>`);
+    list = null;
+  };
+  const parts = String(text ?? "").split(/^```[^\n]*\n?/m);
+  parts.forEach((part, i) => {
+    if (i % 2 === 1) {
+      flush();
+      close();
+      out.push(`<pre class="a-code"><code>${esc(part.replace(/\n$/, ""))}</code></pre>`);
+      return;
+    }
+    for (const line of part.split("\n")) {
+      const h = line.match(/^\s{0,3}#{1,6}\s+(.*)$/);
+      const ul = line.match(/^\s*[-*+•]\s+(.*)$/);
+      const ol = line.match(/^\s*(\d+)[.)]\s+(.*)$/);
+      if (!line.trim()) {
+        flush();
+        close();
+      } else if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) {
+        flush();
+        close();
+      } else if (h) {
+        flush();
+        close();
+        out.push(`<p class="a-h">${inline(h[1].replace(/#+\s*$/, ""))}</p>`);
+      } else if (ul || ol) {
+        flush();
+        const kind = ul ? "ul" : "ol";
+        if (list !== kind) {
+          close();
+          out.push(kind === "ol" ? `<ol start="${Number(ol[1]) || 1}">` : "<ul>");
+          list = kind;
+        }
+        out.push(`<li>${inline(ul ? ul[1] : ol[2])}</li>`);
+      } else {
+        close();
+        para.push(inline(line));
+      }
+    }
+  });
+  flush();
+  close();
+  return out.join("");
+}
+
 function assistantHtml(m) {
   const thought = m.thought ? `<details class="a-thought"><summary>Reasoning</summary><p>${esc(m.thought)}</p></details>` : "";
-  const text = m.text ? `<div class="a-msg">${esc(m.text)}</div>` : "";
+  const text = m.text ? `<div class="a-msg a-md">${md(m.text)}</div>` : "";
   return thought + text + (m.calls || []).map(callCard).join("");
 }
 
@@ -189,10 +260,12 @@ listen("agent-event", ({ payload }) => {
   switch (ev.kind) {
     case "text":
       if (!live) {
-        add(`<div class="a-msg a-live"></div>`);
+        add(`<div class="a-msg a-md a-live"></div>`);
         live = log.lastElementChild;
+        live.raw = "";
       }
-      live.textContent += ev.text;
+      live.raw += ev.text;
+      live.innerHTML = md(live.raw);
       if (log.scrollHeight - log.scrollTop - log.clientHeight < 120) log.scrollTop = log.scrollHeight;
       break;
     case "reply": {
@@ -286,6 +359,12 @@ $("agent-to-mesh").addEventListener("click", () => window.lendUI.showPage("mesh"
 $("agent-memory-open").addEventListener("click", async () => {
   $("agent-notes").value = await invoke("memory_get").catch(() => "");
   $("agent-notes-msg").textContent = "";
+  const server = await invoke("model_server_get").catch(() => ({}));
+  $("agent-server-url").value = server.url || "";
+  $("agent-server-model").value = server.model || "";
+  $("agent-server-context").value = server.context || "";
+  $("agent-server-msg").textContent = "";
+  showMcp(await invoke("mcp_get").catch(() => ({ text: "" })));
   $("agent-chat").classList.add("hidden");
   $("agent-memory").classList.remove("hidden");
 });
@@ -301,6 +380,29 @@ $("agent-notes-save").addEventListener("click", async () => {
     $("agent-notes-msg").textContent = String(e);
   }
 });
+$("agent-server-save").addEventListener("click", async () => {
+  const server = { url: $("agent-server-url").value.trim(), model: $("agent-server-model").value.trim(), context: Number($("agent-server-context").value) || 0 };
+  try {
+    await invoke("model_server_set", { server });
+    $("agent-server-msg").textContent = "Saved.";
+    checkModel();
+  } catch (e) {
+    $("agent-server-msg").textContent = String(e);
+  }
+});
+function showMcp(m) {
+  $("agent-mcp").value = m.text || "";
+  const ok = (m.servers || []).map((s) => `${s.name}: ${s.tools} ${s.tools === 1 ? "tool" : "tools"}`);
+  $("agent-mcp-msg").textContent = [...ok, ...(m.failed || [])].join(" · ");
+}
+$("agent-mcp-save").addEventListener("click", async () => {
+  $("agent-mcp-msg").textContent = "Starting…";
+  try {
+    showMcp(await invoke("mcp_set", { text: $("agent-mcp").value }));
+  } catch (e) {
+    $("agent-mcp-msg").textContent = String(e);
+  }
+});
 $("agent-forget").addEventListener("click", async () => {
   if (!(await ask("Delete every conversation on this computer? This cannot be undone.", "Delete all", true))) return;
   await invoke("agent_delete", { conversation: null }).catch(() => {});
@@ -309,8 +411,7 @@ $("agent-forget").addEventListener("click", async () => {
 
 // Whether a model runs, while the page is on screen.
 async function checkModel() {
-  const s = await invoke("mesh_status").catch(() => ({ running: false }));
-  modelReady = !!s.running;
+  modelReady = !!(await invoke("agent_model").catch(() => ""));
   $("agent-nomodel").classList.toggle("hidden", modelReady);
   controls();
 }

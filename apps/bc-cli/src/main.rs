@@ -109,6 +109,41 @@ enum Command {
         #[command(subcommand)]
         action: MeshAction,
     },
+    /// The desktop app's Agent page: its conversations and what happened in each.
+    Agent {
+        #[command(subcommand)]
+        action: AgentAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentAction {
+    /// List the saved conversations, newest first.
+    List,
+    /// Show a conversation's run step by step: messages, model answers, calls and results.
+    Log { conversation: String },
+    /// Run a file of cases (docs/agent-evals/cases.json) against a model on an
+    /// OpenAI-compatible server and report what passed. Calls that change files or run
+    /// commands are denied.
+    Eval {
+        cases: std::path::PathBuf,
+        /// A model server, such as http://127.0.0.1:11434/v1 (with --model).
+        #[arg(long)]
+        url: Option<String>,
+        /// The server's name for the model.
+        #[arg(long)]
+        model: Option<String>,
+        /// Or a catalog model run by Borrowed Compute's own engine on this computer, its
+        /// weights fetched into memory only, such as qwen3-0.6b.
+        #[arg(long, conflicts_with = "url")]
+        mesh: Option<String>,
+        /// The server model's context in tokens.
+        #[arg(long, default_value_t = 8192)]
+        context: usize,
+        /// Run the decision step too, to measure what it adds.
+        #[arg(long)]
+        decision: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -389,6 +424,62 @@ async fn main() -> Result<()> {
             std::process::exit(outcome.exit.status());
         }
         Command::Mesh { action } => mesh(&cloud, &key_path, action).await?,
+        Command::Agent { action } => agent(action).await?,
+    }
+    Ok(())
+}
+
+async fn agent(action: AgentAction) -> Result<()> {
+    // The desktop app's home: on a Mac where the old Mac app kept it, elsewhere the CLI's.
+    let home = if cfg!(target_os = "macos") { bc_net::home_dir()?.join("agent") } else { bc_cli::flows::client_home()? };
+    let memory = bc_cli::agent::memory::Memory::at(&home);
+    match action {
+        AgentAction::List => {
+            for c in memory.list() {
+                println!("{}  {}  {}", c.id, bc_cli::agent::memory::day_of(c.updated), c.title);
+            }
+        }
+        AgentAction::Log { conversation } => {
+            let events = memory.run_log(&conversation).read();
+            if events.is_empty() {
+                bail!("no run log for {conversation}; `bc agent list` shows the conversations");
+            }
+            println!("{}", bc_cli::agent::log::describe(&events).trim_start());
+        }
+        AgentAction::Eval { cases, url, model, mesh, context, decision } => {
+            use bc_cli::agent::http::{HttpBrain, ModelServer};
+            use bc_cli::agent::Brain;
+            let list: Vec<bc_cli::agent::eval::Case> = serde_json::from_slice(&std::fs::read(&cases).with_context(|| format!("cannot read {}", cases.display()))?)?;
+            // Kept until the end: dropping the session stops the model.
+            let mut session = None;
+            let brain: std::sync::Arc<dyn Brain> = match (mesh, url, model) {
+                (Some(name), _, _) => {
+                    let endpoint = bc_net::bind(iroh::SecretKey::generate(), bc_net::NetConfig::default()).await?;
+                    let s = bc_cli::mesh::Session::start(endpoint, Vec::new(), &name, bc_mesh::plan::Goal::Latency, Some("none"), Vec::new(), |s| eprint!("\r\x1b[Kbc: {s}")).await?;
+                    eprintln!();
+                    let llm = s.llm.clone();
+                    session = Some(s);
+                    llm
+                }
+                (None, Some(url), Some(model)) => std::sync::Arc::new(HttpBrain::new(ModelServer { url, model, context })?),
+                _ => bail!("give --mesh <model>, or --url and --model for a model server"),
+            };
+            let scratch = tempfile::tempdir()?;
+            let base = cases.parent().unwrap_or(std::path::Path::new("."));
+            let settings = bc_cli::agent::Settings { decision, ..Default::default() };
+            let started = std::time::Instant::now();
+            let out = bc_cli::agent::eval::run(brain, &list, base, scratch.path(), settings).await?;
+            drop(session);
+            eprintln!("({:.0} s)", started.elapsed().as_secs_f64());
+            for o in &out {
+                println!("{} {}  [{}{}]", if o.pass { "pass" } else { "FAIL" }, o.message, o.route, if o.tools.is_empty() { String::new() } else { format!("; {}", o.tools.join(", ")) });
+                for m in &o.misses {
+                    println!("       {m}");
+                }
+            }
+            let passed = out.iter().filter(|o| o.pass).count();
+            println!("\n{passed} of {} passed", out.len());
+        }
     }
     Ok(())
 }
@@ -539,7 +630,7 @@ async fn mesh_run(cloud: &CloudClient, key_path: &std::path::Path, action: MeshA
         MeshAction::Run { prompt, max_tokens, temperature, .. } => {
             let llm = session.llm.clone();
             let ids = llm.tokenizer.encode(&llm.tokenizer.chat_prompt(&[("user".into(), prompt)]));
-            let sampling = bc_infer::Sampling { temperature, top_p: 0.95, seed: rand_seed() };
+            let sampling = bc_infer::Sampling { temperature, top_p: 0.95, seed: rand_seed(), allow: None };
             let (_, stats) = llm
                 .generate(&ids, max_tokens, sampling, |t| {
                     print!("{t}");

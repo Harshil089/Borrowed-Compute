@@ -13,7 +13,7 @@ use futures_util::future::BoxFuture;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use super::format::{head_tail, ToolSpec};
+use super::format::ToolSpec;
 use super::memory::Memory;
 
 /// Most characters of a command's output or a page the model sees.
@@ -65,7 +65,16 @@ pub struct Tools {
     pub runner: Option<Runner>,
     /// Devices `run` can use, the default first.
     pub devices: Vec<String>,
+    /// The person's MCP servers, whose tools are named `<server>__<tool>`.
+    pub mcp: Vec<Arc<super::mcp::McpServer>>,
+    /// Whether `task` may hand work to a sub-agent; a sub-agent's own tools leave it out.
+    pub subagents: bool,
 }
+
+/// MCP tools listed in the prompt; past this many, the prompt lists `find_tools` instead
+/// and the model looks up the ones it needs, so the prompt stays small and cached.
+const MCP_LISTED: usize = 30;
+const FOUND_TOOLS: usize = 8;
 
 fn spec(name: &str, description: &str, properties: Value, required: &[&str]) -> ToolSpec {
     ToolSpec { name: name.into(), description: description.into(), parameters: json!({ "type": "object", "properties": properties, "required": required }) }
@@ -77,7 +86,7 @@ impl Tools {
             Some(r) => Some(r.canonicalize().with_context(|| format!("the folder {} is not there", r.display()))?),
             None => None,
         };
-        Ok(Tools { root, memory, conversation, runner, devices })
+        Ok(Tools { root, memory, conversation, runner, devices, mcp: Vec::new(), subagents: true })
     }
 
     /// The tools this conversation offers the model.
@@ -109,6 +118,12 @@ impl Tools {
                 ));
             }
         }
+        out.push(spec(
+            "read_artifact",
+            "Read more of a long tool output that was kept whole as an artifact, with line numbers.",
+            json!({ "id": p("The artifact's id, as the clipped output names it."), "offset": { "type": "integer", "description": "First line to read, from 1." } }),
+            &["id"],
+        ));
         out.push(spec("web_search", "Search the web. Gives titles, addresses and snippets of the top results; read one in full with fetch_url.", json!({ "query": p("What to search for.") }), &["query"]));
         out.push(spec("fetch_url", "Read a web page (https) as text.", json!({ "url": p("The https address.") }), &["url"]));
         out.push(spec("recall", "Search the past conversations for something said before.", json!({ "query": p("Words to look for.") }), &["query"]));
@@ -119,16 +134,59 @@ impl Tools {
             &["when", "text"],
         ));
         out.push(spec("remember", "Keep a short note for every future conversation: a fact about the person, a preference, a decision.", json!({ "note": p("The note, one line.") }), &["note"]));
+        let skills = self.memory.skills();
+        if !skills.is_empty() {
+            out.push(spec("use_skill", "Load one of the person's skills (listed in the prompt): its instructions in full.", json!({ "name": p("The skill's name.") }), &["name"]));
+        }
+        if self.subagents {
+            out.push(spec(
+                "task",
+                "Hand a self-contained part of the work to a helper with the same tools and a fresh context: research, reading many files, a long check. Only its final answer comes back.",
+                json!({ "goal": p("What the helper should find or do, and what to answer with; it sees nothing of this conversation.") }),
+                &["goal"],
+            ));
+        }
+        let mcp: Vec<&ToolSpec> = self.mcp.iter().flat_map(|s| &s.tools).collect();
+        if mcp.len() <= MCP_LISTED {
+            out.extend(mcp.into_iter().cloned());
+        } else {
+            out.push(spec(
+                "find_tools",
+                &format!("Find tools from the person's {} other tools (their MCP servers) by what they do; then call one by the name this gives.", mcp.len()),
+                json!({ "query": p("What the tool should do.") }),
+                &["query"],
+            ));
+        }
         out
     }
 
-    pub fn risk(name: &str) -> Risk {
+    fn server(&self, name: &str) -> Option<(&super::mcp::McpServer, String)> {
+        let (server, tool) = name.split_once("__")?;
+        self.mcp.iter().find(|s| s.name == server).map(|s| (s.as_ref(), tool.to_string()))
+    }
+
+    pub fn risk(&self, name: &str) -> Risk {
+        if let Some((server, _)) = self.server(name) {
+            // An MCP server is a program of the person's; only they know what it does.
+            return if server.read_only { Risk::Read } else { Risk::Run };
+        }
         match name {
             "write_file" | "edit_file" | "remember" | "remind" => Risk::Write,
             "run" => Risk::Run,
             "fetch_url" | "web_search" => Risk::Net,
             _ => Risk::Read,
         }
+    }
+
+    /// MCP tools matching `query`, with their parameters, for `find_tools`.
+    fn find_tools(&self, query: &str) -> String {
+        let all: Vec<&ToolSpec> = self.mcp.iter().flat_map(|s| &s.tools).collect();
+        let docs: Vec<Vec<String>> = all.iter().map(|t| super::memory::words(&format!("{} {}", t.name.replace("__", " ").replace('_', " "), t.description))).collect();
+        let hits = super::memory::bm25(&super::memory::words(query), &docs, FOUND_TOOLS);
+        if hits.is_empty() {
+            return "No tool matches; try other words.".into();
+        }
+        hits.iter().map(|&i| json!({ "name": all[i].name, "description": all[i].description, "parameters": all[i].parameters }).to_string()).collect::<Vec<_>>().join("\n")
     }
 
     /// Runs one call; the error is what the model is told.
@@ -173,17 +231,24 @@ impl Tools {
                     }
                 }
                 let (code, out) = runner(RunRequest { folder, argv, device }).await?;
-                Ok(format!("Exit code {code}.\n{}", head_tail(&out, OUTPUT_CHARS)))
+                // Long output is kept whole as an artifact by the agent, which clips it.
+                Ok(format!("Exit code {code}.\n{out}"))
             }
             "fetch_url" => fetch(&need("url")?).await,
             "web_search" => web_search(&need("query")?).await,
+            "read_artifact" => self.read_artifact(&need("id")?, num("offset").unwrap_or(1), READ_LINES),
             "recall" => Ok(self.memory.recall(&need("query")?, Some(&self.conversation))),
             "remind" => self.memory.reminders().add(&need("when")?, &need("text")?),
             "remember" => {
                 self.memory.remember(&need("note")?)?;
                 Ok("Noted.".to_string())
             }
-            _ => bail!("there is no tool called {name}"),
+            "find_tools" => Ok(self.find_tools(&need("query")?)),
+            "use_skill" => self.memory.skill(&need("name")?),
+            _ => match self.server(name) {
+                Some((server, tool)) => server.call(&tool, args).await,
+                None => bail!("there is no tool called {name}"),
+            },
         }
     }
 
@@ -250,26 +315,17 @@ impl Tools {
         if bytes.contains(&0) {
             bail!("{} is not a text file", self.shown(&file));
         }
-        let text = String::from_utf8_lossy(&bytes);
-        let lines: Vec<&str> = text.lines().collect();
-        let first = offset.max(1);
-        let mut out = String::new();
-        let mut last = first - 1;
-        for (i, line) in lines.iter().enumerate().skip(first - 1).take(limit.clamp(1, READ_LINES)) {
-            let l = format!("{:>5}  {line}\n", i + 1);
-            if out.len() + l.len() > READ_CHARS {
-                break;
-            }
-            out.push_str(&l);
-            last = i + 1;
+        Ok(numbered(&String::from_utf8_lossy(&bytes), &self.shown(&file), offset, limit))
+    }
+
+    /// The rest of a long tool output the agent kept (see `Agent::run_call`).
+    fn read_artifact(&self, id: &str, offset: usize, limit: usize) -> Result<String> {
+        if id.is_empty() || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+            bail!("no artifact called {id}");
         }
-        if lines.is_empty() {
-            return Ok(format!("{} is empty.", self.shown(&file)));
-        }
-        if last < lines.len() {
-            out.push_str(&format!("[lines {first}–{last} of {}; read on with offset {}]", lines.len(), last + 1));
-        }
-        Ok(out)
+        let file = self.memory.run_log(&self.conversation).artifacts().join(format!("{id}.txt"));
+        let text = std::fs::read_to_string(&file).with_context(|| format!("no artifact called {id} in this conversation"))?;
+        Ok(numbered(&text, &format!("artifact {id}"), offset, limit))
     }
 
     fn search(&self, text: &str, path: &str) -> Result<String> {
@@ -301,10 +357,33 @@ impl Tools {
     }
 }
 
+/// Lines `offset..` of a text, numbered, within [`READ_LINES`] and [`READ_CHARS`].
+fn numbered(text: &str, name: &str, offset: usize, limit: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let first = offset.max(1);
+    let mut out = String::new();
+    let mut last = first - 1;
+    for (i, line) in lines.iter().enumerate().skip(first - 1).take(limit.clamp(1, READ_LINES)) {
+        let l = format!("{:>5}  {line}\n", i + 1);
+        if out.len() + l.len() > READ_CHARS {
+            break;
+        }
+        out.push_str(&l);
+        last = i + 1;
+    }
+    if lines.is_empty() {
+        return format!("{name} is empty.");
+    }
+    if last < lines.len() {
+        out.push_str(&format!("[lines {first}–{last} of {}; read on with offset {}]", lines.len(), last + 1));
+    }
+    out
+}
+
 /// A web page as text: https only, at most 1 MB read.
 async fn fetch(url: &str) -> Result<String> {
     let parsed = reqwest::Url::parse(url.trim()).context("not a web address")?;
-    Ok(head_tail(&download(parsed).await?, OUTPUT_CHARS))
+    download(parsed).await
 }
 
 /// Whether an address is on the public internet. Everything else (this computer, the home
@@ -598,7 +677,7 @@ mod tests {
         // Without a runner there is no `run`, and without a folder no file tools.
         assert!(!t.specs().iter().any(|s| s.name == "run"));
         let bare = Tools::new(None, Memory::at(dir.path()), "c".into(), None, Vec::new()).unwrap();
-        assert_eq!(bare.specs().iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["web_search", "fetch_url", "recall", "remind", "remember"]);
+        assert_eq!(bare.specs().iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["read_artifact", "web_search", "fetch_url", "recall", "remind", "remember", "task"]);
         assert!(bare.call("read_file", &json!({"path": "b.txt"})).await.is_err());
     }
 
@@ -615,8 +694,26 @@ mod tests {
             let e = format!("{:#}", fetch(url).await.unwrap_err());
             assert!(e.contains("not on the public internet"), "{url}: {e}");
         }
-        assert_eq!(Tools::risk("run"), Risk::Run);
-        assert_eq!(Tools::risk("read_file"), Risk::Read);
+        assert_eq!(t.risk("run"), Risk::Run);
+        assert_eq!(t.risk("read_file"), Risk::Read);
+    }
+
+    #[tokio::test]
+    async fn many_mcp_tools_are_found_rather_than_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut t = Tools::new(None, Memory::at(dir.path()), "c".into(), None, Vec::new()).unwrap();
+        let tool = |name: &str, d: &str| ToolSpec { name: format!("gh__{name}"), description: d.into(), parameters: json!({"type": "object"}) };
+        t.mcp = vec![super::super::mcp::McpServer::fake("gh", false, vec![tool("create_issue", "Open an issue in a repository."), tool("list_pulls", "List pull requests.")])];
+        assert!(t.specs().iter().any(|s| s.name == "gh__create_issue"));
+        assert_eq!(t.risk("gh__create_issue"), Risk::Run);
+        let mut many: Vec<ToolSpec> = (0..40).map(|i| tool(&format!("t{i}"), "Something else entirely.")).collect();
+        many.push(tool("create_issue", "Open an issue in a repository."));
+        t.mcp = vec![super::super::mcp::McpServer::fake("gh", true, many)];
+        let specs = t.specs();
+        assert!(specs.iter().any(|s| s.name == "find_tools") && !specs.iter().any(|s| s.name.starts_with("gh__")));
+        let found = t.call("find_tools", &json!({"query": "open an issue"})).await.unwrap();
+        assert!(found.lines().next().unwrap().contains("\"gh__create_issue\""), "{found}");
+        assert_eq!(t.risk("gh__t3"), Risk::Read);
     }
 
     #[test]

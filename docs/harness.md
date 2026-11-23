@@ -21,7 +21,7 @@ each one a PR with tests.
 │ Agent page (ui/agent.js)        Mesh page (ui/mesh.js)       OpenAI endpoint (serve.rs)│
 │      │ agent_send / approve / stop     │ start model               │ /v1/chat/completions│
 │      ▼ agent-event (typed, ordered)    ▼                           ▼                     │
-│ ┌──────────────────────────── crates/bc-harness ────────────────────────────────────┐ │
+│ ┌──────────────────────── apps/bc-cli/src/agent ─────────────────────────────────────┐ │
 │ │ Run loop ── Policy (approval, budgets, repeat guard, step limit)                    │ │
 │ │   │  ├─ Router: harness-side actions before the model (search, remind, recall)     │ │
 │ │   │  ├─ Context manager: prompt layout for KV reuse, budgets, offload, compaction  │ │
@@ -47,106 +47,97 @@ Control plane: the run loop, policy and router, all in the app's process. Data p
 model text, tool results and fetched pages, always treated as untrusted and kept in
 `<tool_response>` turns, never in the system prompt.
 
-## 2. Where it stands (release 0.3.37 and the open PRs)
+## 2. What is built
 
-| Brief section | Built | Where |
+| Part | Built | Where |
 |---|---|---|
-| Agent loop, approvals, stop | Steps until no call, 25-step cap, Allow / Always / Deny, Stop at the next token | `apps/bc-cli/src/agent/mod.rs` |
-| Prompt and KV cache reuse | Conversations kept as token ids, append-only; stages keep the stream; a step sends only new tokens (98–99% reuse measured in the app) | `Cached` in `bc-mesh/src/llm.rs` |
-| Tools | Folder-confined files, `run` in the job sandbox here or on a paired device, `web_search`, `fetch_url`, `recall`, `remember`, `remind` | `agent/tools.rs`, `agent/remind.rs` |
-| Harness-side actions | Search plus the top 2 pages when the message asks for the web; reminder when the message says "remind me" with a time; related past lines with every message | `web_query`, `reminder_request`, `harness_calls`, `Memory::related` |
-| Memory | Saved conversations, BM25 recall, the latest 8 conversations in each new prompt, notes | `agent/memory.rs` |
-| Resilience | Repeat guard, model switch resets token ids, context trimming of old tool results | `agent/mod.rs` |
+| Loop, approvals, stop | Steps until no call, 25-step cap, a 16,384-token budget per turn, repeat guard, Allow / Always / Deny, Stop at the next token | `agent/mod.rs` |
+| Prompt and KV reuse | Conversations kept as token ids, append-only; the stages keep the stream; a step sends only new tokens (98–99% reuse measured in the app); per-message notes (time, context use, related lines) go at the end of the user turn, never into the prefix | `Cached` in `bc-mesh/src/llm.rs`, `agent/mod.rs` |
+| Router | Shortcuts that read the message: a reminder with a time; news or the web; past-conversation phrases ("I mentioned", "we discussed"); folder words or a named file; and on a conversation's first message, a small folder (at most 4 files of 16 KB) is read whatever the words. The harness then makes the calls itself: a search and its top 2 pages, the files, or recall. A **decision step** (the model picks one numbered action, decoding held to those digit tokens by `Sampling::allow`) is built but off by default: see the measurements below | `agent/route.rs`, `harness_calls`, `files_for` |
+| Run log | `<home>/runs/<conversation>.jsonl`: message, route, each answer with token counts, each call before and after, compaction, end reason. A turn cut off by a crash is reported, with the calls that may have run, to the person and the model. `bc agent list`, `bc agent log <id>` | `agent/log.rs` |
+| Context | Tool output past its room is kept whole as an artifact (`read_artifact`); old tool results trimmed; then everything before the current turn replaced by the model's summary | `run_call`, `fit`, `summarize` |
+| Model gateway | The mesh `Llm`, or any OpenAI-compatible server (Ollama, LM Studio, llama.cpp, vLLM) through `/v1/completions` with a byte-level vocabulary in the model's chat format, used when no mesh model runs | `agent/http.rs`, `Tokenizer::byte_level` |
+| Tools | Folder-confined files, `run` in the job sandbox here or on a paired device, `web_search` (news and web), `fetch_url` (public https only), `recall`, `remember`, `remind`, `read_artifact`, `use_skill`, `task` | `agent/tools.rs` |
+| MCP | stdio and Streamable HTTP servers from `<home>/mcp.json`; tools as `<server>__<tool>`; `find_tools` (BM25) past 30 tools; each call asks unless the server is `readOnly` | `agent/mcp.rs` |
+| Sub-agents | `task(goal)`: a helper with the same model and tools less `task`, a fresh context and the same approvals; only its answer returns | `subtask` |
+| Memory | Saved conversations, BM25 recall, the latest 8 conversations in each new prompt, related lines with each message, notes, reminders (notifications), skills (`<home>/skills/<name>/SKILL.md`) | `agent/memory.rs`, `agent/remind.rs` |
+| Evals | `bc agent eval <cases> --url --model`: cases with an expected route, tool and answer words, each in a fresh home, side effects denied; 20 starting cases | `agent/eval.rs`, `docs/agent-evals/` |
 | Streaming API | OpenAI-compatible endpoint with tool calls and prompt reuse | `apps/bc-cli/src/serve.rs` |
 | Sandbox | Per-job Seatbelt or AppContainer, workspace deleted after each job | `apps/bc-agent` |
 
-Gaps, by what they cost the person today:
+Measured with `bc agent eval docs/agent-evals/cases.json --mesh qwen3-0.6b` on an M-series
+MacBook Air, the model on this computer alone (2026-11-23):
 
-1. **Small models fail to decide.** They answer "I can search for that" instead of
-   calling. The router covers news and reminders; everything else still depends on the
-   model. Fix: a constrained decision step (Phase 1).
-2. **Malformed calls.** Free-text JSON from a 1–4B model breaks often. Fix: grammar-
-   constrained decoding for tool calls (Phase 1).
-3. ~~**`fetch_url` could reach private addresses**~~ (`https://192.168.1.1`,
-   `https://localhost`) if a page told the model to: an SSRF path into the home network.
-   Fixed in Phase 0: `check_url` and the `PublicOnly` resolver.
-4. **Nothing survives a crash mid-turn**, and nothing can be replayed. Fix: the run log
-   (Phase 1).
-5. **Context fills on long conversations** and only old tool results get trimmed. Fix:
-   offload and compaction (Phase 2).
-6. **Only built-in tools.** Fix: MCP client (Phase 2).
-7. **One model backend.** Fix: an OpenAI-compatible HTTP brain and fallback (Phase 2).
+| Harness | Passed | Time |
+|---|---|---|
+| Before the shortcuts below, decision step on | 11 of 20 | |
+| Before the shortcuts, decision step off | 6 of 20 | |
+| Past-conversation and folder shortcuts, worked examples in the decision prompt | 17 of 20 (on), 18 of 20 (off) | |
+| Plus reading a small folder on the first message: decision step off | **20 of 20** | 393 s |
+| The same, decision step on | 18 of 20 | 614 s |
 
-## 3. Core data models
+The decision step picked "answer" for every message before it had worked examples, and
+afterwards added time without a pass the shortcuts missed, so it is off by default
+(`Settings::decision`; `bc agent eval --decision` measures it for other models). One run
+with it on stopped with "the GPU stopped with status Error" on a long web-results prompt,
+an engine bug to chase. qwen3-8b is not measured yet.
 
-These are the types the phases add, in Rust, next to the existing ones (`ToolSpec`,
-`Call`, `Risk`, `Event`, `Conversation`).
+Not built yet, in the order they would pay off:
+
+1. **The engine's GPU error** on a long prompt, seen once in the evals above.
+2. **Grammar-constrained tool arguments.** The decision step holds one token to a range;
+   holding a whole JSON object to a schema needs a token mask per step sent to the last
+   stage, a wire change.
+3. **Deterministic replay through the loop.** The log records every answer and result;
+   feeding them back instead of calling the model and tools would turn any run into a
+   test.
+4. **A mid-turn fallback.** The model server is used when no mesh model runs; a mesh
+   failure mid-turn still ends the turn.
+5. **Browsing pages that need scripts** (a hidden web view), a folder index for ranked
+   search, and embedding recall.
+
+## 3. Data
+
+No database: one JSONL run log per conversation beside the conversation file, appended
+as events happen and synced at the end of a turn, a torn last line skipped on read; large
+outputs as files beside it; reminders in `<home>/reminders.json`; MCP servers in
+`<home>/mcp.json`; the model server in `<home>/model-server.json`; skills in
+`<home>/skills/`. All of it stays on the device that runs the agent.
 
 ```rust
-/// One line of `<home>/runs/<conversation>.jsonl`, append-only. Every non-deterministic
-/// input is here, so a turn can be resumed after a crash or replayed with no model.
-#[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RunEvent {
-    Turn { seq: u64, at: i64, text: String, settings: Settings, model: String },
-    Model { seq: u64, at: i64, step: u32, tokens: Vec<u32>, stats: Stats },
-    Decision { seq: u64, at: i64, call: String, decision: Decision },
-    /// Written before the tool runs: on resume, a started call with no `Finished` is
-    /// not repeated blindly if it can change something; the person is asked.
-    Started { seq: u64, at: i64, call: String, name: String, arguments: Value, risk: Risk, by: Caller },
-    Finished { seq: u64, at: i64, call: String, ok: bool, text: String, artifact: Option<String> },
-    Compacted { seq: u64, at: i64, upto: u64, summary: String },
-    Ended { seq: u64, at: i64, reason: EndReason },
-}
-
-pub enum Caller { Model, Harness }
-pub enum EndReason { Answered, Stopped, StepLimit, Repeating, Budget, Error(String) }
-
-/// What a run may spend and do. Defaults come from Settings; sub-agents get a share.
-pub struct Policy {
-    pub max_steps: u32,
-    pub max_generated: usize,            // tokens written in one turn
-    pub allowed: HashSet<String>,        // tools allowed for the conversation
-    pub auto_approve: bool,
-    pub tools: Option<HashSet<String>>,  // a sub-agent's scoped tool set
-}
-
-/// A tool's large output, kept on this device instead of in the context.
-pub struct Artifact { pub id: String, pub call: String, pub bytes: u64, pub mime: String }
-
-/// A tool from any source, as the registry sees it.
-pub struct ToolDef {
-    pub spec: ToolSpec,                  // name, description, JSON schema
-    pub risk: Risk,
-    pub source: ToolSource,              // Native, Mcp { server }, SubAgent
-    pub idempotent: bool,                // safe to run again on resume
+    Turn { at: u64, text: String },
+    Route { at: u64, route: String },
+    Model { at: u64, text: String, prompt_tokens: usize, cached_tokens: usize, generated: usize },
+    Started { at: u64, call: String, name: String, arguments: Value, by_harness: bool },
+    Finished { at: u64, call: String, ok: bool, text: String },
+    Compacted { at: u64, messages: usize, summary: String },
+    Ended { at: u64, reason: String },
 }
 ```
 
-No database: one JSONL file per conversation, beside the conversation file, written
-with `O_APPEND` and fsync at turn end. A torn last line is dropped on read.
+## 4. Layout
 
-## 4. Repository layout
+The agent stays in `apps/bc-cli/src/agent` (moving it to a crate of its own would only
+move files):
 
 ```
-crates/bc-harness/            (moved out of apps/bc-cli/src/agent, which re-exports it)
-  src/lib.rs                  Agent, Brain, Settings, Event
-  src/run.rs                  the loop, policy, repeat guard, resume
-  src/log.rs                  RunEvent, append, read, replay
-  src/router.rs               web_query, reminder_request, the constrained decision step
-  src/context.rs              prompt layout, budgets, offload, compaction
-  src/format.rs               Hermes format, parser, grammar from JSON schema
-  src/gateway/{mesh,http}.rs  Brain for the mesh Llm and for OpenAI-compatible servers
-  src/tools/{native,mcp,subagent}.rs, src/tools/middleware.rs
-  src/memory/{conversations,recall,notes,reminders,skills}.rs
-  src/eval.rs                 replay a recorded run against a Script brain or a model
-  tests/                      scripted-brain trajectories, MCP stand-in server
-crates/bc-infer/src/grammar.rs   constrained sampling (token masks from a grammar)
-apps/bc-desktop/src/agent.rs     commands, runner, reminders, MCP server settings
-apps/bc-cli/src/main.rs          `bc agent eval <run>`, `bc agent replay <run>`
+mod.rs     Agent, Brain, Chat, the loop, harness calls, run_call, fit and summarize, subtask
+route.rs   fast paths and the decision step
+log.rs     the run log
+format.rs  the Hermes tool-call format and its parser
+tools.rs   built-in tools, MCP routing, risk, find_tools
+mcp.rs     the MCP client
+http.rs    the model-server brain
+memory.rs  conversations, recall, notes, skills
+remind.rs  reminders and the time parser
+eval.rs    evals
 ```
 
 ## 5. Components
+
+The design each part follows; section 2 says what of it is built.
 
 ### 5.1 Run loop: durable, resumable, replayable
 
@@ -244,16 +235,16 @@ and MCP tools share it.
 
 ## 7. Phases
 
-| Phase | Scope | Done when |
+| Phase | Scope | Status |
 |---|---|---|
-| 0 | SSRF guard on `fetch_url` and `web_search`; reminders and context use (built) | Tests refuse loopback, private, link-local, metadata and IPv6-wrapped addresses, decimal forms like `https://2130706433`, and `localhost` by name; redirects go through the same check, not yet covered by a test |
-| 1 | Move to `crates/bc-harness`; run log with resume and replay; constrained decoding in `bc-infer`; the decision step; token budget | A turn killed mid-call resumes without repeating a write; `bc agent replay` reproduces a recorded run exactly; qwen3-0.6b picks the right action on a 30-prompt set at least 90% of the time (measure the rate without the step first, as the baseline) |
-| 2 | OpenAI-compatible brain and fallback; MCP client (stdio and HTTP) with `find_tools`; artifact offload; compaction | An MCP filesystem server's tools work end to end; a 200-message conversation keeps going; killing the mesh mid-turn falls over to a local brain |
-| 3 | Sub-agents; skills; folder index; hidden-web-view browsing; eval sets in CI with the Script brain | Eval suite runs on every PR in under a minute with no model |
+| 0 | Public-pages-only `fetch_url` and `web_search`; reminders; context use | Built |
+| 1 | Run log, cut-off turns, turn budget, the constrained decision step | Built; measured on qwen3-0.6b (20 of 20 with the shortcuts; the decision step off by default) |
+| 2 | Artifacts and compaction, the model-server brain, MCP with `find_tools` | Built; fallback only when no mesh model runs |
+| 3 | Sub-agents, skills, evals | Built; replay, a folder index and script-rendered pages remain |
 
-Verification for each phase: unit tests with the scripted brain, a recorded-run replay
-test, and a real-model check on qwen3-0.6b and qwen3-8b (the two catalog models with
-tool training), reported with its numbers.
+Each part has tests with the scripted brain (and a stand-in model server and MCP
+server), and the eval set has run on real qwen3-0.6b weights (section 2); qwen3-8b is
+next.
 
 ## Not doing
 

@@ -8,6 +8,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use bc_cli::agent::format::parse;
+use bc_cli::agent::http::{HttpBrain, ModelServer};
+use bc_cli::agent::mcp::{McpConfig, McpServer};
 use bc_cli::agent::memory::{Conversation, Memory, Summary};
 use bc_cli::agent::tools::{RunRequest, Runner, Tools};
 use bc_cli::agent::{Agent, Brain, Chat, Decision, Settings};
@@ -23,6 +25,9 @@ use crate::{err_chain, AppState, CmdResult};
 const OPEN_CHATS: usize = 4;
 const THIS_COMPUTER: &str = "This computer";
 
+/// MCP servers started for one mcp.json: its text, the servers, and those that failed.
+type Started = (String, Vec<Arc<McpServer>>, Vec<String>);
+
 /// Calls waiting for the person: call id to (conversation, answer).
 type Pending = Arc<StdMutex<HashMap<String, (String, oneshot::Sender<Decision>)>>>;
 
@@ -31,6 +36,100 @@ pub struct AgentState {
     chats: Mutex<Vec<(String, Arc<Mutex<Chat>>)>>,
     pending: Pending,
     stops: StdMutex<HashMap<String, Arc<AtomicBool>>>,
+    /// The model server's brain, kept while its settings stay the same, so conversations
+    /// keep their token ids between messages.
+    server: StdMutex<Option<(ModelServer, Arc<HttpBrain>)>>,
+    /// The MCP servers started for the current mcp.json: (its text, servers, failures).
+    mcp: Mutex<Option<Started>>,
+}
+
+fn mcp_file(state: &AppState) -> std::path::PathBuf {
+    state.home.join("mcp.json")
+}
+
+/// The MCP servers for mcp.json as it is now, started on first use and again after it
+/// changes (dropping the old ones stops their programs).
+async fn mcp_servers(state: &AppState, agent: &AgentState) -> Vec<Arc<McpServer>> {
+    let text = std::fs::read_to_string(mcp_file(state)).unwrap_or_default();
+    let mut running = agent.mcp.lock().await;
+    if running.as_ref().is_none_or(|(t, _, _)| *t != text) {
+        *running = None;
+        let (servers, failed) = match McpConfig::parse(&text) {
+            Ok(config) => bc_cli::agent::mcp::start_all(&config, bc_agent::runner::job_path().await.as_deref()).await,
+            Err(e) => (Vec::new(), vec![format!("{e:#}")]),
+        };
+        for f in &failed {
+            crate::log(format_args!("MCP server: {f}"));
+        }
+        *running = Some((text, servers, failed));
+    }
+    running.as_ref().map(|(_, s, _)| s.clone()).unwrap_or_default()
+}
+
+/// mcp.json and, once started, each server's tool count and any that failed.
+#[tauri::command]
+pub async fn mcp_get(state: State<'_, AppState>, agent: State<'_, AgentState>) -> CmdResult<Value> {
+    let text = std::fs::read_to_string(mcp_file(&state)).unwrap_or_default();
+    let running = agent.mcp.lock().await;
+    let (servers, failed) = match running.as_ref().filter(|(t, _, _)| *t == text) {
+        Some((_, s, f)) => (s.iter().map(|s| json!({ "name": s.name, "tools": s.tools.len() })).collect::<Vec<_>>(), f.clone()),
+        None => (Vec::new(), Vec::new()),
+    };
+    Ok(json!({ "text": text, "servers": servers, "failed": failed }))
+}
+
+/// Saves mcp.json once it reads, and starts its servers so the window can show them.
+#[tauri::command]
+pub async fn mcp_set(state: State<'_, AppState>, agent: State<'_, AgentState>, text: String) -> CmdResult<Value> {
+    McpConfig::parse(&text).map_err(err_chain)?;
+    std::fs::write(mcp_file(&state), &text).map_err(|e| e.to_string())?;
+    mcp_servers(&state, &agent).await;
+    mcp_get(state, agent).await
+}
+
+fn server_file(state: &AppState) -> std::path::PathBuf {
+    state.home.join("model-server.json")
+}
+
+fn model_server(state: &AppState) -> ModelServer {
+    std::fs::read(server_file(state)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+/// The model the agent uses: the Mesh page's while one runs, else the model server's.
+async fn brain(state: &AppState, mesh: &MeshState, agent: &AgentState) -> CmdResult<(Arc<dyn Brain>, String)> {
+    if let Some(session) = mesh.session().await {
+        return Ok((session.llm.clone() as Arc<dyn Brain>, session.name.clone()));
+    }
+    let server = model_server(state);
+    if !server.is_set() {
+        return Err("Start a model on the Mesh page, or set a model server under Memory.".into());
+    }
+    let mut kept = agent.server.lock().unwrap();
+    if kept.as_ref().is_none_or(|(s, _)| *s != server) {
+        *kept = Some((server.clone(), Arc::new(HttpBrain::new(server.clone()).map_err(err_chain)?)));
+    }
+    let b = kept.as_ref().map(|(_, b)| b.clone()).expect("just set");
+    Ok((b as Arc<dyn Brain>, server.model))
+}
+
+/// The model the Agent page would use now, by name; empty with none.
+#[tauri::command]
+pub async fn agent_model(state: State<'_, AppState>, mesh: State<'_, MeshState>, agent: State<'_, AgentState>) -> CmdResult<String> {
+    Ok(brain(&state, &mesh, &agent).await.map(|(_, name)| name).unwrap_or_default())
+}
+
+#[tauri::command]
+pub fn model_server_get(state: State<'_, AppState>) -> ModelServer {
+    model_server(&state)
+}
+
+#[tauri::command]
+pub fn model_server_set(state: State<'_, AppState>, server: ModelServer) -> CmdResult<()> {
+    let url = server.url.trim();
+    if !(url.is_empty() || url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("The address starts with http:// or https://.".into());
+    }
+    std::fs::write(server_file(&state), serde_json::to_vec_pretty(&server).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
 }
 
 fn memory(state: &AppState) -> Memory {
@@ -70,20 +169,21 @@ pub fn agent_new(state: State<'_, AppState>, folder: Option<String>) -> CmdResul
 /// `agent-event` events (`{conversation, event}`) as it goes.
 #[tauri::command]
 pub async fn agent_send(app: AppHandle, state: State<'_, AppState>, mesh: State<'_, MeshState>, agent: State<'_, AgentState>, conversation: String, text: String, settings: Settings) -> CmdResult<()> {
-    let session = mesh.session().await.ok_or("Start a model on the Mesh page first.")?;
+    let (brain, _) = brain(&state, &mesh, &agent).await?;
     let mem = memory(&state);
     let chat = chat(&agent, &mem, &conversation).await?;
     let mut chat = chat.try_lock().map_err(|_| "This conversation is still working; stop it or wait.".to_string())?;
     let devices = run_devices(&state).await;
     let folder = chat.conv.folder.clone().map(std::path::PathBuf::from);
-    let tools = Tools::new(folder.as_deref(), mem.clone(), conversation.clone(), Some(runner(&state)), devices).map_err(err_chain)?;
+    let mut tools = Tools::new(folder.as_deref(), mem.clone(), conversation.clone(), Some(runner(&state)), devices).map_err(err_chain)?;
+    tools.mcp = mcp_servers(&state, &agent).await;
     let stop = Arc::new(AtomicBool::new(false));
     agent.stops.lock().unwrap().insert(conversation.clone(), stop.clone());
     let (events_app, conv) = (app.clone(), conversation.clone());
     let pending = agent.pending.clone();
     let conv_for_approve = conversation.clone();
     let a = Agent {
-        brain: session.llm.clone() as Arc<dyn Brain>,
+        brain,
         tools,
         memory: mem,
         events: Arc::new(move |e| {

@@ -190,3 +190,29 @@ impl Payload {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Sampling.allow` came later: a coordinator and a lender of different versions must
+    /// still read each other's batches, the older one picking freely.
+    #[test]
+    fn a_forced_choice_crosses_versions() {
+        #[derive(Serialize, Deserialize)]
+        struct OldSampling {
+            temperature: f32,
+            top_p: f32,
+            seed: u64,
+        }
+        let old = bc_proto::wire::encode(&OldSampling { temperature: 0.0, top_p: 1.0, seed: 3 }).unwrap();
+        let read: bc_infer::Sampling = bc_proto::wire::decode_body(&old[4..]).unwrap();
+        assert_eq!(read, bc_infer::Sampling { seed: 3, ..Default::default() });
+        let new = bc_proto::wire::encode(&bc_infer::Sampling { allow: Some([15, 19]), ..Default::default() }).unwrap();
+        let read: OldSampling = bc_proto::wire::decode_body(&new[4..]).unwrap();
+        assert_eq!(read.seed, 0);
+        let meta = Meta { sampling: bc_infer::Sampling { allow: Some([15, 19]), ..Default::default() }, ..Default::default() };
+        let back: Meta = bc_proto::wire::decode_body(&bc_proto::wire::encode(&meta).unwrap()[4..]).unwrap();
+        assert_eq!(back.sampling.allow, Some([15, 19]));
+    }
+}

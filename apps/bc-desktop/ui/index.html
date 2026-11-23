@@ -355,7 +355,7 @@
 
       <div class="page hidden" data-page="agent">
         <div id="agent-reminders"></div>
-        <div id="agent-nomodel" class="banner warn hidden">No model is running. <button id="agent-to-mesh" class="link">Start one on the Mesh page</button>; qwen3-8b with its draft is the fastest for tool use.</div>
+        <div id="agent-nomodel" class="banner warn hidden">No model is running. <button id="agent-to-mesh" class="link">Start one on the Mesh page</button> (qwen3-8b with its draft is the fastest for tool use), or set a model server under Memory.</div>
         <div class="agent">
           <aside class="agent-side card">
             <button id="agent-new"><svg class="icon"><use href="#i-plus"/></svg>New conversation</button>
@@ -385,6 +385,18 @@
             <p class="hint">Notes the agent keeps with remember go into every conversation. Conversations stay on this computer, and the agent searches them with recall.</p>
             <textarea id="agent-notes" rows="10" aria-label="Notes"></textarea>
             <div class="row"><button id="agent-notes-save" class="primary">Save notes</button><span id="agent-notes-msg" class="hint"></span><button id="agent-forget" class="danger agent-forget">Delete all conversations</button></div>
+            <h3 class="agent-sub">Model server</h3>
+            <p class="hint">Used when no model runs on the Mesh page: any OpenAI-compatible server, such as Ollama (http://127.0.0.1:11434/v1) or LM Studio (http://127.0.0.1:1234/v1).</p>
+            <div class="agent-server">
+              <input id="agent-server-url" type="text" placeholder="http://127.0.0.1:11434/v1" aria-label="Server address" spellcheck="false">
+              <input id="agent-server-model" type="text" placeholder="Model, such as qwen3:8b" aria-label="Model name" spellcheck="false">
+              <input id="agent-server-context" type="number" min="0" step="1024" placeholder="Context (8192)" aria-label="Context in tokens">
+            </div>
+            <div class="row"><button id="agent-server-save">Save server</button><span id="agent-server-msg" class="hint"></span></div>
+            <h3 class="agent-sub">MCP servers</h3>
+            <p class="hint">Tools from your own MCP servers, in the usual mcp.json shape: <span class="mono">{"mcpServers": {"name": {"command": "npx", "args": […]}}}</span>, or <span class="mono">"url"</span> for one already running. They run as you, outside the job sandbox, and ask before each call unless a server has <span class="mono">"readOnly": true</span>.</p>
+            <textarea id="agent-mcp" rows="7" class="mono" spellcheck="false" aria-label="MCP servers"></textarea>
+            <div class="row"><button id="agent-mcp-save">Save and start</button><span id="agent-mcp-msg" class="hint"></span></div>
           </section>
         </div>
       </div>

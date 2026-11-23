@@ -209,7 +209,7 @@ fn isolated_env(cache: &Path) -> Vec<(&'static str, std::ffi::OsString)> {
 /// (`/usr/bin:/bin:/usr/sbin:/sbin`), which hides tools installed by Homebrew, rustup,
 /// nvm and the like. Jobs get the PATH of the user's login shell instead, the one their
 /// terminal uses, asked once and then reused.
-async fn job_path() -> Option<std::ffi::OsString> {
+pub async fn job_path() -> Option<std::ffi::OsString> {
     static PATH: tokio::sync::OnceCell<Option<std::ffi::OsString>> = tokio::sync::OnceCell::const_new();
     PATH.get_or_init(login_shell_path).await.clone()
 }
