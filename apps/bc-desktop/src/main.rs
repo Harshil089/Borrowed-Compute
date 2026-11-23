@@ -1035,6 +1035,7 @@ fn main() {
     }
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState { home: home.clone(), job: StdMutex::new(None), forwarding: StdMutex::new(None), forwards: Arc::default(), nearby: Arc::default() })
@@ -1047,6 +1048,7 @@ fn main() {
             log(format_args!("Borrowed Compute {} starting", app.package_info().version));
             let list = app.state::<AppState>().nearby.clone();
             watch_nearby(app.handle().clone(), home.clone(), list);
+            agent::watch_reminders(app.handle().clone(), home.clone());
 
             let open = MenuItem::with_id(app, "open", "Open Borrowed Compute", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit (stops lending)", true, None::<&str>)?;

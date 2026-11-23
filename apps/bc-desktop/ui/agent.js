@@ -221,7 +221,8 @@ listen("agent-event", ({ payload }) => {
       break;
     case "done": {
       const reused = ev.prompt_tokens ? Math.round((100 * ev.cached_tokens) / ev.prompt_tokens) : 0;
-      $("agent-stats").textContent = `${ev.steps} ${ev.steps === 1 ? "step" : "steps"} · ${ev.tokens_per_s.toFixed(1)} tokens/s · ${reused}% of the prompt already on the devices`;
+      const room = ev.context ? ` · ${Math.round((100 * ev.context_used) / ev.context)}% of the context used` : "";
+      $("agent-stats").textContent = `${ev.steps} ${ev.steps === 1 ? "step" : "steps"} · ${ev.tokens_per_s.toFixed(1)} tokens/s · ${reused}% of the prompt already on the devices${room}`;
       break;
     }
     case "error":
@@ -229,6 +230,15 @@ listen("agent-event", ({ payload }) => {
       add(`<div class="banner bad">${esc(ev.message)}</div>`);
       break;
   }
+});
+
+// A reminder the agent set, now due: shown here too, in case notifications are off.
+listen("agent-reminder", ({ payload }) => {
+  const box = $("agent-reminders");
+  box.insertAdjacentHTML("beforeend", `<div class="banner warn agent-reminder"><span><b>Reminder:</b> ${esc(payload.text)}</span><button class="link" data-dismiss>Dismiss</button></div>`);
+});
+$("agent-reminders").addEventListener("click", (e) => {
+  if (e.target.closest("[data-dismiss]")) e.target.closest(".agent-reminder").remove();
 });
 
 $("agent-log").addEventListener("click", (e) => {

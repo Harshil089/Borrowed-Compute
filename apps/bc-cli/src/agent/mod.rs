@@ -10,6 +10,7 @@
 
 pub mod format;
 pub mod memory;
+pub mod remind;
 pub mod tools;
 
 use std::collections::HashSet;
@@ -89,6 +90,16 @@ fn web_query(text: &str) -> Option<String> {
     Some(if query.is_empty() { text.trim().to_string() } else { query })
 }
 
+/// A reminder the message asks for, when it says the time: ("9pm", "call Ayush at 9pm").
+fn reminder_request(text: &str) -> Option<(String, String)> {
+    let lower = text.to_lowercase();
+    let i = lower.find("remind me")?;
+    remind::parse_when(text, chrono::Local::now())?;
+    let what = text[i + "remind me".len()..].trim();
+    let what = ["to ", "that ", "about ", "of "].iter().find_map(|p| what.strip_prefix(p)).unwrap_or(what).trim_end_matches(['.', '!']);
+    Some((text.to_string(), what.to_string()))
+}
+
 /// What the person decided about a call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -129,7 +140,7 @@ pub enum Event {
     Reply { text: String, thought: String, calls: Vec<CallView> },
     Approve(Approval),
     Result { id: String, name: String, ok: bool, text: String },
-    Done { steps: usize, prompt_tokens: usize, cached_tokens: usize, generated: usize, tokens_per_s: f64 },
+    Done { steps: usize, prompt_tokens: usize, cached_tokens: usize, generated: usize, tokens_per_s: f64, context_used: usize, context: usize },
     Error { message: String },
 }
 
@@ -176,7 +187,7 @@ const BASE_PROMPT: &str = "You are the assistant in Borrowed Compute, running on
 - Each message ends with the local time it was sent; use it for questions about the date and time.\n\
 - When the person tells you something to keep (a fact, a preference, a plan) or asks you to remember it, call remember.\n\
 - You remember the person's other conversations: the latest are listed below, and related lines may come with a message. They are background, which the person cannot see: never bring them up, quote or list them on your own. Use them only when the person asks about or refers to something from before; when it is not there, call recall.\n\
-- Never claim to have done something you did not do with a tool. You cannot act later on your own: you cannot set reminders, alarms or timers. Say so, and keep a note with remember instead.\n\
+- Never claim to have done something you did not do with a tool. To remind the person of something later, call remind; say the time its result gives.\n\
 - In a project: look with the tools before you change anything, make exact edits, and check your work by running it when you can. When done, say briefly what you did.\n\
 - Ask only when you cannot go on without an answer.";
 
@@ -262,7 +273,12 @@ impl Agent {
         // shortcut: the time and related lines go to the model but not into the saved
         // message, so a re-render (reopening, trimming) drops them; store them if answers
         // need them later.
-        let mut read = format!("{text}\n\n(Sent {})", chrono::Local::now().format("%A %Y-%m-%d %H:%M, local time"));
+        let mut read = format!(
+            "{text}\n\n(Sent {}; {} of the {} tokens of context used)",
+            chrono::Local::now().format("%A %Y-%m-%d %H:%M, local time"),
+            chat.ids.len(),
+            brain.context()
+        );
         if let Some(lines) = self.memory.related(text, Some(&chat.conv.id)) {
             read.push_str(&format!("\n\n<earlier_conversations>\n{lines}\n</earlier_conversations>"));
         }
@@ -272,6 +288,10 @@ impl Agent {
         let mut made: HashSet<String> = HashSet::new();
         // The harness looks things up itself when the person asks for something on the web,
         // so a model that would not call web_search still answers from real results.
+        // Likewise a reminder asked for with a time: set, whatever the model would do.
+        if let Some((when, what)) = reminder_request(text) {
+            self.harness_calls(chat, &turns, &mut made, vec![format::Call { name: "remind".into(), arguments: serde_json::json!({ "when": when, "text": what }) }]).await;
+        }
         if let Some(query) = web_query(text).filter(|_| self.tools.specs().iter().any(|t| t.name == "web_search")) {
             let found = self.harness_calls(chat, &turns, &mut made, vec![format::Call { name: "web_search".into(), arguments: serde_json::json!({ "query": query }) }]).await;
             let pages: Vec<format::Call> = found
@@ -355,7 +375,15 @@ impl Agent {
             }
         }
         let tokens_per_s = if decode_ms > 0.0 { total.generated as f64 / (decode_ms / 1000.0) } else { 0.0 };
-        (self.events)(Event::Done { steps, prompt_tokens: total.prompt_tokens, cached_tokens: total.cached_tokens, generated: total.generated, tokens_per_s });
+        (self.events)(Event::Done {
+            steps,
+            prompt_tokens: total.prompt_tokens,
+            cached_tokens: total.cached_tokens,
+            generated: total.generated,
+            tokens_per_s,
+            context_used: chat.ids.len(),
+            context: brain.context(),
+        });
         Ok(())
     }
 
@@ -552,8 +580,8 @@ mod tests {
         let im_end = r.brain.tk.token_id("<|im_end|>").unwrap();
         let after_system = |ids: &[u32]| {
             let text = r.brain.tk.decode(&ids[ids.iter().position(|&t| t == im_end).unwrap()..]);
-            match (text.find("\n\n(Sent "), text.find("local time)")) {
-                (Some(a), Some(b)) => format!("{}{}", &text[..a], &text[b + "local time)".len()..]),
+            match (text.find("\n\n(Sent "), text.find("context used)")) {
+                (Some(a), Some(b)) => format!("{}{}", &text[..a], &text[b + "context used)".len()..]),
                 _ => text,
             }
         };
@@ -595,6 +623,14 @@ mod tests {
         let mut chat = Chat::new(Conversation::new(None));
         agent.turn(&mut chat, "go", Settings::default(), stop).await.unwrap();
         assert_eq!(r.brain.fed.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_reminder_with_a_time_is_read_from_the_message() {
+        assert_eq!(reminder_request("remind me to call ayush at 9pm"), Some(("remind me to call ayush at 9pm".into(), "call ayush at 9pm".into())));
+        assert_eq!(reminder_request("Can you remind me in 20 minutes to stretch."), Some(("Can you remind me in 20 minutes to stretch.".into(), "in 20 minutes to stretch".into())));
+        assert_eq!(reminder_request("remind me to call ayush"), None);
+        assert_eq!(reminder_request("call ayush at 9pm"), None);
     }
 
     #[test]
