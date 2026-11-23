@@ -1147,6 +1147,7 @@ fn main() {
             agent::agent_conversations,
             agent::agent_open,
             agent::agent_delete,
+            agent::agent_detach_folder,
             agent::memory_get,
             agent::memory_set,
             agent::agent_model,

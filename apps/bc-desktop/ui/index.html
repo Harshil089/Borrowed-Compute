@@ -22,6 +22,7 @@
     <symbol id="i-folder" viewBox="0 0 16 16"><path d="M1.75 4.25c0-.7.55-1.25 1.25-1.25h3.2l1.5 1.6H13c.7 0 1.25.55 1.25 1.25v6.4c0 .7-.55 1.25-1.25 1.25H3c-.7 0-1.25-.55-1.25-1.25z"/></symbol>
     <symbol id="i-doc" viewBox="0 0 16 16"><path d="M4 1.75h5.5l3 3v9.5H4z"/><path d="M9.5 1.75v3h3M6 8.5h4.5M6 11h4.5"/></symbol>
     <symbol id="i-plus" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></symbol>
+    <symbol id="i-x" viewBox="0 0 16 16"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></symbol>
     <symbol id="i-key" viewBox="0 0 16 16"><circle cx="5.5" cy="10.5" r="3"/><path d="m7.6 8.4 5.4-5.4M11 5l1.6 1.6"/></symbol>
     <symbol id="i-down" viewBox="0 0 16 16"><path d="M8 2.5v8M4.5 7.5 8 11l3.5-3.5M3 13.5h10"/></symbol>
     <symbol id="i-copy" viewBox="0 0 16 16"><rect x="5.25" y="5.25" width="8.5" height="8.5" rx="1.2"/><path d="M10.75 5.25V3.5c0-.7-.55-1.25-1.25-1.25H3.5c-.7 0-1.25.55-1.25 1.25v6c0 .7.55 1.25 1.25 1.25h1.75"/></symbol>
@@ -365,7 +366,10 @@
           <section id="agent-chat" class="agent-main card">
             <div class="agent-head">
               <h2 id="agent-title" class="heading">New conversation</h2>
-              <button id="agent-folder" class="agent-folder" title="The folder its file tools and commands work in"><svg class="icon"><use href="#i-folder"/></svg><span id="agent-folder-text">Choose a folder</span></button>
+              <div class="agent-folder-box">
+                <button id="agent-folder" class="agent-folder" title="The folder its file tools and commands work in"><svg class="icon"><use href="#i-folder"/></svg><span id="agent-folder-text">Choose a folder</span></button>
+                <button id="agent-folder-clear" class="agent-folder-clear hidden" title="Detach the folder" aria-label="Detach the folder"><svg class="icon"><use href="#i-x"/></svg></button>
+              </div>
             </div>
             <div id="agent-log" class="agent-log selectable" aria-live="polite"></div>
             <form id="agent-form" class="agent-compose">

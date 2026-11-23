@@ -245,6 +245,16 @@ pub fn agent_open(state: State<'_, AppState>, conversation: String) -> CmdResult
     Ok(json!({ "id": c.id, "title": c.title, "folder": c.folder, "messages": messages }))
 }
 
+/// Takes the folder away from a conversation: its next messages have no file tools.
+#[tauri::command]
+pub async fn agent_detach_folder(state: State<'_, AppState>, agent: State<'_, AgentState>, conversation: String) -> CmdResult<()> {
+    let mem = memory(&state);
+    let chat = chat(&agent, &mem, &conversation).await?;
+    let mut chat = chat.try_lock().map_err(|_| "This conversation is still working; stop it or wait.".to_string())?;
+    chat.set_folder(None);
+    mem.save(&chat.conv).map_err(err_chain)
+}
+
 #[tauri::command]
 pub async fn agent_delete(state: State<'_, AppState>, agent: State<'_, AgentState>, conversation: Option<String>) -> CmdResult<()> {
     let mem = memory(&state);
