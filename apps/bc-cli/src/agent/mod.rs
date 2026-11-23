@@ -790,7 +790,7 @@ mod tests {
         // Auto-approve asks nobody.
         let r = agent(&[WRITE, "Done."], Decision::Deny);
         let mut chat = Chat::new(Conversation::new(None));
-        r.agent.turn(&mut chat, "make a.txt", Settings { auto_approve: true, think: false }, Arc::default()).await.unwrap();
+        r.agent.turn(&mut chat, "make a.txt", Settings { auto_approve: true, ..Default::default() }, Arc::default()).await.unwrap();
         assert!(r.dir.path().join("project/a.txt").exists());
         assert!(!r.seen.lock().unwrap().iter().any(|e| matches!(e, Event::Approve(_))));
     }
