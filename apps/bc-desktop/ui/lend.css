@@ -221,3 +221,6 @@ div.setting { cursor: default; }
 }
 
 .agent-reminder { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.agent-sub { font-size: 14px; font-weight: 600; margin: 20px 0 4px; }
+.agent-server { display: grid; grid-template-columns: 2fr 1.4fr 1fr; gap: 8px; margin: 8px 0; }
+@media (max-width: 720px) { .agent-server { grid-template-columns: 1fr; } }

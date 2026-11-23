@@ -9,6 +9,7 @@
 //! Calls in one answer run at the same time.
 
 pub mod format;
+pub mod http;
 pub mod log;
 pub mod memory;
 pub mod remind;

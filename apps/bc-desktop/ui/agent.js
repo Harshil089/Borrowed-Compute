@@ -286,6 +286,11 @@ $("agent-to-mesh").addEventListener("click", () => window.lendUI.showPage("mesh"
 $("agent-memory-open").addEventListener("click", async () => {
   $("agent-notes").value = await invoke("memory_get").catch(() => "");
   $("agent-notes-msg").textContent = "";
+  const server = await invoke("model_server_get").catch(() => ({}));
+  $("agent-server-url").value = server.url || "";
+  $("agent-server-model").value = server.model || "";
+  $("agent-server-context").value = server.context || "";
+  $("agent-server-msg").textContent = "";
   $("agent-chat").classList.add("hidden");
   $("agent-memory").classList.remove("hidden");
 });
@@ -301,6 +306,16 @@ $("agent-notes-save").addEventListener("click", async () => {
     $("agent-notes-msg").textContent = String(e);
   }
 });
+$("agent-server-save").addEventListener("click", async () => {
+  const server = { url: $("agent-server-url").value.trim(), model: $("agent-server-model").value.trim(), context: Number($("agent-server-context").value) || 0 };
+  try {
+    await invoke("model_server_set", { server });
+    $("agent-server-msg").textContent = "Saved.";
+    checkModel();
+  } catch (e) {
+    $("agent-server-msg").textContent = String(e);
+  }
+});
 $("agent-forget").addEventListener("click", async () => {
   if (!(await ask("Delete every conversation on this computer? This cannot be undone.", "Delete all", true))) return;
   await invoke("agent_delete", { conversation: null }).catch(() => {});
@@ -309,8 +324,7 @@ $("agent-forget").addEventListener("click", async () => {
 
 // Whether a model runs, while the page is on screen.
 async function checkModel() {
-  const s = await invoke("mesh_status").catch(() => ({ running: false }));
-  modelReady = !!s.running;
+  modelReady = !!(await invoke("agent_model").catch(() => ""));
   $("agent-nomodel").classList.toggle("hidden", modelReady);
   controls();
 }

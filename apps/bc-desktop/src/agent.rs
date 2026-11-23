@@ -8,6 +8,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use bc_cli::agent::format::parse;
+use bc_cli::agent::http::{HttpBrain, ModelServer};
 use bc_cli::agent::memory::{Conversation, Memory, Summary};
 use bc_cli::agent::tools::{RunRequest, Runner, Tools};
 use bc_cli::agent::{Agent, Brain, Chat, Decision, Settings};
@@ -31,6 +32,54 @@ pub struct AgentState {
     chats: Mutex<Vec<(String, Arc<Mutex<Chat>>)>>,
     pending: Pending,
     stops: StdMutex<HashMap<String, Arc<AtomicBool>>>,
+    /// The model server's brain, kept while its settings stay the same, so conversations
+    /// keep their token ids between messages.
+    server: StdMutex<Option<(ModelServer, Arc<HttpBrain>)>>,
+}
+
+fn server_file(state: &AppState) -> std::path::PathBuf {
+    state.home.join("model-server.json")
+}
+
+fn model_server(state: &AppState) -> ModelServer {
+    std::fs::read(server_file(state)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+/// The model the agent uses: the Mesh page's while one runs, else the model server's.
+async fn brain(state: &AppState, mesh: &MeshState, agent: &AgentState) -> CmdResult<(Arc<dyn Brain>, String)> {
+    if let Some(session) = mesh.session().await {
+        return Ok((session.llm.clone() as Arc<dyn Brain>, session.name.clone()));
+    }
+    let server = model_server(state);
+    if !server.is_set() {
+        return Err("Start a model on the Mesh page, or set a model server under Memory.".into());
+    }
+    let mut kept = agent.server.lock().unwrap();
+    if kept.as_ref().is_none_or(|(s, _)| *s != server) {
+        *kept = Some((server.clone(), Arc::new(HttpBrain::new(server.clone()).map_err(err_chain)?)));
+    }
+    let b = kept.as_ref().map(|(_, b)| b.clone()).expect("just set");
+    Ok((b as Arc<dyn Brain>, server.model))
+}
+
+/// The model the Agent page would use now, by name; empty with none.
+#[tauri::command]
+pub async fn agent_model(state: State<'_, AppState>, mesh: State<'_, MeshState>, agent: State<'_, AgentState>) -> CmdResult<String> {
+    Ok(brain(&state, &mesh, &agent).await.map(|(_, name)| name).unwrap_or_default())
+}
+
+#[tauri::command]
+pub fn model_server_get(state: State<'_, AppState>) -> ModelServer {
+    model_server(&state)
+}
+
+#[tauri::command]
+pub fn model_server_set(state: State<'_, AppState>, server: ModelServer) -> CmdResult<()> {
+    let url = server.url.trim();
+    if !(url.is_empty() || url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("The address starts with http:// or https://.".into());
+    }
+    std::fs::write(server_file(&state), serde_json::to_vec_pretty(&server).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
 }
 
 fn memory(state: &AppState) -> Memory {
@@ -70,7 +119,7 @@ pub fn agent_new(state: State<'_, AppState>, folder: Option<String>) -> CmdResul
 /// `agent-event` events (`{conversation, event}`) as it goes.
 #[tauri::command]
 pub async fn agent_send(app: AppHandle, state: State<'_, AppState>, mesh: State<'_, MeshState>, agent: State<'_, AgentState>, conversation: String, text: String, settings: Settings) -> CmdResult<()> {
-    let session = mesh.session().await.ok_or("Start a model on the Mesh page first.")?;
+    let (brain, _) = brain(&state, &mesh, &agent).await?;
     let mem = memory(&state);
     let chat = chat(&agent, &mem, &conversation).await?;
     let mut chat = chat.try_lock().map_err(|_| "This conversation is still working; stop it or wait.".to_string())?;
@@ -83,7 +132,7 @@ pub async fn agent_send(app: AppHandle, state: State<'_, AppState>, mesh: State<
     let pending = agent.pending.clone();
     let conv_for_approve = conversation.clone();
     let a = Agent {
-        brain: session.llm.clone() as Arc<dyn Brain>,
+        brain,
         tools,
         memory: mem,
         events: Arc::new(move |e| {

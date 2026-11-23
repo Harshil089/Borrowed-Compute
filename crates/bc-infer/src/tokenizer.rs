@@ -130,6 +130,42 @@ impl Tokenizer {
         Ok(Tokenizer { kind, tokens, scores, index, ranks, specials, control, bos, eos, add_bos, template, stops, digits })
     }
 
+    /// One token per byte, plus a chat format's markers as whole tokens that decode back
+    /// to their text: for a model reached over HTTP, whose own vocabulary is not here, so
+    /// the agent can still lay out its prompt in that format and count roughly (a byte
+    /// token is about a quarter of a real one).
+    pub fn byte_level(template: Template) -> Tokenizer {
+        use crate::gguf::write::{gguf, Meta};
+        let markers: &[&str] = match template {
+            Template::ChatMl => &["<|im_start|>", "<|im_end|>", "<|endoftext|>"],
+            Template::Llama3 => &["<|begin_of_text|>", "<|start_header_id|>", "<|end_header_id|>", "<|eot_id|>"],
+            Template::Plain => &["<|endoftext|>"],
+        };
+        let mut tokens: Vec<String> = markers.iter().map(|s| s.to_string()).collect();
+        let mut types = vec![4; tokens.len()];
+        // GPT-2's map of bytes to printable characters, so the byte-level BPE path reads them.
+        let mut extra = 0;
+        for b in 0..256u32 {
+            let printable = (33..=126).contains(&b) || (161..=172).contains(&b) || (174..=255).contains(&b);
+            let c = if printable { char::from_u32(b) } else { extra += 1; char::from_u32(255 + extra) };
+            tokens.push(c.unwrap_or('?').to_string());
+            types.push(1);
+        }
+        let n = tokens.len();
+        let eos = (markers.len() - 1) as u32;
+        let meta = [
+            ("tokenizer.ggml.model", Meta::Str("gpt2".into())),
+            ("tokenizer.ggml.tokens", Meta::Strs(tokens)),
+            ("tokenizer.ggml.scores", Meta::F32s(vec![0.0; n])),
+            ("tokenizer.ggml.token_type", Meta::I32s(types)),
+            ("tokenizer.ggml.eos_token_id", Meta::U32(eos)),
+        ];
+        let header = crate::gguf::parse(&gguf(&meta, &[])).expect("a fixed vocabulary");
+        let mut t = Tokenizer::from_header(&header).expect("a fixed vocabulary");
+        t.add_bos = false;
+        t
+    }
+
     pub fn vocab(&self) -> usize {
         self.tokens.len()
     }
@@ -375,6 +411,21 @@ pub fn pretokenize(text: &str, digits: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_byte_level_vocabulary_keeps_the_chat_markers_whole() {
+        let t = Tokenizer::byte_level(Template::ChatMl);
+        assert_eq!(t.template, Template::ChatMl);
+        let text = "<|im_start|>user\nhé <tool_call><|im_end|>\n";
+        let ids = t.encode(text);
+        assert_eq!(ids[0], t.token_id("<|im_start|>").unwrap());
+        assert_eq!(ids.len(), 2 + "user\nhé <tool_call>\n".len());
+        assert_eq!(t.decode(&ids), text);
+        assert!(t.is_stop(t.token_id("<|im_end|>").unwrap()));
+        let l = Tokenizer::byte_level(Template::Llama3);
+        assert_eq!(l.template, Template::Llama3);
+        assert!(l.is_stop(l.token_id("<|eot_id|>").unwrap()));
+    }
     use crate::gguf::write::{gguf, Meta};
 
     fn header(meta: Vec<(&str, Meta)>) -> Header {
