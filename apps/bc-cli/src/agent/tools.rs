@@ -304,10 +304,83 @@ impl Tools {
 /// A web page as text: https only, at most 1 MB read.
 async fn fetch(url: &str) -> Result<String> {
     let parsed = reqwest::Url::parse(url.trim()).context("not a web address")?;
-    if parsed.scheme() != "https" {
+    Ok(head_tail(&download(parsed).await?, OUTPUT_CHARS))
+}
+
+/// Whether an address is on the public internet. Everything else (this computer, the home
+/// network, link-local, carrier NAT, multicast, reserved and documentation ranges, and
+/// IPv6 forms that carry such an IPv4 address) is refused: a page could otherwise tell
+/// the model to probe the router or a device on the person's network.
+fn is_public(ip: std::net::IpAddr) -> bool {
+    use std::net::{IpAddr, Ipv4Addr};
+    let v4 = |a: Ipv4Addr| {
+        let [x, y, z, _] = a.octets();
+        !(a.is_unspecified()
+            || a.is_loopback()
+            || a.is_private()
+            || a.is_link_local()
+            || a.is_broadcast()
+            || a.is_multicast()
+            || a.is_documentation()
+            || x == 0
+            || x >= 240
+            || (x == 100 && (64..128).contains(&y))
+            || (x == 192 && y == 0 && z == 0)
+            || (x == 198 && (y == 18 || y == 19)))
+    };
+    match ip {
+        IpAddr::V4(a) => v4(a),
+        IpAddr::V6(a) => {
+            let s = a.segments();
+            let embedded = |hi: u16, lo: u16| Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8);
+            if let Some(m) = a.to_ipv4_mapped() {
+                return v4(m);
+            }
+            match s[0] {
+                // NAT64 (64:ff9b::/96) and 6to4 (2002::/16) reach an IPv4 address.
+                0x64 if s[1] == 0xff9b => v4(embedded(s[6], s[7])),
+                0x2002 => v4(embedded(s[1], s[2])),
+                // Teredo and documentation.
+                0x2001 if s[1] == 0 || s[1] == 0xdb8 => false,
+                _ => !(a.is_unspecified() || a.is_loopback() || a.is_multicast() || (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80 || s[..6] == [0; 6]),
+            }
+        }
+    }
+}
+
+/// An address the agent may read: https, and a host that is not a literal address off the
+/// public internet. Names are checked when they resolve ([`PublicOnly`]), so a name
+/// pointing home is refused too, at connection time, with no gap to swap the answer.
+fn check_url(url: &reqwest::Url) -> Result<()> {
+    if url.scheme() != "https" {
         bail!("only https addresses");
     }
-    Ok(head_tail(&download(parsed).await?, OUTPUT_CHARS))
+    // The URL parser already turns forms like 2130706433 or 0x7f.1 into 127.0.0.1.
+    let host = url.host_str().context("the address has no host")?;
+    let literal = host.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>().ok();
+    if literal.is_some_and(|ip| !is_public(ip)) {
+        bail!("{} is not on the public internet; the agent reads only public pages", url.host_str().unwrap_or_default());
+    }
+    Ok(())
+}
+
+/// A resolver that gives only public addresses, so no name (`localhost`, a router's name,
+/// a public name pointing at 192.168.x) leads the agent into this computer or the home
+/// network, redirects included.
+struct PublicOnly;
+
+impl reqwest::dns::Resolve for PublicOnly {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        Box::pin(async move {
+            let host = name.as_str().to_string();
+            let all: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
+            let public: Vec<std::net::SocketAddr> = all.into_iter().filter(|a| is_public(a.ip())).collect();
+            if public.is_empty() {
+                return Err(format!("{host} is not on the public internet; the agent reads only public pages").into());
+            }
+            Ok(Box::new(public.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
 }
 
 /// Bing's RSS results, news and web at once: no account or key, and plain XML. Web
@@ -367,7 +440,21 @@ fn search_results(xml: &str, max: usize, dated: bool) -> Vec<String> {
 
 /// A page's text, HTML reduced to its words, at most [`FETCH_BYTES`] of it.
 async fn download(parsed: reqwest::Url) -> Result<String> {
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).build()?;
+    check_url(&parsed)?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .dns_resolver(std::sync::Arc::new(PublicOnly))
+        // Every hop is checked like the first: a public page may redirect home.
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 {
+                attempt.error("too many redirects")
+            } else if let Err(e) = check_url(attempt.url()) {
+                attempt.error(e.to_string())
+            } else {
+                attempt.follow()
+            }
+        }))
+        .build()?;
     let mut resp = client.get(parsed).header("user-agent", "BorrowedCompute-agent").send().await?;
     let status = resp.status();
     let html = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|t| t.contains("html"));
@@ -523,8 +610,27 @@ mod tests {
         assert_eq!(t.call("run", &json!({"command": "cargo test --lib", "device": "mini"})).await.unwrap(), "Exit code 3.\n[\"cargo\", \"test\", \"--lib\"] on Some(\"mini\")");
         assert!(t.call("run", &json!({"command": "ls", "device": "elsewhere"})).await.is_err());
         assert!(fetch("http://example.com").await.unwrap_err().to_string().contains("only https"));
+        // Nothing on this computer or the home network, by address or by name.
+        for url in ["https://127.0.0.1/", "https://192.168.1.1/admin", "https://10.0.0.8/", "https://[::1]/", "https://[::ffff:192.168.0.1]/", "https://2130706433/", "https://169.254.169.254/latest/meta-data", "https://localhost:8080/"] {
+            let e = format!("{:#}", fetch(url).await.unwrap_err());
+            assert!(e.contains("not on the public internet"), "{url}: {e}");
+        }
         assert_eq!(Tools::risk("run"), Risk::Run);
         assert_eq!(Tools::risk("read_file"), Risk::Read);
+    }
+
+    #[test]
+    fn only_public_addresses_count_as_public() {
+        let public = |s: &str| is_public(s.parse().unwrap());
+        for ip in ["93.184.216.34", "1.1.1.1", "2606:4700:4700::1111", "100.128.0.1", "172.32.0.1"] {
+            assert!(public(ip), "{ip}");
+        }
+        for ip in [
+            "127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.1.1", "169.254.169.254", "100.64.0.1", "0.0.0.0", "255.255.255.255", "224.0.0.1", "240.0.0.1",
+            "192.0.0.8", "198.18.0.1", "::1", "::", "fe80::1", "fd00::1", "ff02::1", "::ffff:10.0.0.1", "64:ff9b::a00:1", "2002:c0a8:101::1", "2001:db8::1", "::a00:1",
+        ] {
+            assert!(!public(ip), "{ip}");
+        }
     }
 
     #[test]
