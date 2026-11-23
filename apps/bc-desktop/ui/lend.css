@@ -219,3 +219,5 @@ div.setting { cursor: default; }
   .agent-side { position: static; }
   .agent-list { max-height: 160px; }
 }
+
+.agent-reminder { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }

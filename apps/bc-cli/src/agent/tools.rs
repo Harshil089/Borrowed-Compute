@@ -112,13 +112,19 @@ impl Tools {
         out.push(spec("web_search", "Search the web. Gives titles, addresses and snippets of the top results; read one in full with fetch_url.", json!({ "query": p("What to search for.") }), &["query"]));
         out.push(spec("fetch_url", "Read a web page (https) as text.", json!({ "url": p("The https address.") }), &["url"]));
         out.push(spec("recall", "Search the past conversations for something said before.", json!({ "query": p("Words to look for.") }), &["query"]));
+        out.push(spec(
+            "remind",
+            "Set a reminder: the app shows it as a notification at that time.",
+            json!({ "when": p("When, such as 21:00, 9pm, in 20 minutes, tomorrow 9am or 2026-11-24 09:00."), "text": p("What to remind the person of.") }),
+            &["when", "text"],
+        ));
         out.push(spec("remember", "Keep a short note for every future conversation: a fact about the person, a preference, a decision.", json!({ "note": p("The note, one line.") }), &["note"]));
         out
     }
 
     pub fn risk(name: &str) -> Risk {
         match name {
-            "write_file" | "edit_file" | "remember" => Risk::Write,
+            "write_file" | "edit_file" | "remember" | "remind" => Risk::Write,
             "run" => Risk::Run,
             "fetch_url" | "web_search" => Risk::Net,
             _ => Risk::Read,
@@ -172,6 +178,7 @@ impl Tools {
             "fetch_url" => fetch(&need("url")?).await,
             "web_search" => web_search(&need("query")?).await,
             "recall" => Ok(self.memory.recall(&need("query")?, Some(&self.conversation))),
+            "remind" => self.memory.reminders().add(&need("when")?, &need("text")?),
             "remember" => {
                 self.memory.remember(&need("note")?)?;
                 Ok("Noted.".to_string())
@@ -504,7 +511,7 @@ mod tests {
         // Without a runner there is no `run`, and without a folder no file tools.
         assert!(!t.specs().iter().any(|s| s.name == "run"));
         let bare = Tools::new(None, Memory::at(dir.path()), "c".into(), None, Vec::new()).unwrap();
-        assert_eq!(bare.specs().iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["web_search", "fetch_url", "recall", "remember"]);
+        assert_eq!(bare.specs().iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["web_search", "fetch_url", "recall", "remind", "remember"]);
         assert!(bare.call("read_file", &json!({"path": "b.txt"})).await.is_err());
     }
 

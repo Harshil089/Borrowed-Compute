@@ -79,6 +79,11 @@ impl Memory {
         Memory { root: home.to_path_buf() }
     }
 
+    /// The reminders kept beside the conversations.
+    pub fn reminders(&self) -> super::remind::Reminders {
+        super::remind::Reminders::at(&self.root)
+    }
+
     fn dir(&self) -> PathBuf {
         self.root.join("conversations")
     }

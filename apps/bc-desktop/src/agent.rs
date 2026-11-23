@@ -238,3 +238,21 @@ fn runner(state: &AppState) -> Runner {
         })
     })
 }
+
+/// Shows the agent's reminders as they come due, as notifications and in the window
+/// (`agent-reminder`), in case notifications are off for the app.
+pub fn watch_reminders(app: AppHandle, home: std::path::PathBuf) {
+    use tauri_plugin_notification::NotificationExt;
+    tauri::async_runtime::spawn(async move {
+        let reminders = Memory::at(&home).reminders();
+        loop {
+            for r in reminders.take_due(bc_cli::agent::memory::now() as i64) {
+                if let Err(e) = app.notification().builder().title("Reminder").body(&r.text).show() {
+                    crate::log(format_args!("could not show a reminder: {e}"));
+                }
+                let _ = app.emit("agent-reminder", &r);
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+        }
+    });
+}
