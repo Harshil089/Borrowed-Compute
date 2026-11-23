@@ -18,6 +18,10 @@ pub const NOTES_IN_PROMPT: usize = 2000;
 const RECALL_CONVERSATIONS: usize = 500;
 const RECALL_HITS: usize = 5;
 const RELATED_HITS: usize = 3;
+/// Other conversations every new one starts with, the last few things said in each.
+const RECENT_CONVERSATIONS: usize = 8;
+const RECENT_LINES: usize = 4;
+const RECENT_CHARS: usize = 160;
 /// Related lines come with every message, so they are kept short.
 const RELATED_CHARS: usize = 300;
 const CHUNK_CHARS: usize = 600;
@@ -127,6 +131,25 @@ impl Memory {
 
     pub fn list(&self) -> Vec<Summary> {
         self.all().into_iter().map(|c| Summary { id: c.id, title: c.title, updated: c.updated, folder: c.folder }).collect()
+    }
+
+    /// What the person said in the latest other conversations, newest first: every new
+    /// conversation starts knowing it, with nothing for the person to copy into notes.
+    pub fn recent(&self, except: Option<&str>) -> String {
+        self.all()
+            .into_iter()
+            .filter(|c| Some(c.id.as_str()) != except && c.messages.iter().any(|m| m.role == "user"))
+            .take(RECENT_CONVERSATIONS)
+            .map(|c| {
+                let said: Vec<&Message> = c.messages.iter().filter(|m| m.role == "user").collect();
+                let lines: Vec<String> = said[said.len().saturating_sub(RECENT_LINES)..]
+                    .iter()
+                    .map(|m| format!("- {}", super::format::clip(&m.content.trim().replace('\n', " "), RECENT_CHARS)))
+                    .collect();
+                format!("[{} · {}]\n{}", c.title, day_of(c.updated), lines.join("\n"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     pub fn notes(&self) -> String {
@@ -324,6 +347,10 @@ mod tests {
         m.save(&conv("Calls", 1_700_200_000, &[("user", "remind me to call Ayush at 9pm"), ("assistant", "I cannot set reminders; noted it.")])).unwrap();
         assert!(m.related("what did i remind you of?", None).is_some_and(|r| r.contains("Ayush")));
         assert_eq!(m.related("what would you do", None), None);
+        // A new conversation starts with what was said in the others, newest first.
+        let recent = m.recent(Some("6553f100-00000000"));
+        assert!(recent.starts_with("[Calls · 2023-11-17]\n- remind me to call Ayush at 9pm\n[Pasta"), "{recent}");
+        assert!(!recent.contains("Deploy"), "{recent}");
     }
 
     #[test]
