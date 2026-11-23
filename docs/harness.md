@@ -88,7 +88,8 @@ Not built yet, in the order they would pay off:
    of memory: f32 keys and values (229 KB a token for qwen3-0.6b) doubled from 8,192 to
    16,384 tokens while the old cache was still held. The cache now grows by a quarter,
    and a session's context is capped at what its stages hold (`context_room`: memory
-   left after the weights, over the cache a token takes, 2.25 times for growing), so the
+   left after the weights, over the cache a token takes, 2.25 times for growing; at least
+   8,192 tokens, where qwen3-0.6b ran on this M2), so the
    agent trims and summarizes before the GPU runs out. Storing the cache as f16 would
    halve it, and an attention kernel that shares each key and value read across query
    rows would end the slowdown on long prompts (9 s a 256-token chunk at 8k tokens,

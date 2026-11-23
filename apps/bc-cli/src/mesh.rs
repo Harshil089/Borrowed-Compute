@@ -203,9 +203,12 @@ pub fn resolve_model(name: &str) -> Result<(String, String, Option<String>)> {
     bail!("unknown model {name:?}: give a name from `bc mesh plan` or an https address of a .gguf file")
 }
 
-/// Context kept for a conversation even when the measured room is smaller, since a model
-/// needs some to be of use; the engine then reports running out of memory plainly.
-const MIN_CONTEXT: usize = 2048;
+/// Context kept for a conversation even when the measured room is smaller: free memory
+/// as measured swings with whatever else runs (an agent prompt with its tools and a web
+/// page needs about this much), and 8,192 tokens ran on an 8 GB-free M2 with qwen3-0.6b
+/// where the next doubling did not. Past it, the engine reports running out of memory
+/// plainly.
+const MIN_CONTEXT: usize = 8192;
 
 /// Tokens of context the planned stages can hold: each device's memory left after its
 /// weights, over the key/value cache a token takes in its layers. The cache grows by a
