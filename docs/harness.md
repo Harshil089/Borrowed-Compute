@@ -52,7 +52,7 @@ model text, tool results and fetched pages, always treated as untrusted and kept
 | Part | Built | Where |
 |---|---|---|
 | Loop, approvals, stop | Steps until no call, 25-step cap, a 16,384-token budget per turn, repeat guard, Allow / Always / Deny, Stop at the next token | `agent/mod.rs` |
-| Prompt and KV reuse | Conversations kept as token ids, append-only; the stages keep the stream; a step sends only new tokens (98–99% reuse measured in the app); per-message notes (time, context use, related lines) go at the end of the user turn, never into the prefix | `Cached` in `bc-mesh/src/llm.rs`, `agent/mod.rs` |
+| Prompt and KV reuse | Conversations kept as token ids, append-only; the stages keep the stream; a step sends only new tokens (98–99% reuse measured in the app); per-message notes (time, context use) go at the end of the user turn, never into the prefix | `Cached` in `bc-mesh/src/llm.rs`, `agent/mod.rs` |
 | Router | Shortcuts that read the message: a reminder with a time; news or the web; past-conversation phrases ("I mentioned", "we discussed"); folder words or a named file; and on a conversation's first message, a small folder (at most 4 files of 16 KB) is read whatever the words. The harness then makes the calls itself: a search and its top 2 pages, the files, or recall. A **decision step** (the model picks one numbered action, decoding held to those digit tokens by `Sampling::allow`) is built but off by default: see the measurements below | `agent/route.rs`, `harness_calls`, `files_for` |
 | Run log | `<home>/runs/<conversation>.jsonl`: message, route, each answer with token counts, each call before and after, compaction, end reason. A turn cut off by a crash is reported, with the calls that may have run, to the person and the model. `bc agent list`, `bc agent log <id>` | `agent/log.rs` |
 | Context | Tool output past its room is kept whole as an artifact (`read_artifact`); old tool results trimmed; then everything before the current turn replaced by the model's summary | `run_call`, `fit`, `summarize` |
@@ -60,7 +60,7 @@ model text, tool results and fetched pages, always treated as untrusted and kept
 | Tools | Folder-confined files, `run` in the job sandbox here or on a paired device, `web_search` (news and web), `fetch_url` (public https only), `recall`, `remember`, `remind`, `read_artifact`, `use_skill`, `task` | `agent/tools.rs` |
 | MCP | stdio and Streamable HTTP servers from `<home>/mcp.json`; tools as `<server>__<tool>`; `find_tools` (BM25) past 30 tools; each call asks unless the server is `readOnly` | `agent/mcp.rs` |
 | Sub-agents | `task(goal)`: a helper with the same model and tools less `task`, a fresh context and the same approvals; only its answer returns | `subtask` |
-| Memory | Saved conversations, BM25 recall, the latest 8 conversations in each new prompt, related lines with each message, notes, reminders (notifications), skills (`<home>/skills/<name>/SKILL.md`) | `agent/memory.rs`, `agent/remind.rs` |
+| Memory | Saved conversations, BM25 recall (the latest conversations when no words match) pulled in when a message refers to the past, notes, reminders (notifications), skills (`<home>/skills/<name>/SKILL.md`) | `agent/memory.rs`, `agent/remind.rs` |
 | Evals | `bc agent eval <cases> --url --model`: cases with an expected route, tool and answer words, each in a fresh home, side effects denied; 20 starting cases | `agent/eval.rs`, `docs/agent-evals/` |
 | Streaming API | OpenAI-compatible endpoint with tool calls and prompt reuse | `apps/bc-cli/src/serve.rs` |
 | Sandbox | Per-job Seatbelt or AppContainer, workspace deleted after each job | `apps/bc-agent` |
@@ -220,8 +220,9 @@ and MCP tools share it.
 
 ### 5.6 Memory
 
-- Episodic: conversations and run logs, BM25 recall, the latest 8 in each prompt,
-  related lines with each message (built). Add recency weighting to recall.
+- Episodic: conversations and run logs, BM25 recall when a message refers to the past
+  (built). Memory sent with every message was dropped: qwen3-0.6b repeated it back in
+  place of an answer. Add recency weighting to recall.
 - Semantic: index the chosen folder's files with BM25 at conversation start (code
   chunked by blank lines and definitions), so `search` ranks instead of greps. Embedding
   search waits for a small embedding model on the mesh.
