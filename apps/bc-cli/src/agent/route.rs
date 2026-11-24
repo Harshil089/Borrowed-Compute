@@ -85,6 +85,7 @@ pub fn refers_to_past(text: &str) -> bool {
     [
         "i mentioned", "i told you", "told you about", "we discussed", "we talked", "we spoke", "did i ask", "did i say", "did i tell", "did i mention", "you said",
         "last time", "previous conversation", "earlier conversation", "other conversation", "remember what", "remember when", "remember the", "what was that",
+        "did i ", "have i ", "i asked you", "i said", "remind you", "do you remember", "yesterday", "last week", "earlier today",
     ]
     .iter()
     .any(|p| lower.contains(p))
@@ -156,6 +157,8 @@ mod tests {
         assert!(refers_to_past("what was that restaurant I mentioned before?"));
         assert!(refers_to_past("remember what we discussed about the deployment last week?"));
         assert!(!refers_to_past("what is a restaurant?"));
+        assert!(refers_to_past("what did i remind you of?"));
+        assert!(!refers_to_past("Hola!") && !refers_to_past("how are you?"));
         assert!(refers_to_folder("what do you see in this folder?"));
         assert!(refers_to_folder("summarize the README"));
         assert!(!refers_to_folder("write a haiku about rain"));

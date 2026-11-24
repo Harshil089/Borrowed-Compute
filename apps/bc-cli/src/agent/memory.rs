@@ -17,13 +17,9 @@ pub const NOTES_IN_PROMPT: usize = 2000;
 /// Past conversations searched by `recall`, newest first.
 const RECALL_CONVERSATIONS: usize = 500;
 const RECALL_HITS: usize = 5;
-const RELATED_HITS: usize = 3;
-/// Other conversations every new one starts with, the last few things said in each.
-const RECENT_CONVERSATIONS: usize = 8;
-const RECENT_LINES: usize = 4;
-const RECENT_CHARS: usize = 160;
-/// Related lines come with every message, so they are kept short.
-const RELATED_CHARS: usize = 300;
+/// What recall gives when no words match: the person's last lines in the latest few.
+const LATEST_CONVERSATIONS: usize = 3;
+const LATEST_LINES: usize = 4;
 const CHUNK_CHARS: usize = 600;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -146,25 +142,6 @@ impl Memory {
         self.all().into_iter().map(|c| Summary { id: c.id, title: c.title, updated: c.updated, folder: c.folder }).collect()
     }
 
-    /// What the person said in the latest other conversations, newest first: every new
-    /// conversation starts knowing it, with nothing for the person to copy into notes.
-    pub fn recent(&self, except: Option<&str>) -> String {
-        self.all()
-            .into_iter()
-            .filter(|c| Some(c.id.as_str()) != except && c.messages.iter().any(|m| m.role == "user"))
-            .take(RECENT_CONVERSATIONS)
-            .map(|c| {
-                let said: Vec<&Message> = c.messages.iter().filter(|m| m.role == "user").collect();
-                let lines: Vec<String> = said[said.len().saturating_sub(RECENT_LINES)..]
-                    .iter()
-                    .map(|m| format!("- {}", super::format::clip(&m.content.trim().replace('\n', " "), RECENT_CHARS)))
-                    .collect();
-                format!("[{} · {}]\n{}", c.title, day_of(c.updated), lines.join("\n"))
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
     pub fn notes(&self) -> String {
         std::fs::read_to_string(self.root.join("memory.md")).unwrap_or_default()
     }
@@ -237,15 +214,27 @@ impl Memory {
         kept.join("\n")
     }
 
-    /// The passages of past conversations (all but `except`) that best match `query`.
+    /// The passages of past conversations (all but `except`) that best match `query`;
+    /// when no words match ("what did I ask you earlier?"), what was said last.
     pub fn recall(&self, query: &str, except: Option<&str>) -> String {
-        self.hits(query, except, RECALL_HITS, CHUNK_CHARS).unwrap_or_else(|| "Nothing in past conversations matches.".to_string())
-    }
-
-    /// Past conversations' lines that share a word with `message`, for the agent to read
-    /// with it, so it recalls them even when the model would not think to search.
-    pub fn related(&self, message: &str, except: Option<&str>) -> Option<String> {
-        self.hits(message, except, RELATED_HITS, RELATED_CHARS)
+        if let Some(hits) = self.hits(query, except, RECALL_HITS, CHUNK_CHARS) {
+            return hits;
+        }
+        let latest: Vec<String> = self
+            .all()
+            .into_iter()
+            .filter(|c| Some(c.id.as_str()) != except)
+            .take(LATEST_CONVERSATIONS)
+            .map(|c| {
+                let said: Vec<String> = c.messages.iter().filter(|m| m.role == "user").map(|m| format!("- {}", super::format::clip(m.content.trim(), 160))).collect();
+                format!("[{} · {}]\n{}", c.title, day_of(c.updated), said[said.len().saturating_sub(LATEST_LINES)..].join("\n"))
+            })
+            .collect();
+        if latest.is_empty() {
+            "There are no past conversations.".to_string()
+        } else {
+            format!("No passage matches those words. The latest conversations, newest first:\n{}", latest.join("\n"))
+        }
     }
 
     fn hits(&self, query: &str, except: Option<&str>, k: usize, chars: usize) -> Option<String> {
@@ -390,19 +379,16 @@ mod tests {
         let hit = m.recall("vercel deploy", None);
         assert!(hit.starts_with("[Deploy · 2023-11-14]"), "{hit}");
         assert!(!hit.contains("Pasta"), "{hit}");
-        assert_eq!(m.recall("quantum chromodynamics", None), "Nothing in past conversations matches.");
+        assert!(m.recall("quantum chromodynamics", None).starts_with("No passage matches"));
         // The conversation asking is left out.
         assert!(!m.recall("vercel", Some("6553f100-00000000")).contains("Deploy"));
         assert_eq!(m.list().iter().map(|s| s.title.as_str()).collect::<Vec<_>>(), ["Pasta", "Deploy"]);
-        // A message comes with what it refers to, but not with lines that only share words
-        // like "what" or "you".
+        // A question finds what it refers to, not lines that only share words like "what".
         m.save(&conv("Calls", 1_700_200_000, &[("user", "remind me to call Ayush at 9pm"), ("assistant", "I cannot set reminders; noted it.")])).unwrap();
-        assert!(m.related("what did i remind you of?", None).is_some_and(|r| r.contains("Ayush")));
-        assert_eq!(m.related("what would you do", None), None);
-        // A new conversation starts with what was said in the others, newest first.
-        let recent = m.recent(Some("6553f100-00000000"));
-        assert!(recent.starts_with("[Calls · 2023-11-17]\n- remind me to call Ayush at 9pm\n[Pasta"), "{recent}");
-        assert!(!recent.contains("Deploy"), "{recent}");
+        assert!(m.recall("what did i remind you of?", None).contains("Ayush"));
+        // With no word to match, the latest conversations, newest first.
+        let latest = m.recall("what would you do", None);
+        assert!(latest.starts_with("No passage matches") && latest.find("[Calls").unwrap() < latest.find("[Pasta").unwrap(), "{latest}");
     }
 
     #[test]

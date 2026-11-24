@@ -210,13 +210,13 @@ const BASE_PROMPT: &str = "You are the assistant in Borrowed Compute, running on
 - For anything current or that you do not know (news, results, prices, weather, docs), call web_search, then fetch_url on the best result when the snippets are not enough. When search results are already there, answer from them. Say where the answer came from.\n\
 - Each message ends with the local time it was sent; use it for questions about the date and time.\n\
 - When the person tells you something to keep (a fact, a preference, a plan) or asks you to remember it, call remember.\n\
-- You remember the person's other conversations: the latest are listed below, and related lines may come with a message. They are background, which the person cannot see: never bring them up, quote or list them on your own. Use them only when the person asks about or refers to something from before; when it is not there, call recall.\n\
+- Call recall only when the person asks about something from another conversation. Never bring up past conversations on your own, and answer greetings and small talk directly.\n\
 - Never claim to have done something you did not do with a tool. To remind the person of something later, call remind; say the time its result gives.\n\
 - In a project: look with the tools before you change anything, make exact edits, and check your work by running it when you can. When done, say briefly what you did.\n\
 - Ask only when you cannot go on without an answer.";
 
 impl Agent {
-    fn system(&self, conversation: &str) -> String {
+    fn system(&self) -> String {
         let mut base = BASE_PROMPT.to_string();
         if let Some(root) = &self.tools.root {
             // The top of the folder comes with the prompt, so "what is in this" needs no
@@ -227,10 +227,6 @@ impl Agent {
                 root.display()
             ));
         }
-        let recent = self.memory.recent(Some(conversation));
-        if !recent.is_empty() {
-            base.push_str(&format!("\n\nWhat the person said in their latest other conversations, newest first (use recall to search all of them):\n{recent}"));
-        }
         let skills = self.memory.skills();
         if !skills.is_empty() {
             let list: String = skills.iter().map(|(n, d)| format!("\n- {n}: {d}")).collect();
@@ -238,7 +234,7 @@ impl Agent {
         }
         let notes = self.memory.notes_for_prompt();
         if !notes.is_empty() {
-            base.push_str(&format!("\n\nNotes from earlier conversations (use recall to search them in full):\n{notes}"));
+            base.push_str(&format!("\n\nNotes the person asked you to keep:\n{notes}"));
         }
         system_prompt(&base, &self.tools.specs())
     }
@@ -246,7 +242,7 @@ impl Agent {
     /// The tokens of a conversation as the model reads it, from its messages.
     fn render(&self, chat: &Chat, turns: &Turns) -> Vec<u32> {
         let tk = turns.tokenizer;
-        let mut ids = tk.encode(&turns.open(&self.system(&chat.conv.id)));
+        let mut ids = tk.encode(&turns.open(&self.system()));
         let mut results: Vec<(String, String)> = Vec::new();
         for m in &chat.conv.messages {
             if m.role == "tool" {
@@ -314,7 +310,7 @@ impl Agent {
         log.append(&RunEvent::Turn { at: memory::now(), text: text.to_string() });
         chat.conv.messages.push(Message { role: "user".into(), content: text.to_string(), name: None });
         chat.conv.updated = memory::now();
-        // shortcut: the time and related lines go to the model but not into the saved
+        // shortcut: the time goes to the model but not into the saved
         // message, so a re-render (reopening, trimming) drops them; store them if answers
         // need them later.
         let mut read = format!(
@@ -325,9 +321,6 @@ impl Agent {
         );
         if !cut.is_empty() {
             read.push_str(&format!("\n\n(The app stopped during your last answer while running: {}. It may or may not have finished; check before doing it again.)", cut.join("; ")));
-        }
-        if let Some(lines) = self.memory.related(text, Some(&chat.conv.id)) {
-            read.push_str(&format!("\n\n<earlier_conversations>\n{lines}\n</earlier_conversations>"));
         }
         chat.ids.extend(tk.encode_segment(&turns.user(&read)));
         chat.cache.stop_with(stop.clone());
@@ -952,7 +945,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("SKILL.md"), "---\nname: deploy\ndescription: Ship the website to production.\n---\nRun `vercel deploy --prod` inside website/.").unwrap();
         std::fs::write(dir.join("check.sh"), "echo ok").unwrap();
-        assert!(r.agent.system("c").contains("- deploy: Ship the website to production."));
+        assert!(r.agent.system().contains("- deploy: Ship the website to production."));
         let text = r.agent.tools.call("use_skill", &serde_json::json!({"name": "deploy"})).await.unwrap();
         assert!(text.contains("vercel deploy --prod") && text.contains("check.sh"), "{text}");
         assert!(r.agent.tools.call("use_skill", &serde_json::json!({"name": "../deploy"})).await.is_err());
@@ -1028,8 +1021,8 @@ mod tests {
     fn the_system_prompt_carries_the_notes_and_the_tools() {
         let r = agent(&["x"], Decision::Allow);
         r.agent.memory.remember("the owner likes short answers").unwrap();
-        let s = r.agent.system("c");
-        assert!(s.contains("Notes from earlier conversations") && s.contains("- the owner likes short answers"));
+        let s = r.agent.system();
+        assert!(s.contains("Notes the person asked you to keep") && s.contains("- the owner likes short answers"));
         assert!(s.contains("\"name\":\"edit_file\"") && s.contains("chose the project folder"));
     }
 }
