@@ -90,6 +90,25 @@ impl Brain for Llm {
 
 const ANSWER_SAMPLING: bc_infer::Sampling = bc_infer::Sampling { temperature: 0.7, top_p: 0.8, seed: 0, allow: None };
 
+/// The pages to open from `web_search`'s results: the top news and the top web result
+/// first, then alternating, one per site. A vague question ("the latest colima") then
+/// gets pages on its different meanings (a gas pipeline in the news, the container tool
+/// on the web) rather than two copies of one story.
+fn pages_to_open(results: &str, max: usize) -> Vec<String> {
+    let sections: Vec<Vec<&str>> = results.split("\n\n").map(|s| s.lines().map(str::trim).filter(|l| l.starts_with("https://")).collect()).collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut hosts = HashSet::new();
+    for i in 0..sections.iter().map(Vec::len).max().unwrap_or(0) {
+        for url in sections.iter().filter_map(|s| s.get(i)) {
+            let host = reqwest::Url::parse(url).ok().and_then(|u| u.host_str().map(|h| h.trim_start_matches("www.").to_string()));
+            if out.len() < max && host.is_some_and(|h| hosts.insert(h)) {
+                out.push(url.to_string());
+            }
+        }
+    }
+    out
+}
+
 /// The conversation a set of tools works for: the one whose run log records its calls.
 fn chat_id_of(tools: &Tools) -> String {
     tools.conversation.clone()
@@ -211,7 +230,7 @@ pub struct Agent {
 
 const BASE_PROMPT: &str = "You are the assistant in Borrowed Compute, running on the person's own devices.\n\
 - When a tool can answer or do what the person asks, call it at once. Do not describe what you could do, and do not ask which details they want when a sensible choice exists.\n\
-- For anything current or that you do not know (news, results, prices, weather, docs), call web_search, then fetch_url on the best result when the snippets are not enough. When search results are already there, answer from them and say where the answer came from. When they do not answer the question, say so; never make up facts.\n\
+- For anything current or that you do not know (news, results, prices, weather, docs), call web_search, then fetch_url on the best result when the snippets are not enough. When search results are already there, answer from them and say where the answer came from. When they do not answer the question, say so; never make up facts. When a short or vague question matches different things (a place, a product, a project of the same name), cover each briefly and ask which one they mean.\n\
 - A message about the date or time ends with the local time it was sent; use it.\n\
 - When the person tells you something to keep (a fact, a preference, a plan) or asks you to remember it, call remember.\n\
 - Call recall only when the person asks about something from another conversation. Never bring up past conversations on your own, and answer greetings and small talk directly.\n\
@@ -370,12 +389,9 @@ impl Agent {
         if route == Some(Route::Web) {
             let query = route::search_words(text);
             let found = self.harness_calls(chat, &turns, &mut made, vec![format::Call { name: "web_search".into(), arguments: serde_json::json!({ "query": query }) }]).await;
-            let pages: Vec<format::Call> = found
-                .lines()
-                .map(str::trim)
-                .filter(|l| l.starts_with("https://"))
-                // One page when the context is small, so the answer still has room.
-                .take(if brain.context() < SMALL_CONTEXT { 1 } else { PREFETCH_PAGES })
+            // One page when the context is small, so the answer still has room.
+            let pages: Vec<format::Call> = pages_to_open(&found, if brain.context() < SMALL_CONTEXT { 1 } else { PREFETCH_PAGES })
+                .into_iter()
                 .map(|url| format::Call { name: "fetch_url".into(), arguments: serde_json::json!({ "url": url }) })
                 .collect();
             if !pages.is_empty() && !stop.load(Ordering::Relaxed) {
@@ -1014,6 +1030,14 @@ mod tests {
         let mut chat = Chat::new(Conversation::new(None));
         r.agent.turn(&mut chat, "go", Settings::default(), Arc::default()).await.unwrap();
         assert!(chat.conv.messages[2].content.starts_with("Error: the arguments of list_dir are not an object"));
+    }
+
+    #[test]
+    fn pages_come_from_different_results() {
+        let found = "News:\n- Pipeline sold\n  https://www.msn.com/a\n  x\n- Pipeline sale\n  https://irei.com/b\n  y\n\nWeb:\n- Colima\n  https://colima.run/\n  z\n- Colima docs\n  https://colima.run/docs\n  w";
+        assert_eq!(pages_to_open(found, 2), ["https://www.msn.com/a", "https://colima.run/"]);
+        assert_eq!(pages_to_open(found, 3), ["https://www.msn.com/a", "https://colima.run/", "https://irei.com/b"]);
+        assert_eq!(pages_to_open("No results.", 2), Vec::<String>::new());
     }
 
     #[test]

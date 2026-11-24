@@ -117,7 +117,7 @@ pub fn search_words(text: &str) -> String {
     const ASKING: &[&str] = &[
         "can", "could", "would", "you", "please", "check", "search", "look", "up", "for", "find", "on", "the", "web", "internet", "online", "google", "me", "tell",
         "give", "show", "just", "a", "an", "of", "about", "what", "whats", "what's", "is", "are", "some", "read", "get", "how", "hows", "how's", "i", "do", "does",
-        "want", "know", "any", "there", "and",
+        "want", "know", "any", "there", "and", "right",
         // News results are today's already; the word only finds pages about dates.
         "today", "today's", "todays", "now", "currently",
     ];
