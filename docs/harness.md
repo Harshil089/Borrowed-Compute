@@ -75,6 +75,7 @@ MacBook Air, the model on this computer alone (2026-11-23):
 | Past-conversation and folder shortcuts, worked examples in the decision prompt | 17 of 20 (on), 18 of 20 (off) | |
 | Plus reading a small folder on the first message: decision step off | **20 of 20** | 393 s |
 | The same, decision step on | 18 of 20 | 614 s |
+| Sampled answers (temperature 0.7, top-p 0.8), the time only on messages about time, search results filtered to the topic | 18 of 20 twice (17 × 23 answered wrong once, a file answer missed once; greedy decoding repeated the last answer to "hmmm") | 143 s |
 
 The decision step picked "answer" for every message before it had worked examples, and
 afterwards added time without a pass the shortcuts missed, so it is off by default

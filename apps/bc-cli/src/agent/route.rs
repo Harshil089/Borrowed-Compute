@@ -110,18 +110,23 @@ pub fn web_query(text: &str) -> Option<String> {
     wants.then(|| search_words(text))
 }
 
-/// The question's own words, less the asking: what goes to the search.
+/// The question's own words, less the asking: what goes to the search. Bing's keyless
+/// results match words loosely, and "how", "latest" or "news" alone pull in news portals'
+/// front pages, so those go too, unless nothing else is left.
 pub fn search_words(text: &str) -> String {
     const ASKING: &[&str] = &[
         "can", "could", "would", "you", "please", "check", "search", "look", "up", "for", "find", "on", "the", "web", "internet", "online", "google", "me", "tell",
-        "give", "show", "just", "a", "an", "of", "about", "what", "whats", "is", "are", "some", "read", "get",
+        "give", "show", "just", "a", "an", "of", "about", "what", "whats", "what's", "is", "are", "some", "read", "get", "how", "hows", "how's", "i", "do", "does",
+        "want", "know", "any", "there", "and",
         // News results are today's already; the word only finds pages about dates.
         "today", "today's", "todays", "now", "currently",
     ];
-    let words: Vec<&str> = text
-        .split_whitespace()
-        .filter(|w| !ASKING.contains(&w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase().replace('’', "'").as_str()))
-        .collect();
+    let word = |w: &str| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase().replace('’', "'");
+    let mut words: Vec<&str> = text.split_whitespace().filter(|w| !ASKING.contains(&word(w).as_str())).collect();
+    let topic: Vec<&str> = words.iter().copied().filter(|w| !RECENT.contains(&word(w).as_str())).collect();
+    if !topic.is_empty() {
+        words = topic;
+    }
     let query = words.join(" ").trim_matches(|c: char| !c.is_alphanumeric()).to_string();
     if query.is_empty() {
         text.trim().to_string()
@@ -129,6 +134,18 @@ pub fn search_words(text: &str) -> String {
         query
     }
 }
+
+/// Whether a message is about the date or time, so the model needs the clock.
+pub fn asks_time(text: &str) -> bool {
+    const TIME: &[&str] = &[
+        "time", "date", "day", "today", "tonight", "tomorrow", "yesterday", "now", "week", "weekend", "month", "year", "clock", "when", "morning", "evening",
+        "afternoon", "hour", "hours", "minutes", "schedule", "remind", "deadline", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+    ];
+    text.to_lowercase().split(|c: char| !c.is_alphanumeric()).any(|w| TIME.contains(&w))
+}
+
+/// Words that ask for something recent rather than name it.
+pub const RECENT: &[&str] = &["latest", "recent", "news", "headlines", "update", "updates", "new"];
 
 /// A reminder the message asks for, when it says the time: (the message, what to remind).
 pub fn reminder_request(text: &str) -> Option<(String, String)> {
@@ -166,10 +183,13 @@ mod tests {
 
     #[test]
     fn asking_for_news_or_the_web_gives_a_search_of_the_question() {
-        assert_eq!(web_query("can you check for today’s cybersecurity news on the web").as_deref(), Some("cybersecurity news"));
-        assert_eq!(web_query("just give me the latest F1 grand prix results").as_deref(), Some("latest F1 grand prix results"));
-        assert_eq!(web_query("what's the weather in Pune?").as_deref(), Some("what's weather in Pune"));
+        assert_eq!(web_query("can you check for today’s cybersecurity news on the web").as_deref(), Some("cybersecurity"));
+        assert_eq!(web_query("just give me the latest F1 grand prix results").as_deref(), Some("F1 grand prix results"));
+        assert_eq!(web_query("how about the latest colima pipeline").as_deref(), Some("colima pipeline"));
+        assert_eq!(web_query("latest news?").as_deref(), Some("latest news"));
+        assert_eq!(web_query("what's the weather in Pune?").as_deref(), Some("weather in Pune"));
         assert_eq!(web_query("read the README and fix the build"), None);
+        assert!(asks_time("what day is it?") && asks_time("remind me at 9") && !asks_time("hmmm") && !asks_time("can you code?"));
         assert_eq!(web_query("search the project for TODO"), None);
     }
 }

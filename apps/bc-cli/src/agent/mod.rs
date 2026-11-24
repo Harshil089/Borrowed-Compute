@@ -73,8 +73,10 @@ impl Brain for Llm {
     }
 
     fn complete<'a>(&'a self, cache: &'a mut Cached, ids: &'a [u32], max: usize, on_text: &'a mut (dyn FnMut(&str) + Send)) -> BoxFuture<'a, Result<(Vec<u32>, Stats)>> {
-        // Greedy, so the draft model's guesses can be checked several at a time.
-        Box::pin(self.generate_cached(cache, ids, max, bc_infer::Sampling::default(), on_text))
+        // Sampled as Qwen advises for chat without thinking: greedy decoding lets a small
+        // model repeat its last answer word for word. It costs speculative decoding, which
+        // checks guesses only against greedy picks.
+        Box::pin(self.generate_cached(cache, ids, max, bc_infer::Sampling { seed: rand::random(), ..ANSWER_SAMPLING }, on_text))
     }
 
     fn choose<'a>(&'a self, cache: &'a mut Cached, ids: &'a [u32], range: [u32; 2]) -> BoxFuture<'a, Result<u32>> {
@@ -85,6 +87,8 @@ impl Brain for Llm {
         })
     }
 }
+
+const ANSWER_SAMPLING: bc_infer::Sampling = bc_infer::Sampling { temperature: 0.7, top_p: 0.8, seed: 0, allow: None };
 
 /// The conversation a set of tools works for: the one whose run log records its calls.
 fn chat_id_of(tools: &Tools) -> String {
@@ -207,8 +211,8 @@ pub struct Agent {
 
 const BASE_PROMPT: &str = "You are the assistant in Borrowed Compute, running on the person's own devices.\n\
 - When a tool can answer or do what the person asks, call it at once. Do not describe what you could do, and do not ask which details they want when a sensible choice exists.\n\
-- For anything current or that you do not know (news, results, prices, weather, docs), call web_search, then fetch_url on the best result when the snippets are not enough. When search results are already there, answer from them. Say where the answer came from.\n\
-- Each message ends with the local time it was sent; use it for questions about the date and time.\n\
+- For anything current or that you do not know (news, results, prices, weather, docs), call web_search, then fetch_url on the best result when the snippets are not enough. When search results are already there, answer from them and say where the answer came from. When they do not answer the question, say so; never make up facts.\n\
+- A message about the date or time ends with the local time it was sent; use it.\n\
 - When the person tells you something to keep (a fact, a preference, a plan) or asks you to remember it, call remember.\n\
 - Call recall only when the person asks about something from another conversation. Never bring up past conversations on your own, and answer greetings and small talk directly.\n\
 - Never claim to have done something you did not do with a tool. To remind the person of something later, call remind; say the time its result gives.\n\
@@ -310,15 +314,10 @@ impl Agent {
         log.append(&RunEvent::Turn { at: memory::now(), text: text.to_string() });
         chat.conv.messages.push(Message { role: "user".into(), content: text.to_string(), name: None });
         chat.conv.updated = memory::now();
-        // shortcut: the time goes to the model but not into the saved
-        // message, so a re-render (reopening, trimming) drops them; store them if answers
-        // need them later.
-        let mut read = format!(
-            "{text}\n\n(Sent {}; {} of the {} tokens of context used)",
-            chrono::Local::now().format("%A %Y-%m-%d %H:%M, local time"),
-            chat.ids.len(),
-            brain.context()
-        );
+        // The time goes to the model only when the message is about time: on every message
+        // it made short ones ("hmmm") nearly the same as the last, and a small model then
+        // repeated its last answer. Not saved, so a re-render (reopening, trimming) drops it.
+        let mut read = if route::asks_time(text) { format!("{text}\n\n(Sent {})", chrono::Local::now().format("%A %Y-%m-%d %H:%M, local time")) } else { text.to_string() };
         if !cut.is_empty() {
             read.push_str(&format!("\n\n(The app stopped during your last answer while running: {}. It may or may not have finished; check before doing it again.)", cut.join("; ")));
         }
