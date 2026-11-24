@@ -28,6 +28,7 @@ using namespace metal;
 #define DEVFN static inline
 #define BITS2F(b) as_type<float>((uint)(b))
 #define H2F(h) ((float)as_type<half>((ushort)(h)))
+#define F2H(x) as_type<ushort>((half)(x))
 #define F4(a, b, c, d) float4((a), (b), (c), (d))
 #define POPC(x) popcount(x)
 #define WSUM(v) simd_sum(v)
@@ -201,7 +202,7 @@ kernel void k_rms_norm(device const float* x [[buffer(0)]], device const float* 
 kernel void k_rope(device float* x [[buffer(0)]], device const float* f [[buffer(1)]], device const uint* positions [[buffer(2)]],
     constant uint& heads [[buffer(3)]], constant uint& hd [[buffer(4)]], constant uint& rd [[buffer(5)]], constant uint& neox [[buffer(6)]],
     constant uint& n [[buffer(7)]], I) { if (gi.x < n) rope(x, f, positions, heads, hd, rd, neox, gi.x); }
-kernel void k_attention(device const float* q [[buffer(0)]], device const float* kc [[buffer(1)]], device const float* vc [[buffer(2)]],
+kernel void k_attention(device const float* q [[buffer(0)]], device const ushort* kc [[buffer(1)]], device const ushort* vc [[buffer(2)]],
     device float* out [[buffer(3)]], device const uint* masks [[buffer(4)]], constant uint& tree [[buffer(5)]], constant uint& nh [[buffer(6)]],
     constant uint& nkv [[buffer(7)]], constant uint& hd [[buffer(8)]], constant uint& pos [[buffer(9)]], constant float& scale [[buffer(10)]], G) {
     threadgroup float sh[TILE];
@@ -212,7 +213,7 @@ kernel void k_attention(device const float* q [[buffer(0)]], device const float*
 // share the positions when scoring (four values a load) and take one dimension each when
 // summing values; the four SIMD groups' maxima and sums meet in threadgroup memory. The
 // head dimension must be a multiple of 4.
-kernel void k_attention_w(device const float* q [[buffer(0)]], device const float* kc [[buffer(1)]], device const float* vc [[buffer(2)]],
+kernel void k_attention_w(device const float* q [[buffer(0)]], device const half* kc [[buffer(1)]], device const half* vc [[buffer(2)]],
     device float* out [[buffer(3)]], device const uint* masks [[buffer(4)]], constant uint& tree [[buffer(5)]], constant uint& nh [[buffer(6)]],
     constant uint& nkv [[buffer(7)]], constant uint& hd [[buffer(8)]], constant uint& pos [[buffer(9)]], constant float& scale [[buffer(10)]],
     uint3 g [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
@@ -228,7 +229,7 @@ kernel void k_attention_w(device const float* q [[buffer(0)]], device const floa
         uint end = min(start + TILE, upto);
         float tmax = -INFINITY;
         for (uint p = start + t; p < end; p += 128u) {
-            device const packed_float4* kt = (device const packed_float4*)(kc + (ulong)SLOT(p) * kvd + kvh * hd);
+            device const packed_half4* kt = (device const packed_half4*)(kc + (ulong)SLOT(p) * kvd + kvh * hd);
             float4 s4 = float4(0.0f);
             for (uint d = 0; d < hd / 4u; d++) s4 += float4(qh[d]) * float4(kt[d]);
             float s = ((s4.x + s4.y) + (s4.z + s4.w)) * scale;
@@ -254,9 +255,9 @@ kernel void k_attention_w(device const float* q [[buffer(0)]], device const floa
         acc1 *= corr;
         if (t < hd) {
             for (uint p = start; p < end; p++) {
-                device const float* vt = vc + (ulong)SLOT(p) * kvd + kvh * hd;
-                acc0 += sh[p - start] * vt[t];
-                if (t + 128u < hd) acc1 += sh[p - start] * vt[t + 128u];
+                device const half* vt = vc + (ulong)SLOT(p) * kvd + kvh * hd;
+                acc0 += sh[p - start] * float(vt[t]);
+                if (t + 128u < hd) acc1 += sh[p - start] * float(vt[t + 128u]);
             }
         }
         m = mn;
@@ -266,6 +267,99 @@ kernel void k_attention_w(device const float* q [[buffer(0)]], device const floa
     device float* o = out + ((ulong)r * nh + h) * hd;
     if (t < hd) o[t] = acc0 / l;
     if (t + 128u < hd) o[t + 128u] = acc1 / l;
+}
+// Attention for a prompt: AR new rows of one head per thread group, so each key and
+// value read from the cache serves all of them, where k_attention_w reads the whole
+// cache again for every row (at 8k tokens of context, a 256-token chunk read the cache
+// 4,096 times a layer). The same tiles and online softmax as k_attention_w; a row's
+// positions past its own (causal) end score nothing. Not for trees.
+#define AR 4u
+kernel void k_attention_rows(device const float* q [[buffer(0)]], device const half* kc [[buffer(1)]], device const half* vc [[buffer(2)]],
+    device float* out [[buffer(3)]], constant uint& nh [[buffer(4)]], constant uint& nkv [[buffer(5)]], constant uint& hd [[buffer(6)]],
+    constant uint& pos [[buffer(7)]], constant float& scale [[buffer(8)]], constant uint& rows [[buffer(9)]],
+    uint3 g [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup float sh[AR][TILE];
+    threadgroup float red[AR][8];
+    uint h = g.x, r0 = g.y * AR, kvd = nkv * hd, kvh = h / (nh / nkv);
+    uint nr = min(AR, rows - r0);
+    uint upto_all = pos + r0 + nr;
+    device const packed_float4* qh[AR];
+    float m[AR], l[AR], acc0[AR], acc1[AR];
+    for (uint i = 0; i < AR; i++) {
+        qh[i] = (device const packed_float4*)(q + ((ulong)min(r0 + i, rows - 1u) * nh + h) * hd);
+        m[i] = -INFINITY;
+        l[i] = 0.0f;
+        acc0[i] = 0.0f;
+        acc1[i] = 0.0f;
+    }
+    for (uint start = 0; start < upto_all; start += TILE) {
+        uint end = min(start + TILE, upto_all);
+        float tmax[AR];
+        for (uint i = 0; i < AR; i++) tmax[i] = -INFINITY;
+        for (uint p = start + t; p < end; p += 128u) {
+            device const packed_half4* kt = (device const packed_half4*)(kc + (ulong)p * kvd + kvh * hd);
+            float4 s4[AR];
+            for (uint i = 0; i < AR; i++) s4[i] = float4(0.0f);
+            for (uint d = 0; d < hd / 4u; d++) {
+                float4 k4 = float4(kt[d]);
+                for (uint i = 0; i < AR; i++) s4[i] += float4(qh[i][d]) * k4;
+            }
+            for (uint i = 0; i < AR; i++) {
+                bool seen = i < nr && p < pos + r0 + i + 1u;
+                float s = seen ? ((s4[i].x + s4[i].y) + (s4[i].z + s4[i].w)) * scale : -INFINITY;
+                sh[i][p - start] = s;
+                tmax[i] = max(tmax[i], s);
+            }
+        }
+        for (uint i = 0; i < AR; i++) {
+            float tm = simd_max(tmax[i]);
+            if (lane == 0u) red[i][sg] = tm;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float mn[AR], corr[AR], part[AR];
+        for (uint i = 0; i < AR; i++) {
+            mn[i] = max(m[i], max(max(red[i][0], red[i][1]), max(red[i][2], red[i][3])));
+            corr[i] = mn[i] == -INFINITY ? 1.0f : precise::exp(m[i] - mn[i]);
+            part[i] = 0.0f;
+        }
+        for (uint p = start + t; p < end; p += 128u) {
+            for (uint i = 0; i < AR; i++) {
+                float s = sh[i][p - start];
+                float e = s == -INFINITY ? 0.0f : precise::exp(s - mn[i]);
+                sh[i][p - start] = e;
+                part[i] += e;
+            }
+        }
+        for (uint i = 0; i < AR; i++) {
+            float ps = simd_sum(part[i]);
+            if (lane == 0u) red[i][4u + sg] = ps;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint i = 0; i < AR; i++) {
+            l[i] = l[i] * corr[i] + ((red[i][4] + red[i][5]) + (red[i][6] + red[i][7]));
+            acc0[i] *= corr[i];
+            acc1[i] *= corr[i];
+        }
+        if (t < hd) {
+            for (uint p = start; p < end; p++) {
+                device const half* vt = vc + (ulong)p * kvd + kvh * hd;
+                float v0 = float(vt[t]);
+                float v1 = t + 128u < hd ? float(vt[t + 128u]) : 0.0f;
+                for (uint i = 0; i < AR; i++) {
+                    float e = sh[i][p - start];
+                    acc0[i] += e * v0;
+                    acc1[i] += e * v1;
+                }
+            }
+        }
+        for (uint i = 0; i < AR; i++) m[i] = mn[i];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    for (uint i = 0; i < nr; i++) {
+        device float* o = out + ((ulong)(r0 + i) * nh + h) * hd;
+        if (t < hd) o[t] = acc0[i] / l[i];
+        if (t + 128u < hd) o[t + 128u] = acc1[i] / l[i];
+    }
 }
 kernel void k_bias_add(device float* x [[buffer(0)]], device const float* b [[buffer(1)]], constant uint& n [[buffer(2)]],
     constant uint& dim [[buffer(3)]], I) { bias_add(x, b, n, dim, gi.x); }
@@ -300,6 +394,12 @@ kernel void k_move(device float* b [[buffer(0)]], constant uint& from [[buffer(1
     constant uint& n [[buffer(3)]], I) { move(b, from, to, n, gi.x); }
 kernel void k_copy(device const float* s [[buffer(0)]], device float* d [[buffer(1)]], constant uint& off [[buffer(2)]],
     constant uint& n [[buffer(3)]], I) { copy(s, d, off, n, gi.x); }
+kernel void k_copy_h(device const float* s [[buffer(0)]], device ushort* d [[buffer(1)]], constant uint& off [[buffer(2)]],
+    constant uint& n [[buffer(3)]], I) { copy_h(s, d, off, n, gi.x); }
+kernel void k_copy16(device const ushort* s [[buffer(0)]], device ushort* d [[buffer(1)]], constant uint& off [[buffer(2)]],
+    constant uint& n [[buffer(3)]], I) { copy16(s, d, off, n, gi.x); }
+kernel void k_move16(device ushort* b [[buffer(0)]], constant uint& from [[buffer(1)]], constant uint& to [[buffer(2)]],
+    constant uint& n [[buffer(3)]], I) { move16(b, from, to, n, gi.x); }
 "#;
 
 impl Backend {
@@ -311,7 +411,7 @@ impl Backend {
         let src = format!("{PRELUDE}{}{ENTRIES}", include_str!("kernels.h"));
         let lib = device.new_library_with_source(&src, &opts).map_err(|e| anyhow!("compiling the Metal kernels: {e}"))?;
         let mut kernels = HashMap::new();
-        for k in K::ALL.into_iter().chain([K::MatmulMm, K::Matvec, K::AttentionW]) {
+        for k in K::ALL.into_iter().chain([K::MatmulMm, K::Matvec, K::AttentionW, K::AttentionRows]) {
             let f = lib.get_function(k.name(), None).map_err(|e| anyhow!("{}: {e}", k.name()))?;
             let p = device.new_compute_pipeline_state_with_function(&f).map_err(|e| anyhow!("{}: {e}", k.name()))?;
             kernels.insert(k, p);

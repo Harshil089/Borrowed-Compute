@@ -211,7 +211,8 @@ pub fn resolve_model(name: &str) -> Result<(String, String, Option<String>)> {
 const MIN_CONTEXT: usize = 8192;
 
 /// Tokens of context the planned stages can hold: each device's memory left after its
-/// weights, over the key/value cache a token takes in its layers. The cache grows by a
+/// weights, over the key/value cache a token takes in its layers (f16 on a GPU, f32 on a
+/// CPU). The cache grows by a
 /// quarter at a time and the old one stays until copied, so a token needs 2.25 times
 /// its share at the moment of growing.
 fn context_room(spec: &Model, plan: &Plan, devices: &[&MeshDevice], kv_per_token_layer: u64) -> usize {
@@ -225,7 +226,9 @@ fn context_room(spec: &Model, plan: &Plan, devices: &[&MeshDevice], kv_per_token
             let layers = u64::from(st.layers.end - st.layers.start);
             let ends = (i == 0) as u64 + (i + 1 == p.stages.len()) as u64;
             let weights = spec.layer_bytes * layers + spec.extra_bytes / 2 * ends;
-            let per_token = (layers.max(1) * kv_per_token_layer * 9).div_ceil(4);
+            // The GPU keeps keys and values as f16, half the CPU's f32.
+            let kv = if r.device.gpu.is_some() { kv_per_token_layer / 2 } else { kv_per_token_layer };
+            let per_token = (layers.max(1) * kv * 9).div_ceil(4);
             room = room.min((mem.saturating_sub(weights) / per_token.max(1)) as usize);
         }
     }
@@ -449,9 +452,9 @@ mod tests {
         let (big, small) = (device("big", 8), device("small", 1));
         let whole = Plan { pipelines: vec![pipe(vec![stage(0, 0..28)])], unused: vec![] };
         let room = context_room(&spec, &whole, &[&big], kv);
-        // 85% of 8 GiB less the weights, over 28 layers × 8 KiB × 2.25.
+        // 85% of 8 GiB less the weights, over 28 layers × 4 KiB (f16 on the GPU) × 2.25.
         let free = (8u64 << 30) as f64 * MEMORY_SHARE - (spec.layer_bytes * 28 + spec.extra_bytes) as f64;
-        assert!((room as f64 - free / (28.0 * kv as f64 * 2.25)).abs() < 2.0, "{room}");
+        assert!((room as f64 - free / (28.0 * (kv / 2) as f64 * 2.25)).abs() < 2.0, "{room}");
         // Split, the device with less memory decides, for its own layers only.
         let split = Plan { pipelines: vec![pipe(vec![stage(0, 0..14), stage(1, 14..28)])], unused: vec![] };
         let small_room = context_room(&spec, &split, &[&big, &small], kv);

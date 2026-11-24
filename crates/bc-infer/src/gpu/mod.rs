@@ -46,6 +46,9 @@ const MV_ROWS: u32 = 16;
 /// Input rows per `k_matmul_mm` thread group (`BN`).
 const MM_BATCH: u32 = 16;
 
+/// Rows a thread group of `k_attention_rows` takes (its `AR`).
+const ATTENTION_ROWS: u32 = 4;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum K {
     Matmul,
@@ -58,11 +61,18 @@ pub enum K {
     Attention,
     /// Attention on 128 threads a head (Metal only).
     AttentionW,
+    /// A prompt's attention, several rows a thread group sharing cache reads (Metal only).
+    AttentionRows,
     BiasAdd,
     SiluMul,
     Add,
     Copy,
     Move,
+    /// Into the f16 key/value cache, narrowing.
+    CopyH,
+    /// Between f16 caches, and within one.
+    Copy16,
+    Move16,
     ConvSilu,
     L2Heads,
     Delta,
@@ -76,7 +86,7 @@ pub enum K {
 }
 
 impl K {
-    const ALL: [K; 19] = [
+    const ALL: [K; 22] = [
         K::Matmul,
         K::RmsNorm,
         K::Rope,
@@ -86,6 +96,9 @@ impl K {
         K::Add,
         K::Copy,
         K::Move,
+        K::CopyH,
+        K::Copy16,
+        K::Move16,
         K::ConvSilu,
         K::L2Heads,
         K::Delta,
@@ -107,11 +120,15 @@ impl K {
             K::Rope => "k_rope",
             K::Attention => "k_attention",
             K::AttentionW => "k_attention_w",
+            K::AttentionRows => "k_attention_rows",
             K::BiasAdd => "k_bias_add",
             K::SiluMul => "k_silu_mul",
             K::Add => "k_add",
             K::Copy => "k_copy",
             K::Move => "k_move",
+            K::CopyH => "k_copy_h",
+            K::Copy16 => "k_copy16",
+            K::Move16 => "k_move16",
             K::ConvSilu => "k_conv_silu",
             K::L2Heads => "k_l2_heads",
             K::Delta => "k_delta",
@@ -434,7 +451,7 @@ impl Cache {
             for (i, &r) in rows.iter().enumerate() {
                 if r as usize != i {
                     let (from, to) = (((base + r as usize) * self.kvd) as u32, ((base + i) * self.kvd) as u32);
-                    cmds.push(Cmd { k: K::Move, grid: (n.div_ceil(256), 1), threads: 256, args: vec![Arg::B(buf), Arg::U(from), Arg::U(to), Arg::U(n)] });
+                    cmds.push(Cmd { k: K::Move16, grid: (n.div_ceil(256), 1), threads: 256, args: vec![Arg::B(buf), Arg::U(from), Arg::U(to), Arg::U(n)] });
                 }
             }
         }
@@ -607,21 +624,22 @@ impl Layers {
         // keys and values next to 8k for qwen3-0.6b).
         let cap = need.max(c.cap + c.cap / 4).max(256).next_multiple_of(256).min(cfg.context.max(need));
         // DeltaNet layers keep no keys or values: a float each, never read.
-        let fresh = |i: usize| b.zeros(if matches!(self.layers[i].mix, Mix::Attn { .. }) { cap * kvd } else { 1 });
+        // f16 keys and values: two to a float of the allocation.
+        let fresh = |i: usize| b.zeros(if matches!(self.layers[i].mix, Mix::Attn { .. }) { (cap * kvd).div_ceil(2) } else { 1 });
         let (k, v): (Vec<Buf>, Vec<Buf>) = (0..self.layers.len()).map(|i| Ok((fresh(i)?, fresh(i)?))).collect::<Result<Vec<_>>>()?.into_iter().unzip();
         if keep > 0 && !c.k.is_empty() {
             let n = (keep * kvd) as u32;
             let mut cmds = Vec::new();
             for (i, (old, new)) in c.k.iter().zip(&k).chain(c.v.iter().zip(&v)).enumerate() {
                 if matches!(self.layers[i % self.layers.len()].mix, Mix::Attn { .. }) {
-                    cmds.push(Cmd { k: K::Copy, grid: (n.div_ceil(256), 1), threads: 256, args: vec![Arg::B(old), Arg::B(new), Arg::U(0), Arg::U(n)] });
+                    cmds.push(Cmd { k: K::Copy16, grid: (n.div_ceil(256), 1), threads: 256, args: vec![Arg::B(old), Arg::B(new), Arg::U(0), Arg::U(n)] });
                 }
             }
             self.gpu.run(&cmds)?;
         }
         let attn = self.layers.iter().filter(|l| matches!(l.mix, Mix::Attn { .. })).count();
         let state = std::mem::take(&mut c.state);
-        *c = Cache { gpu: self.gpu, kvd, bytes: attn * 2 * cap * kvd * 4 + state_bytes, k, v, state, cap };
+        *c = Cache { gpu: self.gpu, kvd, bytes: attn * 2 * cap * kvd * 2 + state_bytes, k, v, state, cap };
         Ok(())
     }
 
@@ -709,15 +727,25 @@ impl Layers {
                         });
                     }
                     for (src, dst) in [(bk, kc), (bv, vc)] {
-                        cmds.push(Cmd { k: K::Copy, grid: ew(rows * kvd), threads: 256, args: vec![Arg::B(src), Arg::B(dst), u(pos * kvd), u(rows * kvd)] });
+                        cmds.push(Cmd { k: K::CopyH, grid: ew(rows * kvd), threads: 256, args: vec![Arg::B(src), Arg::B(dst), u(pos * kvd), u(rows * kvd)] });
                     }
                     let wide = cfg!(target_os = "macos") && hd.is_multiple_of(4);
-                    cmds.push(Cmd {
-                        k: if wide { K::AttentionW } else { K::Attention },
-                        grid: (nh as u32, rows as u32),
-                        threads: if wide { 128 } else { 32 },
-                        args: vec![Arg::B(bq), Arg::B(kc), Arg::B(vc), Arg::B(ba), Arg::B(&bmask), u(tree), u(nh), u(nkv), u(hd), u(seen), Arg::F(1.0 / (hd as f32).sqrt())],
-                    });
+                    let scale = Arg::F(1.0 / (hd as f32).sqrt());
+                    if wide && tree == 0 && rows > 1 {
+                        cmds.push(Cmd {
+                            k: K::AttentionRows,
+                            grid: (nh as u32, (rows as u32).div_ceil(ATTENTION_ROWS)),
+                            threads: 128,
+                            args: vec![Arg::B(bq), Arg::B(kc), Arg::B(vc), Arg::B(ba), u(nh), u(nkv), u(hd), u(seen), scale, u(rows)],
+                        });
+                    } else {
+                        cmds.push(Cmd {
+                            k: if wide { K::AttentionW } else { K::Attention },
+                            grid: (nh as u32, rows as u32),
+                            threads: if wide { 128 } else { 32 },
+                            args: vec![Arg::B(bq), Arg::B(kc), Arg::B(vc), Arg::B(ba), Arg::B(&bmask), u(tree), u(nh), u(nkv), u(hd), u(seen), scale],
+                        });
+                    }
                     if *gated {
                         cmds.push(Cmd { k: K::SigmoidMul, grid: ew(rows * qd), threads: 256, args: vec![Arg::B(ba), Arg::B(&s.g), u(rows * qd)] });
                     }

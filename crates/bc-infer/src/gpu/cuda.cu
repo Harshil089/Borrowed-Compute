@@ -41,6 +41,12 @@ __device__ static inline float h2f(uint h) {
     return f;
 }
 #define H2F(h) h2f(h)
+__device__ static inline ushort f2h(float f) {
+    unsigned short s;
+    asm("cvt.rn.f16.f32 %0, %1;" : "=h"(s) : "f"(f));
+    return s;
+}
+#define F2H(x) f2h(x)
 #define POPC(x) __builtin_popcount(x)
 
 __device__ static inline float wsum(float v) {
@@ -80,7 +86,7 @@ extern "C" __global__ void k_matmul(const uchar* w, const float* x, float* out, 
 }
 extern "C" __global__ void k_rms_norm(const float* x, const float* w, float* out, uint cols, float eps) { rms_norm(x, w, out, cols, eps, BX, TX); }
 extern "C" __global__ void k_rope(float* x, const float* f, const uint* positions, uint heads, uint hd, uint rd, uint neox, uint n) { if (IX < n) rope(x, f, positions, heads, hd, rd, neox, IX); }
-extern "C" __global__ void k_attention(const float* q, const float* kc, const float* vc, float* out, const uint* masks, uint tree, uint nh, uint nkv, uint hd, uint pos, float scale) {
+extern "C" __global__ void k_attention(const float* q, const ushort* kc, const ushort* vc, float* out, const uint* masks, uint tree, uint nh, uint nkv, uint hd, uint pos, float scale) {
     __shared__ static float sh[TILE];
     attention(q, kc, vc, out, sh, masks, tree, nh, nkv, hd, pos, scale, BX, BY, TX);
 }
@@ -89,6 +95,9 @@ extern "C" __global__ void k_silu_mul(float* g, const float* u, uint n) { silu_m
 extern "C" __global__ void k_add(float* x, const float* y, uint n) { add(x, y, n, IX); }
 extern "C" __global__ void k_move(float* b, uint from, uint to, uint n) { move(b, from, to, n, IX); }
 extern "C" __global__ void k_copy(const float* s, float* d, uint off, uint n) { copy(s, d, off, n, IX); }
+extern "C" __global__ void k_copy_h(const float* s, ushort* d, uint off, uint n) { copy_h(s, d, off, n, IX); }
+extern "C" __global__ void k_copy16(const ushort* s, ushort* d, uint off, uint n) { copy16(s, d, off, n, IX); }
+extern "C" __global__ void k_move16(ushort* b, uint from, uint to, uint n) { move16(b, from, to, n, IX); }
 extern "C" __global__ void k_conv_silu(const float* in, uint iw, const float* w, uint taps, float* win, float* out, uint cd, uint rows) { conv_silu(in, iw, w, taps, win, out, cd, rows, IX); }
 extern "C" __global__ void k_l2_heads(float* x, uint stride, uint heads, uint hd, float eps) { l2_heads(x, stride, heads, hd, eps, BX, TX); }
 extern "C" __global__ void k_delta(const float* x, const float* ba, uint ba_w, const float* al, uint a_w, uint a_off, const float* dt, const float* a, float* state, uint soff,
