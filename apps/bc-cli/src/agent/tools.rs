@@ -476,19 +476,23 @@ async fn web_search(query: &str) -> Result<String> {
     if let (Err(e), Err(_)) = (&news, &web) {
         bail!("the search did not answer: {e:#}");
     }
-    let news = news.map(|x| search_results(&x, NEWS_RESULTS, true)).unwrap_or_default();
-    let web = web.map(|x| search_results(&x, WEB_RESULTS, false)).unwrap_or_default();
+    let news = news.map(|x| search_results(&x, query, NEWS_RESULTS, true)).unwrap_or_default();
+    let web = web.map(|x| search_results(&x, query, WEB_RESULTS, false)).unwrap_or_default();
     let mut out = Vec::new();
     for (head, items) in [("News", news), ("Web", web)] {
         if !items.is_empty() {
             out.push(format!("{head}:\n{}", items.join("\n")));
         }
     }
-    Ok(if out.is_empty() { "No results.".to_string() } else { out.join("\n\n") })
+    Ok(if out.is_empty() { format!("No results mention \"{}\". Say the search found nothing on it; do not guess.", query.trim()) } else { out.join("\n\n") })
 }
 
-/// The items of an RSS search page: title (with its date, for news), address, snippet.
-fn search_results(xml: &str, max: usize, dated: bool) -> Vec<String> {
+/// The items of an RSS search page that mention the query: title (with its date, for
+/// news), address, snippet. Bing fills a page it has little for with news portals' front
+/// pages, which a small model then reads and answers from as if they were on topic.
+fn search_results(xml: &str, query: &str, max: usize, dated: bool) -> Vec<String> {
+    let query = query.to_lowercase();
+    let topic: Vec<&str> = query.split(|c: char| !c.is_alphanumeric()).filter(|w| w.len() >= 3 && !super::route::RECENT.contains(w)).collect();
     let tag = |item: &str, name: &str| -> String {
         let open = format!("<{name}>");
         let start = item.find(&open).map(|i| i + open.len());
@@ -500,6 +504,10 @@ fn search_results(xml: &str, max: usize, dated: bool) -> Vec<String> {
     };
     xml.split("<item>")
         .skip(1)
+        .filter(|item| {
+            let item = html_text(&html_text(item)).to_lowercase();
+            topic.is_empty() || topic.iter().any(|w| item.contains(w))
+        })
         .take(max)
         .map(|item| {
             let link = tag(item, "link");
@@ -733,9 +741,12 @@ mod tests {
     #[test]
     fn search_results_read_rss_items() {
         let xml = "<rss><channel><title>Bing</title><item><title>Race &amp; result</title><link>http://www.bing.com/news/apiclick.aspx?ref=FexRss&amp;url=https%3a%2f%2fexample.com%2fa&amp;c=1</link><description>Winner &lt;b&gt;took&lt;/b&gt;\nit</description><pubDate>Mon, 23 Nov 2026 12:34:00 GMT</pubDate></item><item><title>Two</title><link>https://example.com/b</link></item></channel></rss>";
-        assert_eq!(search_results(xml, 5, true), ["- Race & result (Mon, 23 Nov 2026)\n  https://example.com/a\n  Winner took it", "- Two\n  https://example.com/b\n  "]);
-        assert_eq!(search_results(xml, 1, false), ["- Race & result\n  https://example.com/a\n  Winner took it"]);
-        assert!(search_results("<rss></rss>", 5, false).is_empty());
+        assert_eq!(search_results(xml, "", 5, true), ["- Race & result (Mon, 23 Nov 2026)\n  https://example.com/a\n  Winner took it", "- Two\n  https://example.com/b\n  "]);
+        assert_eq!(search_results(xml, "", 1, false), ["- Race & result\n  https://example.com/a\n  Winner took it"]);
+        assert!(search_results("<rss></rss>", "x", 5, false).is_empty());
+        // Results that do not mention the topic, like news portals' front pages, are left out.
+        assert_eq!(search_results(xml, "latest winner", 5, false).len(), 1);
+        assert!(search_results(xml, "colima", 5, false).is_empty());
     }
 
     #[test]

@@ -74,7 +74,8 @@ impl HttpBrain {
             "model": self.server.model,
             "prompt": prompt,
             "max_tokens": max_tokens,
-            "temperature": 0,
+            "temperature": 0.7,
+            "top_p": 0.8,
             "stream": stream,
             "stop": self.stops(),
             // llama.cpp's server keeps the prompt's cache only when asked.
