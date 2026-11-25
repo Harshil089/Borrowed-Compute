@@ -176,6 +176,25 @@ choice. The harness then makes the call itself (as `harness_calls` does now) and
 model writes the answer from the results. It costs one short constrained generation per
 message, on a prefix the stages already hold. The keyword rules stay as a fast path.
 
+### 5.2.1 The small-model pipeline
+
+A 0.6–2B model fails in ways a harness can prevent, so every message goes through the same
+stages, whatever the tool (`apps/bc-cli/src/agent/`). Each stage follows a published result.
+
+| Stage | Module | What it does | Why |
+|---|---|---|---|
+| 1. Understand | `route.rs`, `pick.rs` | Shortcuts first, when the message's own words say what to do: a reminder, the time somewhere, arithmetic, the web, a named site, "yes, search it", past conversations, the folder. Otherwise every tool, MCP tools included, is ranked against the message by BM25 over its name, description and example phrasings, and the model picks one of the top 3 or "answer directly", with decoding held to the digit tokens. | Fewer tools shown, better choices: TinyAgent's ToolRAG (arXiv 2409.00608), "Less is More" (arXiv 2411.15399). A held choice is always valid. |
+| 2. Act | `call.rs` | Arguments the message gives (search words, a site, a place, a sum) are filled in by code and the call runs as the harness's. Otherwise the harness writes the start of the call (`<tool_call>{"name": "…", "arguments": {`) and the model writes only the arguments. Every call, the model's own included, is checked against its tool's schema; a wrong one comes back naming the field. | Control flow in code, the model for judgment and wording: ReWOO (arXiv 2305.18323), LLMCompiler (arXiv 2312.04511), CAAF (arXiv 2604.17025). Constraining the format fixes form, not sense (arXiv 2609.23742), so the field-level error is what lets the model correct it. |
+| 3. Evidence | `facts.rs`, `tools.rs`, `mod.rs` | Exact answers by code (`clock` from the timezone database, `calculate`). Pages come back as the 6 passages that match the question (BM25 over blocks), not their first 4,000 characters. The question is recited after the results. At most 3 searches a turn, and none sharing most of its words with an earlier one. | Shorter, relevant context; recitation keeps attention on the goal (Manus, "Context engineering for AI agents"). |
+| 4. Verify | `check.rs` | Before the person sees an answer, code checks it against this turn's results from the run log: denying tools it has, promising a lookup without making it, claiming a search or a read that did not happen, numbers that appear in no result, saying nothing was found when something was, repeating the last answer, an empty answer. A denied or promised lookup is made by the harness; otherwise the model hears the exact problem and answers again, up to twice. Still wrong, the answer is kept with a line saying what is unconfirmed. | Deterministic checks against tool receipts (arXiv 2603.10060), not the model judging itself. A retry with a typed reason (Reflexion, with a concrete signal). |
+| 5. Escalate | `Agent::fallback` | When the answer still fails and a model server is set while a Mesh model answers, the server's model writes the answer from the conversation. | A cascade: small first, big only when needed (FrugalGPT, arXiv 2305.05176). |
+
+`bc agent eval` measures it: about 50 cases (`docs/agent-evals/cases.json`) across chat,
+follow-ups (`before`), facts, the web, a named site, the folder, past conversations,
+reminders and notes, with `expect_not` for refusals and `max_calls` for loops. Each failure
+is sorted by kind (format, loop, refusal, ungrounded, wrong tool, wrong answer), and the run
+reports how many answers a check sent back and that then passed.
+
 ### 5.3 Model gateway
 
 - `Brain` stays the interface. Add an OpenAI-compatible HTTP brain (Ollama, LM Studio,

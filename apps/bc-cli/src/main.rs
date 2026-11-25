@@ -473,13 +473,26 @@ async fn agent(action: AgentAction) -> Result<()> {
             drop(session);
             eprintln!("({:.0} s)", started.elapsed().as_secs_f64());
             for o in &out {
-                println!("{} {}  [{}{}]", if o.pass { "pass" } else { "FAIL" }, o.message, o.route, if o.tools.is_empty() { String::new() } else { format!("; {}", o.tools.join(", ")) });
+                let checks = if o.checks.is_empty() { String::new() } else { format!("; checks: {}", o.checks.join(", ")) };
+                println!("{} {}  [{}{}{checks}]", if o.pass { "pass" } else { "FAIL" }, o.message, o.route, if o.tools.is_empty() { String::new() } else { format!("; {}", o.tools.join(", ")) });
                 for m in &o.misses {
-                    println!("       {m}");
+                    println!("       {m} ({})", o.kind);
                 }
             }
             let passed = out.iter().filter(|o| o.pass).count();
             println!("\n{passed} of {} passed", out.len());
+            let mut kinds: Vec<(String, usize)> = Vec::new();
+            for o in out.iter().filter(|o| !o.pass) {
+                match kinds.iter_mut().find(|(k, _)| *k == o.kind) {
+                    Some(k) => k.1 += 1,
+                    None => kinds.push((o.kind.clone(), 1)),
+                }
+            }
+            if !kinds.is_empty() {
+                println!("failures: {}", kinds.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", "));
+            }
+            let fixed = out.iter().filter(|o| o.pass && !o.checks.is_empty()).count();
+            println!("answers a check sent back and that then passed: {fixed}");
         }
     }
     Ok(())

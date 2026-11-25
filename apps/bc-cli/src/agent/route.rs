@@ -1,82 +1,76 @@
-//! What the harness does before the model answers, so a model too small to decide on a
-//! tool still answers from real results. Two fast paths read the message itself (a
-//! reminder with a time; news or anything on the web). Otherwise a decision step asks
-//! the model to pick one numbered action, with decoding held to those digits
-//! (`Sampling::allow`): even a model that never writes a tool call picks a valid one.
-
-use bc_infer::Tokenizer;
-use bc_mesh::llm::Cached;
-
-use super::format::Turns;
-use super::Brain;
+//! Shortcuts: what the harness does before the model answers when the message's own words
+//! say it (a reminder with a time, the time somewhere, arithmetic, the web or a named
+//! site, "yes, search it", past conversations, the folder), so a model too small to
+//! choose a tool still answers from real results. Messages no shortcut matches go to
+//! `pick`, which lets the model choose among the tools that fit.
 
 /// What to do first for a message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route {
-    Answer,
     Web,
     Files,
     Past,
+    /// The time somewhere or arithmetic, worked out by code (`facts`).
+    Fact,
 }
 
 impl Route {
     pub fn name(self) -> &'static str {
         match self {
-            Route::Answer => "answer",
             Route::Web => "web",
             Route::Files => "files",
             Route::Past => "past conversations",
-        }
-    }
-
-    fn option(self) -> &'static str {
-        match self {
-            Route::Answer => "Answer directly: greetings, chat, writing, maths, code questions, explanations, anything you already know.",
-            Route::Web => "Search the web: news, current events, prices, weather, sports, people, anything recent or that you may not know.",
-            Route::Files => "Look in the chosen project folder: its files or code.",
-            Route::Past => "Search past conversations: the person refers to something said before that is not in this conversation.",
+            Route::Fact => "fact",
         }
     }
 }
 
-/// Asks the model which of `options` fits `text` best, by the one digit it may write.
-/// Gives `Answer` when the vocabulary has no run of digit tokens to hold it to, or when
-/// a device from before `Sampling::allow` wrote something else.
-pub async fn decide(brain: &dyn Brain, cache: &mut Cached, text: &str, options: &[Route]) -> Route {
-    let tk = brain.tokenizer();
-    let Some(range) = digits(tk, options.len()) else { return Route::Answer };
-    let list: String = options.iter().enumerate().map(|(i, r)| format!("{}. {}\n", i + 1, r.option())).collect();
-    // Worked examples keep a small model from answering 1 to everything.
-    let examples: String = EXAMPLES
+/// The place whose time the message asks for ("" for here), when it asks for one.
+pub fn clock_request(text: &str) -> Option<String> {
+    let lower = text.to_lowercase().replace('’', "'");
+    let asks = ["time in", "time is it", "what time", "what's the time", "whats the time", "the time there", "time now", "current time", "local time", "time at", "time right now"]
         .iter()
-        .filter_map(|(message, route)| options.iter().position(|o| o == route).map(|i| format!("\"{message}\" -> {}\n", i + 1)))
-        .collect();
-    let system = format!("Pick what to do first for the person's message. Reply with the number only.\n{list}\nExamples:\n{examples}");
-    let turns = Turns { tokenizer: tk, think: false };
-    let mut ids = tk.encode(&turns.open(&system));
-    ids.extend(tk.encode_segment(&turns.user(&super::format::clip(text, 2000))));
-    match brain.choose(cache, &ids, range).await {
-        Ok(id) if (range[0]..range[1]).contains(&id) => options[(id - range[0]) as usize],
-        _ => Route::Answer,
+        .any(|p| lower.contains(p));
+    if !asks {
+        return None;
     }
+    Some(super::facts::place_in(text).map(|(name, _)| name).unwrap_or_default())
 }
 
-const EXAMPLES: &[(&str, Route)] = &[
-    ("hello", Route::Answer),
-    ("who is the prime minister of Japan now?", Route::Web),
-    ("what does the main function do?", Route::Files),
-    ("write a short poem about the sea", Route::Answer),
-    ("what was the name of the hotel I told you about?", Route::Past),
-    ("how much does an iPhone 17 cost?", Route::Web),
-    ("summarize the readme", Route::Files),
-    ("what is 12 squared?", Route::Answer),
-];
+/// The arithmetic a message asks to work out, when it does.
+pub fn sum_request(text: &str) -> Option<String> {
+    let expr = super::facts::expression(text)?;
+    let lower = text.to_lowercase();
+    // A bare "9-10" is a range or a date as often as a sum.
+    let asked = expr.contains(['*', '/', '^', '+']) || ["calculate", "what is", "what's", "whats", "how much is", "="].iter().any(|p| lower.contains(p));
+    (asked && super::facts::calculate(&expr).is_ok()).then_some(expr)
+}
 
-/// The token ids of "1" to "n", when they run consecutively, as byte-level vocabularies
-/// (Qwen, Llama 3) have them.
-fn digits(tk: &Tokenizer, n: usize) -> Option<[u32; 2]> {
-    let first = tk.token_id("1")?;
-    (1..n).all(|i| tk.token_id(&(i + 1).to_string()) == Some(first + i as u32)).then_some([first, first + n as u32])
+/// A web address named in the message ("tryzenith.cloud"), opened directly: a search
+/// engine knows little about a new site, but the site knows itself.
+pub fn domain_in(text: &str) -> Option<String> {
+    const ENDINGS: &[&str] = &[
+        "com", "org", "net", "io", "ai", "dev", "app", "cloud", "co", "in", "uk", "xyz", "me", "so", "sh", "tech", "site", "info", "gg", "tv", "us", "de", "fr", "jp",
+        "edu", "gov", "eu", "ca", "au", "page", "run", "tools", "studio", "online", "store", "blog",
+    ];
+    text.split_whitespace().find_map(|w| {
+        let w = w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+        let w = w.strip_prefix("https://").or(w.strip_prefix("http://")).unwrap_or(&w).trim_start_matches("www.").split('/').next()?.to_string();
+        let (name, end) = w.rsplit_once('.')?;
+        let ok = ENDINGS.contains(&end) && !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.') && !name.starts_with(['-', '.']);
+        ok.then_some(w)
+    })
+}
+
+/// Whether a short reply says yes to what the model offered last, and the offer was to
+/// look something up: "yea so do it" after "I would need to search the web".
+pub fn accepts_search(text: &str, last_answer: &str) -> bool {
+    let lower = text.to_lowercase();
+    let words: Vec<&str> = lower.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    let yes = words.len() <= 6
+        && words.iter().any(|w| ["yes", "yea", "yeah", "yep", "sure", "ok", "okay", "go", "do", "please", "search", "proceed"].contains(w));
+    let offered = ["search", "look it up", "look up", "web", "browse", "find out"].iter().any(|p| last_answer.to_lowercase().contains(p));
+    yes && offered
 }
 
 /// Whether the message points back at something said in another conversation.
@@ -189,6 +183,18 @@ mod tests {
         assert_eq!(web_query("latest news?").as_deref(), Some("latest news"));
         assert_eq!(web_query("what's the weather in Pune?").as_deref(), Some("weather in Pune"));
         assert_eq!(web_query("read the README and fix the build"), None);
+        assert_eq!(clock_request("whats the time in england").as_deref(), Some("england"));
+        assert_eq!(clock_request("what time is it?").as_deref(), Some(""));
+        assert_eq!(clock_request("how much time does rice take in india"), None);
+        assert_eq!(sum_request("what is 17 times 23?").as_deref(), Some("17 * 23"));
+        assert_eq!(sum_request("call me at 9-10"), None);
+        assert_eq!(sum_request("the 2026 world cup"), None);
+        assert_eq!(domain_in("what do you know about tryzenith.cloud").as_deref(), Some("tryzenith.cloud"));
+        assert_eq!(domain_in("open https://www.example.com/a?b"), Some("example.com".into()));
+        assert_eq!(domain_in("summarize notes.txt"), None);
+        assert!(accepts_search("Yea so do it", "To give you accurate information, I would need to call a web search."));
+        assert!(!accepts_search("yes", "Hello! How can I help?"));
+        assert!(!accepts_search("do you think search engines are good for privacy and the world", "I can search the web."));
         assert!(asks_time("what day is it?") && asks_time("remind me at 9") && !asks_time("hmmm") && !asks_time("can you code?"));
         assert_eq!(web_query("search the project for TODO"), None);
     }

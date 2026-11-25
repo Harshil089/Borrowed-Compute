@@ -25,6 +25,8 @@ pub enum RunEvent {
     /// Older messages were replaced by this summary to fit the context.
     Compacted { at: u64, messages: usize, summary: String },
     Ended { at: u64, reason: String },
+    /// An answer failed a check (`check`); `again` when it was written again.
+    Check { at: u64, problem: String, again: bool },
 }
 
 pub struct RunLog {
@@ -34,6 +36,26 @@ pub struct RunLog {
 impl RunLog {
     pub fn at(home: &Path, conversation: &str) -> Self {
         RunLog { file: home.join("runs").join(format!("{conversation}.jsonl")) }
+    }
+
+    /// The calls of the latest turn that finished, by tool name, with their results: what
+    /// an answer is checked against (`check`). From the log, not the messages, so trimming
+    /// the context to fit changes nothing here.
+    pub fn this_turn(&self) -> Vec<(String, String)> {
+        let events = self.read();
+        let start = events.iter().rposition(|e| matches!(e, RunEvent::Turn { .. })).map_or(0, |i| i + 1);
+        let mut names = std::collections::HashMap::new();
+        let mut out = Vec::new();
+        for e in &events[start..] {
+            match e {
+                RunEvent::Started { call, name, .. } => {
+                    names.insert(call.clone(), name.clone());
+                }
+                RunEvent::Finished { call, text, .. } => out.push((names.get(call).cloned().unwrap_or_default(), text.clone())),
+                _ => {}
+            }
+        }
+        out
     }
 
     /// Where this conversation's large outputs go.
@@ -116,6 +138,7 @@ pub fn describe(events: &[RunEvent]) -> String {
             RunEvent::Finished { ok, text, .. } => format!("    {} {}", if *ok { "->" } else { "-> failed:" }, clip(text, 200)),
             RunEvent::Compacted { messages, summary, .. } => format!("  compacted {messages} older messages: {}", clip(summary, 300)),
             RunEvent::Ended { reason, .. } => format!("  ended: {reason}"),
+            RunEvent::Check { problem, again, .. } => format!("  check: {problem}{}", if *again { ", answering again" } else { ", kept with a note" }),
         })
         .collect::<Vec<_>>()
         .join("\n")

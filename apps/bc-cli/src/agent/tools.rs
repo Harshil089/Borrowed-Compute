@@ -26,6 +26,9 @@ const SEARCH_HITS: usize = 50;
 const NEWS_RESULTS: usize = 5;
 const WEB_RESULTS: usize = 5;
 const FETCH_BYTES: usize = 1 << 20;
+/// A focused page read: this many passages of about this many characters.
+const PASSAGES: usize = 6;
+const PASSAGE_CHARS: usize = 500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -124,8 +127,15 @@ impl Tools {
             json!({ "id": p("The artifact's id, as the clipped output names it."), "offset": { "type": "integer", "description": "First line to read, from 1." } }),
             &["id"],
         ));
+        out.push(spec("clock", "The exact time now in a city or country, from the timezone database. Use it for any question about the time somewhere.", json!({ "place": p("A city or country, such as London or Japan. Empty: here.") }), &[]));
+        out.push(spec("calculate", "Work out arithmetic exactly: + - * / ^, brackets, percentages.", json!({ "expression": p("Such as (17 * 23) + 4 or 15% of 240.") }), &["expression"]));
         out.push(spec("web_search", "Search the web. Gives titles, addresses and snippets of the top results; read one in full with fetch_url.", json!({ "query": p("What to search for.") }), &["query"]));
-        out.push(spec("fetch_url", "Read a web page (https) as text.", json!({ "url": p("The https address.") }), &["url"]));
+        out.push(spec(
+            "fetch_url",
+            "Read a web page (https) as text. With focus, only the passages about it.",
+            json!({ "url": p("The https address."), "focus": p("What you are looking for on the page (optional).") }),
+            &["url"],
+        ));
         out.push(spec("recall", "Search the past conversations for something said before.", json!({ "query": p("Words to look for.") }), &["query"]));
         out.push(spec(
             "remind",
@@ -234,7 +244,15 @@ impl Tools {
                 // Long output is kept whole as an artifact by the agent, which clips it.
                 Ok(format!("Exit code {code}.\n{out}"))
             }
-            "fetch_url" => fetch(&need("url")?).await,
+            "fetch_url" => {
+                let page = fetch(&need("url")?).await?;
+                Ok(match s("focus").filter(|f| !f.trim().is_empty()) {
+                    Some(f) => passages(&page, &f),
+                    None => page,
+                })
+            }
+            "clock" => super::facts::clock(&s("place").unwrap_or_default(), chrono::Utc::now()),
+            "calculate" => super::facts::calculate(&need("expression")?),
             "web_search" => web_search(&need("query")?).await,
             "read_artifact" => self.read_artifact(&need("id")?, num("offset").unwrap_or(1), READ_LINES),
             "recall" => Ok(self.memory.recall(&need("query")?, Some(&self.conversation))),
@@ -380,6 +398,35 @@ fn numbered(text: &str, name: &str, offset: usize, limit: usize) -> String {
     out
 }
 
+/// The passages of a page that match `focus` best (BM25 over blocks of lines), in page
+/// order. A small model given a whole page answers from its first lines, which on most
+/// sites are menus and lists; given these, it answers from what the question is about.
+fn passages(page: &str, focus: &str) -> String {
+    let mut blocks: Vec<String> = Vec::new();
+    let mut block = String::new();
+    for line in page.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if !block.is_empty() && block.len() + line.len() > PASSAGE_CHARS {
+            blocks.push(std::mem::take(&mut block));
+        }
+        block.push_str(line);
+        block.push('\n');
+    }
+    if !block.is_empty() {
+        blocks.push(block);
+    }
+    if blocks.len() <= PASSAGES {
+        return page.to_string();
+    }
+    let docs: Vec<Vec<String>> = blocks.iter().map(|b| super::memory::words(b)).collect();
+    let mut best = super::memory::bm25(&super::memory::words(focus), &docs, PASSAGES);
+    if best.is_empty() {
+        return page.to_string();
+    }
+    best.sort();
+    let title = blocks[0].lines().next().unwrap_or("");
+    format!("{title}\n[The {} passages of this page about \"{}\", in page order]\n\n{}", best.len(), focus.trim(), best.iter().map(|&i| blocks[i].trim()).collect::<Vec<_>>().join("\n…\n"))
+}
+
 /// A web page as text: https only, at most 1 MB read.
 async fn fetch(url: &str) -> Result<String> {
     let parsed = reqwest::Url::parse(url.trim()).context("not a web address")?;
@@ -506,7 +553,9 @@ fn search_results(xml: &str, query: &str, max: usize, dated: bool) -> Vec<String
         .skip(1)
         .filter(|item| {
             let item = html_text(&html_text(item)).to_lowercase();
-            topic.is_empty() || topic.iter().any(|w| item.contains(w))
+            // Most of the topic's words, not one: "time england wednesday" otherwise keeps
+            // every page with "time" in it.
+            topic.is_empty() || topic.iter().filter(|w| item.contains(*w)).count() * 2 >= topic.len()
         })
         .take(max)
         .map(|item| {
@@ -685,7 +734,7 @@ mod tests {
         // Without a runner there is no `run`, and without a folder no file tools.
         assert!(!t.specs().iter().any(|s| s.name == "run"));
         let bare = Tools::new(None, Memory::at(dir.path()), "c".into(), None, Vec::new()).unwrap();
-        assert_eq!(bare.specs().iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["read_artifact", "web_search", "fetch_url", "recall", "remind", "remember", "task"]);
+        assert_eq!(bare.specs().iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["read_artifact", "clock", "calculate", "web_search", "fetch_url", "recall", "remind", "remember", "task"]);
         assert!(bare.call("read_file", &json!({"path": "b.txt"})).await.is_err());
     }
 
@@ -744,6 +793,10 @@ mod tests {
         assert_eq!(search_results(xml, "", 5, true), ["- Race & result (Mon, 23 Nov 2026)\n  https://example.com/a\n  Winner took it", "- Two\n  https://example.com/b\n  "]);
         assert_eq!(search_results(xml, "", 1, false), ["- Race & result\n  https://example.com/a\n  Winner took it"]);
         assert!(search_results("<rss></rss>", "x", 5, false).is_empty());
+        let page = format!("Site title\n{}\nThe price of bitcoin today is 60,000 dollars.\n{}", "Menu item\n".repeat(400), "Footer link\n".repeat(400));
+        let out = passages(&page, "bitcoin price");
+        assert!(out.starts_with("Site title\n[The ") && out.contains("60,000") && out.len() < 4000, "{out}");
+        assert_eq!(passages("short page", "x"), "short page");
         // Results that do not mention the topic, like news portals' front pages, are left out.
         assert_eq!(search_results(xml, "latest winner", 5, false).len(), 1);
         assert!(search_results(xml, "colima", 5, false).is_empty());

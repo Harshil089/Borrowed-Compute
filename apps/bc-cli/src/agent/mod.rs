@@ -8,12 +8,16 @@
 //! sends only the tool results and the start of the next answer, not the history again.
 //! Calls in one answer run at the same time.
 
+pub mod call;
+pub mod check;
 pub mod eval;
+pub mod facts;
 pub mod format;
 pub mod http;
 pub mod log;
 pub mod mcp;
 pub mod memory;
+pub mod pick;
 pub mod remind;
 pub mod route;
 pub mod tools;
@@ -130,7 +134,33 @@ const PREFETCH_PAGES: usize = 2;
 const SMALL_CONTEXT: usize = 8192;
 
 fn call_key(c: &format::Call) -> String {
+    if c.name == "web_search" {
+        let mut words = memory::words(c.arguments.get("query").and_then(Value::as_str).unwrap_or(""));
+        words.sort();
+        words.dedup();
+        return format!("web_search {}", words.join(" "));
+    }
     format!("{} {}", c.name, c.arguments)
+}
+
+/// Answers a turn may write again after a check (`check`) found a problem.
+const MAX_CHECKS: usize = 2;
+
+/// Searches a turn may make, the harness's included: a small model that finds nothing
+/// otherwise searches again and again with the same words reshuffled.
+const MAX_SEARCHES: usize = 3;
+
+/// Whether a search (its `call_key`) adds nothing: the turn's searches are used up, or
+/// an earlier one had nearly the same words (most of them shared, or one inside the other).
+fn search_again(made: &HashSet<String>, key: &str) -> bool {
+    let Some(q) = key.strip_prefix("web_search ") else { return false };
+    let new: HashSet<&str> = q.split(' ').filter(|w| !w.is_empty()).collect();
+    let earlier: Vec<HashSet<&str>> = made.iter().filter_map(|k| k.strip_prefix("web_search ")).map(|q| q.split(' ').filter(|w| !w.is_empty()).collect()).collect();
+    earlier.len() >= MAX_SEARCHES
+        || earlier.iter().any(|e| {
+            let shared = e.intersection(&new).count();
+            shared * 5 >= e.union(&new).count() * 3 || e.is_subset(&new) || new.is_subset(e)
+        })
 }
 
 /// What the person decided about a call.
@@ -175,6 +205,8 @@ pub enum Event {
     Result { id: String, name: String, ok: bool, text: String },
     Done { steps: usize, prompt_tokens: usize, cached_tokens: usize, generated: usize, tokens_per_s: f64, context_used: usize, context: usize },
     Error { message: String },
+    /// The answer just written failed a check and is being written again; drop its text.
+    Retry { reason: String },
 }
 
 pub type Events = Arc<dyn Fn(Event) + Send + Sync>;
@@ -249,6 +281,10 @@ impl Chat {
 
 pub struct Agent {
     pub brain: Arc<dyn Brain>,
+    /// A bigger model to ask when `brain`'s answer still fails its checks (a cascade, as in
+    /// FrugalGPT: the small model first, the big one only when needed). The desktop app
+    /// sets the model server here while a Mesh model runs.
+    pub fallback: Option<Arc<dyn Brain>>,
     pub tools: Tools,
     pub memory: Memory,
     pub events: Events,
@@ -257,6 +293,8 @@ pub struct Agent {
 
 const BASE_PROMPT: &str = "You are the assistant in Borrowed Compute, running on the person's own devices.\n\
 - When a tool can answer or do what the person asks, call it at once. Do not describe what you could do, and do not ask which details they want when a sensible choice exists.\n\
+- You can search the web and read pages with your tools: never say you cannot browse or access the web. When you say you will look something up, call the tool in that same answer.\n\
+- For the time anywhere call clock, and for arithmetic call calculate: never guess either.\n\
 - For anything current or that you do not know (news, results, prices, weather, docs), call web_search, then fetch_url on the best result when the snippets are not enough. When search results are already there, answer from them and say where the answer came from. When they do not answer the question, say so; never make up facts. When a short or vague question matches different things (a place, a product, a project of the same name), cover each briefly and ask which one they mean.\n\
 - A message about the date or time ends with the local time it was sent; use it.\n\
 - When the person tells you something to keep (a fact, a preference, a plan) or asks you to remember it, call remember.\n\
@@ -378,10 +416,24 @@ impl Agent {
         // so a model that would not call web_search still answers from real results.
         // Likewise a reminder asked for with a time: set, whatever the model would do.
         let has_web = self.tools.specs().iter().any(|t| t.name == "web_search");
+        // What the model said and the person asked before this message, for "yes, do it".
+        let before: Vec<&Message> = chat.conv.messages.iter().rev().skip(1).collect();
+        let last_answer = before.iter().find(|m| m.role == "assistant").map(|m| format::parse(&m.content).text).unwrap_or_default();
+        let last_ask = before.iter().find(|m| m.role == "user").map(|m| m.content.clone()).unwrap_or_default();
+        let follow_up = has_web && !last_ask.is_empty() && route::accepts_search(text, &last_answer);
+        // The question the harness's results answer: the earlier one when this message only
+        // says yes to looking it up.
+        let question = if follow_up { last_ask } else { text.to_string() };
         let route = if let Some((when, what)) = route::reminder_request(text) {
-            self.harness_calls(chat, &turns, &mut made, vec![format::Call { name: "remind".into(), arguments: serde_json::json!({ "when": when, "text": what }) }]).await;
+            self.harness_calls(chat, &turns, &mut made, vec![format::Call { name: "remind".into(), arguments: serde_json::json!({ "when": when, "text": what }) }], None).await;
             None
-        } else if has_web && route::web_query(text).is_some() {
+        } else if let Some(place) = route::clock_request(text) {
+            self.harness_calls(chat, &turns, &mut made, vec![format::Call { name: "clock".into(), arguments: serde_json::json!({ "place": place }) }], Some(text)).await;
+            Some(Route::Fact)
+        } else if let Some(expression) = route::sum_request(text) {
+            self.harness_calls(chat, &turns, &mut made, vec![format::Call { name: "calculate".into(), arguments: serde_json::json!({ "expression": expression }) }], Some(text)).await;
+            Some(Route::Fact)
+        } else if has_web && (route::web_query(text).is_some() || route::domain_in(text).is_some() || follow_up) {
             Some(Route::Web)
         } else if route::refers_to_past(text) {
             Some(Route::Past)
@@ -391,43 +443,43 @@ impl Agent {
             // The first message with a small folder chosen: its few files are read once, so
             // a question about them needs neither the right words nor the model's choice.
             Some(Route::Files)
-        } else if !settings.decision {
-            None
         } else {
-            let mut options = vec![Route::Answer];
-            if has_web {
-                options.push(Route::Web);
-            }
-            if self.tools.root.is_some() {
-                options.push(Route::Files);
-            }
-            options.push(Route::Past);
-            Some(route::decide(brain.as_ref(), &mut chat.route_cache, text, &options).await)
+            None
         };
         if let Some(r) = route {
             log.append(&RunEvent::Route { at: memory::now(), route: r.name().into() });
         }
+        // No shortcut matched: the tools that fit the message best are offered to the model
+        // to pick from (`pick`), then the call is written for it (`call`). Its first answer
+        // starts with `prefill` when the model still has arguments to write.
+        let mut prefill = String::new();
+        if route.is_none() && settings.decision {
+            let specs = self.tools.specs();
+            let candidates = pick::rank(&specs, &question);
+            if let Some(tool) = pick::pick(brain.as_ref(), &mut chat.route_cache, &question, &candidates).await {
+                log.append(&RunEvent::Route { at: memory::now(), route: format!("pick {tool}") });
+                match call::known_args(&tool, &question) {
+                    Some(arguments) => {
+                        self.harness_calls(chat, &turns, &mut made, vec![format::Call { name: tool, arguments }], Some(&question)).await;
+                    }
+                    None => prefill = call::prefill(&tool),
+                }
+            }
+        }
         if route == Some(Route::Past) {
-            self.harness_calls(chat, &turns, &mut made, vec![format::Call { name: "recall".into(), arguments: serde_json::json!({ "query": text }) }]).await;
+            self.harness_calls(chat, &turns, &mut made, vec![format::Call { name: "recall".into(), arguments: serde_json::json!({ "query": text }) }], None).await;
         }
         if route == Some(Route::Files) {
             let reads = self.files_for(text);
             if !reads.is_empty() {
-                self.harness_calls(chat, &turns, &mut made, reads).await;
+                self.harness_calls(chat, &turns, &mut made, reads, None).await;
             }
         }
         if route == Some(Route::Web) {
-            let query = route::search_words(text);
-            let found = self.harness_calls(chat, &turns, &mut made, vec![format::Call { name: "web_search".into(), arguments: serde_json::json!({ "query": query }) }]).await;
-            // One page when the context is small, so the answer still has room.
-            let pages: Vec<format::Call> = pages_to_open(&found, if brain.context() < SMALL_CONTEXT { 1 } else { PREFETCH_PAGES })
-                .into_iter()
-                .map(|url| format::Call { name: "fetch_url".into(), arguments: serde_json::json!({ "url": url }) })
-                .collect();
-            if !pages.is_empty() && !stop.load(Ordering::Relaxed) {
-                self.harness_calls(chat, &turns, &mut made, pages).await;
-            }
+            self.look_up(chat, &turns, &mut made, &question, &stop).await;
         }
+        // Answers checked against this turn's results and re-asked (`check`), at most this often.
+        let mut checks = 0;
         let mut total = Stats::default();
         let mut steps = 0;
         let mut decode_ms = 0.0;
@@ -439,18 +491,63 @@ impl Agent {
             let max = (brain.context() - chat.ids.len()).min(STEP_TOKENS);
             let events = self.events.clone();
             let mut on_text = move |t: &str| events(Event::Text { text: t.to_string() });
+            let lead = std::mem::take(&mut prefill);
+            if !lead.is_empty() {
+                chat.ids.extend(tk.encode_segment(&lead));
+            }
             let (out, stats) = brain.complete(&mut chat.cache, &chat.ids, max, &mut on_text).await?;
             total.prompt_tokens += stats.prompt_tokens;
             total.cached_tokens += stats.cached_tokens;
             total.generated += stats.generated;
             decode_ms += (stats.total_ms - stats.first_token_ms).max(0.0);
-            let raw = tk.decode(&out);
+            let raw = lead + &tk.decode(&out);
             log.append(&RunEvent::Model { at: memory::now(), text: raw.clone(), prompt_tokens: stats.prompt_tokens, cached_tokens: stats.cached_tokens, generated: stats.generated });
             chat.ids.extend(&out);
             chat.ids.extend(tk.encode_segment(turns.close()));
             chat.conv.messages.push(Message { role: "assistant".into(), content: raw.clone(), name: None });
             chat.conv.updated = memory::now();
-            let reply = parse(&raw);
+            let mut reply = parse(&raw);
+            if reply.calls.is_empty() && !stop.load(Ordering::Relaxed) {
+                let receipts = check::Receipts {
+                    question: &question,
+                    tools: self.tools.specs().into_iter().map(|t| t.name).collect(),
+                    calls: log.this_turn(),
+                    last_answer: &last_answer,
+                };
+                if let Some(problem) = check::check(&reply.text, &receipts) {
+                    let again = checks < MAX_CHECKS;
+                    log.append(&RunEvent::Check { at: memory::now(), problem: problem.name().into(), again });
+                    if again {
+                        checks += 1;
+                        // The draft stays in what the stages hold, but not in the conversation.
+                        chat.conv.messages.pop();
+                        (self.events)(Event::Retry { reason: problem.name().into() });
+                        let searched = receipts.calls.iter().any(|(n, _)| n == "web_search");
+                        if matches!(problem, check::Problem::Denies | check::Problem::Promise) && has_web && !searched {
+                            // The lookup it denied or promised: the harness makes it.
+                            self.look_up(chat, &turns, &mut made, &question, &stop).await;
+                        } else {
+                            chat.ids.extend(tk.encode_segment(&turns.results(&[("check".into(), problem.note())])));
+                        }
+                        continue;
+                    }
+                    if let Some(answer) = self.escalate(chat, settings).await {
+                        log.append(&RunEvent::Check { at: memory::now(), problem: "answered by the fallback model".into(), again: false });
+                        reply = parse(&answer);
+                        let _ = self.memory.save(&chat.conv);
+                        (self.events)(Event::Reply { text: reply.text, thought: reply.thought, calls: Vec::new() });
+                        reason = "answered".into();
+                        break;
+                    }
+                    let caveat = problem.caveat();
+                    if !caveat.is_empty() {
+                        reply.text = format!("{}\n\n{caveat}", reply.text.trim_end());
+                        if let Some(m) = chat.conv.messages.last_mut() {
+                            m.content.push_str(&format!("\n\n{caveat}"));
+                        }
+                    }
+                }
+            }
             let calls: Vec<(CallView, Option<format::Call>)> = reply
                 .calls
                 .into_iter()
@@ -472,11 +569,23 @@ impl Agent {
             }
             // A small model can call the same thing again and again; the second time it hears
             // so, and a second answer of nothing but repeats ends the turn.
-            let repeated: Vec<bool> = calls.iter().map(|(_, c)| c.as_ref().is_some_and(|c| !made.insert(call_key(c)))).collect();
+            let repeated: Vec<bool> = calls
+                .iter()
+                .map(|(_, c)| {
+                    c.as_ref().is_some_and(|c| {
+                        let key = call_key(c);
+                        search_again(&made, &key) || !made.insert(key)
+                    })
+                })
+                .collect();
             let allowed = &chat.allowed;
             let results = futures_util::future::join_all(calls.iter().zip(&repeated).map(|((view, call), &again)| async move {
                 if again {
-                    let text = "You already made this exact call; its result is above. Answer from it, or try something different.".to_string();
+                    let text = if view.name == "web_search" {
+                        "Not run: enough searching for this message (this one repeats an earlier search, or the searches are used up). Answer from the results above, and say plainly what they do not tell.".to_string()
+                    } else {
+                        "You already made this exact call; its result is above. Answer from it, or try something different.".to_string()
+                    };
                     (self.events)(Event::Result { id: view.id.clone(), name: view.name.clone(), ok: false, text: text.clone() });
                     text
                 } else {
@@ -530,7 +639,9 @@ impl Agent {
     /// had made them: the window shows them as calls, and the model reads the results as
     /// its own. They come from the person's own words, so they are not asked about. Gives
     /// the results, joined.
-    async fn harness_calls(&self, chat: &mut Chat, turns: &Turns<'_>, made: &mut HashSet<String>, calls: Vec<format::Call>) -> String {
+    /// With `recite`, the question goes again after the results, so a small model's
+    /// attention is on it when it starts to answer (Manus's "recitation").
+    async fn harness_calls(&self, chat: &mut Chat, turns: &Turns<'_>, made: &mut HashSet<String>, calls: Vec<format::Call>, recite: Option<&str>) -> String {
         let tk = turns.tokenizer;
         let raw: String = calls.iter().map(|c| format!("<tool_call>\n{}\n</tool_call>", serde_json::json!({ "name": c.name, "arguments": c.arguments }))).collect::<Vec<_>>().join("\n");
         chat.ids.extend(tk.encode_segment(&format!("{raw}{}", turns.close())));
@@ -549,8 +660,62 @@ impl Agent {
             chat.conv.messages.push(Message { role: "tool".into(), content: text.clone(), name: Some(c.name.clone()) });
             pairs.push((c.name.clone(), text.clone()));
         }
+        if let (Some(q), Some(last)) = (recite, pairs.last_mut()) {
+            last.1.push_str(&format!("\n\n(Answer the person's question from these results: \"{}\". Say what they show; where they do not answer it, say so.)", format::clip(q.trim(), 300)));
+        }
         chat.ids.extend(tk.encode_segment(&turns.results(&pairs)));
         results.join("\n")
+    }
+
+    /// The fallback model's answer to the conversation so far, in place of the main model's
+    /// last draft, when there is a fallback and the conversation fits it. The main model's
+    /// token ids are dropped, so its next turn renders the conversation again.
+    async fn escalate(&self, chat: &mut Chat, settings: Settings) -> Option<String> {
+        let fb = self.fallback.clone()?;
+        let turns = Turns { tokenizer: fb.tokenizer(), think: settings.think };
+        let draft = chat.conv.messages.pop()?;
+        let ids = self.render(chat, &turns);
+        if ids.len() + 256 > fb.context() {
+            chat.conv.messages.push(draft);
+            return None;
+        }
+        (self.events)(Event::Retry { reason: "asking the fallback model".into() });
+        let events = self.events.clone();
+        let mut on_text = move |t: &str| events(Event::Text { text: t.to_string() });
+        let max = (fb.context() - ids.len()).min(STEP_TOKENS);
+        let Ok((out, _)) = fb.complete(&mut Cached::default(), &ids, max, &mut on_text).await else {
+            chat.conv.messages.push(draft);
+            return None;
+        };
+        // Its answer only: calls it writes are not run here.
+        let text = parse(&fb.tokenizer().decode(&out)).text;
+        chat.conv.messages.push(Message { role: "assistant".into(), content: text.clone(), name: None });
+        chat.ids.clear();
+        chat.cache = Cached::default();
+        Some(text)
+    }
+
+    /// Searches the web for `question` and reads the best pages' passages about it, as
+    /// the model's calls: for a message that asks for the web, or an answer that denied or
+    /// promised a lookup.
+    async fn look_up(&self, chat: &mut Chat, turns: &Turns<'_>, made: &mut HashSet<String>, question: &str, stop: &AtomicBool) {
+        let query = route::search_words(question);
+        let found = self.harness_calls(chat, turns, made, vec![format::Call { name: "web_search".into(), arguments: serde_json::json!({ "query": query }) }], None).await;
+        // One page when the context is small, so the answer still has room. A site the
+        // message names comes first: a search engine knows little about a new one.
+        let room = if self.brain.context() < SMALL_CONTEXT { 1 } else { PREFETCH_PAGES };
+        let host = |u: &str| reqwest::Url::parse(u).ok().and_then(|u| u.host_str().map(|h| h.trim_start_matches("www.").to_string()));
+        let mut urls: Vec<String> = route::domain_in(question).map(|d| format!("https://{d}/")).into_iter().collect();
+        for url in pages_to_open(&found, room) {
+            if urls.len() < room && !urls.iter().any(|u| host(u) == host(&url)) {
+                urls.push(url);
+            }
+        }
+        // Only the passages about the question: a whole page's first lines are menus.
+        let pages: Vec<format::Call> = urls.into_iter().map(|url| format::Call { name: "fetch_url".into(), arguments: serde_json::json!({ "url": url, "focus": query }) }).collect();
+        if !pages.is_empty() && !stop.load(Ordering::Relaxed) {
+            self.harness_calls(chat, turns, made, pages, Some(question)).await;
+        }
     }
 
     /// Runs `goal` as a conversation of its own with the same model and tools, less `task`,
@@ -567,6 +732,7 @@ impl Agent {
             let events = self.events.clone();
             let helper = Agent {
                 brain: self.brain.clone(),
+                fallback: self.fallback.clone(),
                 tools,
                 memory: self.memory.clone(),
                 events: Arc::new(move |e| match e {
@@ -640,7 +806,8 @@ impl Agent {
         } else {
             text
         };
-        log.append(&RunEvent::Finished { at: memory::now(), call: id.to_string(), ok, text: format::clip(&text, 2000) });
+        // Whole as the model read it (up to twice the tool output cap): answers are checked against it.
+        log.append(&RunEvent::Finished { at: memory::now(), call: id.to_string(), ok, text: format::clip(&text, tools::OUTPUT_CHARS * 2 + 500) });
         (ok, text)
     }
 
@@ -723,6 +890,13 @@ impl Agent {
             (self.events)(Event::Result { id: view.id.clone(), name: String::new(), ok: false, text: text.clone() });
             return text;
         };
+        if let Some(spec) = self.tools.specs().into_iter().find(|s| s.name == call.name) {
+            if let Err(e) = call::check_args(&spec, &call.arguments) {
+                let text = format!("Error: {e}. Write the call again with that fixed.");
+                (self.events)(Event::Result { id: view.id.clone(), name: call.name.clone(), ok: false, text: text.clone() });
+                return text;
+            }
+        }
         let risk = self.tools.risk(&call.name);
         if settings.mode.allows(risk) == Some(false) {
             let text = "Not run: plan mode changes nothing. Finish the plan instead; the person carries it out by switching modes.".to_string();
@@ -830,6 +1004,7 @@ mod tests {
         let tools = Tools::new(Some(&dir.path().join("project")), memory.clone(), "c".into(), None, Vec::new()).unwrap();
         let agent = Agent {
             brain: brain.clone(),
+            fallback: None,
             tools,
             memory,
             events: Arc::new(move |e| s.lock().unwrap().push(e)),
@@ -912,6 +1087,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failed_check_is_answered_again_then_kept_with_a_note() {
+        let claim = "I searched and it has 42,000 users.";
+        let r = agent(&[claim, "I do not know how many users it has."], Decision::Allow);
+        let mut chat = Chat::new(Conversation::new(None));
+        r.agent.turn(&mut chat, "how many users does it have", Settings::default(), Arc::default()).await.unwrap();
+        let said: Vec<&str> = chat.conv.messages.iter().filter(|m| m.role == "assistant").map(|m| m.content.as_str()).collect();
+        assert_eq!(said, ["I do not know how many users it has."], "the failed draft is not kept");
+        assert!(r.seen.lock().unwrap().iter().any(|e| matches!(e, Event::Retry { .. })));
+        let fed = r.brain.tk.decode(r.brain.fed.lock().unwrap().last().unwrap());
+        assert!(fed.contains("You made no web_search call"), "{fed}");
+        // Still wrong after two tries: kept, with a line saying so.
+        let r = agent(&[claim, claim, claim], Decision::Allow);
+        let mut chat = Chat::new(Conversation::new(None));
+        r.agent.turn(&mut chat, "how many users does it have", Settings::default(), Arc::default()).await.unwrap();
+        let last = &chat.conv.messages.last().unwrap().content;
+        assert!(last.starts_with(claim) && last.ends_with("(Check: no web_search was made for this answer.)"), "{last}");
+        let log = r.agent.memory.run_log(&chat.conv.id).read();
+        assert_eq!(log.iter().filter(|e| matches!(e, RunEvent::Check { .. })).count(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_fallback_model_answers_when_the_small_one_keeps_failing() {
+        let claim = "I searched and it has 42,000 users.";
+        let r = agent(&[claim, claim, claim], Decision::Allow);
+        let big = Arc::new(Script { tk: tokenizer(), answers: Mutex::new(vec!["I could not find a user count.".into()]), fed: Mutex::default(), choice: Mutex::default(), chose: Mutex::default(), context: (1 << 16).into() });
+        let agent = Agent { fallback: Some(big.clone()), ..r.agent };
+        let mut chat = Chat::new(Conversation::new(None));
+        agent.turn(&mut chat, "how many users does it have", Settings::default(), Arc::default()).await.unwrap();
+        let said: Vec<&str> = chat.conv.messages.iter().filter(|m| m.role == "assistant").map(|m| m.content.as_str()).collect();
+        assert_eq!(said, ["I could not find a user count."]);
+        // It read the conversation, not the small model's drafts.
+        let fed = big.tk.decode(&big.fed.lock().unwrap()[0]);
+        assert!(fed.contains("how many users does it have") && !fed.contains("42,000"), "{fed}");
+    }
+
+    #[tokio::test]
     async fn long_output_is_kept_whole_and_every_step_is_logged() {
         let search = "<tool_call>{\"name\": \"search\", \"arguments\": {\"text\": \"needle\"}}</tool_call>";
         let r = agent(&[search, "Found them."], Decision::Allow);
@@ -941,27 +1152,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_decision_step_reads_the_folder_for_a_model_that_would_not() {
-        let r = agent(&["It holds a note saying hello."], Decision::Allow);
+    async fn the_pick_step_offers_fitting_tools_and_writes_the_call_start() {
+        // The model completes only the arguments of the call the harness began.
+        let r = agent(&["\"path\": \"note.txt\"}}\n</tool_call>", "It holds a note saying hello."], Decision::Allow);
         std::fs::write(r.dir.path().join("project/note.txt"), "hello").unwrap();
-        // Answer, Web, Files, Past: the model picks 3.
-        *r.brain.choice.lock().unwrap() = Some(3);
+        for i in 0..6 {
+            std::fs::write(r.dir.path().join(format!("project/f{i}.txt")), "x").unwrap();
+        }
+        // 1 answers directly; read_file ranks first for these words, so it is 2.
+        *r.brain.choice.lock().unwrap() = Some(2);
         let mut chat = Chat::new(Conversation::new(None));
-        // Not the first message, which reads a small folder without asking.
         chat.conv.messages.push(Message { role: "user".into(), content: "hi".into(), name: None });
         chat.conv.messages.push(Message { role: "assistant".into(), content: "Hello.".into(), name: None });
-        r.agent.turn(&mut chat, "what does the note say", Settings { decision: true, ..Default::default() }, Arc::default()).await.unwrap();
+        r.agent.turn(&mut chat, "show me the contents of that one text document", Settings { decision: true, ..Default::default() }, Arc::default()).await.unwrap();
+        let asked = r.brain.tk.decode(&r.brain.chose.lock().unwrap()[0]);
+        assert!(asked.contains("1. Answer directly") && asked.contains("2. read_file:"), "{asked}");
         let roles: Vec<&str> = chat.conv.messages.iter().map(|m| m.role.as_str()).collect();
         assert_eq!(roles, ["user", "assistant", "user", "assistant", "tool", "assistant"]);
+        assert!(chat.conv.messages[3].content.starts_with("<tool_call>\n{\"name\": \"read_file\""), "{:?}", chat.conv.messages[3]);
         assert!(chat.conv.messages[4].content.contains("hello"), "{:?}", chat.conv.messages);
-        // A first message reads it without the decision step.
-        let mut first = Chat::new(Conversation::new(None));
+        // Without the step, nothing is offered.
         let asked_before = r.brain.chose.lock().unwrap().len();
-        r.agent.turn(&mut first, "and so?", Settings::default(), Arc::default()).await.unwrap();
+        let r2 = agent(&["Hi."], Decision::Allow);
+        r2.agent.turn(&mut Chat::new(Conversation::new(None)), "hello", Settings::default(), Arc::default()).await.unwrap();
         assert_eq!(r.brain.chose.lock().unwrap().len(), asked_before);
+        // A first message still reads a small folder without asking.
+        let r3 = agent(&["It says hello."], Decision::Allow);
+        std::fs::write(r3.dir.path().join("project/note.txt"), "hello").unwrap();
+        let mut first = Chat::new(Conversation::new(None));
+        r3.agent.turn(&mut first, "and so?", Settings::default(), Arc::default()).await.unwrap();
         assert!(first.conv.messages[2].content.contains("hello"));
-        let asked = r.brain.tk.decode(&r.brain.chose.lock().unwrap()[0]);
-        assert!(asked.contains("3. Look in the chosen project folder") && asked.contains("what does the note say") && asked.contains("\"summarize the readme\" -> 3"), "{asked}");
+        let r = r3;
         // A file named in the message is read even in a big folder; nothing else is.
         for i in 0..6 {
             std::fs::write(r.dir.path().join(format!("project/f{i}.txt")), "x").unwrap();
@@ -1085,6 +1306,20 @@ mod tests {
         let mut chat = Chat::new(Conversation::new(None));
         r.agent.turn(&mut chat, "go", Settings::default(), Arc::default()).await.unwrap();
         assert!(chat.conv.messages[2].content.starts_with("Error: the arguments of list_dir are not an object"));
+    }
+
+    #[test]
+    fn reshuffled_searches_do_not_run_again() {
+        let key = |q: &str| call_key(&format::Call { name: "web_search".into(), arguments: serde_json::json!({ "query": q }) });
+        let mut made = HashSet::new();
+        made.insert(key("time in england wednesday 2026"));
+        assert!(search_again(&made, &key("time england wednesday 2026")));
+        assert!(search_again(&made, &key("time england wednesday 2026 wednesday")));
+        assert!(!search_again(&made, &key("london weather")));
+        made.insert(key("london weather"));
+        made.insert(key("bitcoin price"));
+        assert!(search_again(&made, &key("rust release notes")), "three searches use the turn's budget");
+        assert!(!search_again(&made, "read_file {}"));
     }
 
     #[test]

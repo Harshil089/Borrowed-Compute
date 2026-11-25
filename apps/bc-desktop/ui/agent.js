@@ -290,6 +290,11 @@ listen("agent-event", ({ payload }) => {
       live.innerHTML = md(live.raw);
       if (log.scrollHeight - log.scrollTop - log.clientHeight < 120) log.scrollTop = log.scrollHeight;
       break;
+    case "retry":
+      // The answer failed the harness's check and is being written again.
+      if (live) { live.remove(); live = null; }
+      add(`<p class="hint a-check">Checked the answer (${esc(ev.reason)}); answering again.</p>`);
+      break;
     case "reply": {
       const html = assistantHtml({ ...ev, calls: ev.calls.map((c) => ({ ...c, pending: true })) });
       if (live) {
