@@ -18,6 +18,7 @@ bc-infer.workspace = true
 axum.workspace = true
 futures-util = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+chrono-tz = "0.10"
 rand.workspace = true
 bc-auth.workspace = true
 serde_json.workspace = true

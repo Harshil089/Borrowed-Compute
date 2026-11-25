@@ -112,6 +112,21 @@ async fn brain(state: &AppState, mesh: &MeshState, agent: &AgentState) -> CmdRes
     Ok((b as Arc<dyn Brain>, server.model))
 }
 
+/// The model server, while a Mesh model answers first: the bigger model asked when the
+/// Mesh model's answer fails the harness's checks.
+async fn fallback(state: &AppState, mesh: &MeshState, agent: &AgentState) -> Option<Arc<dyn Brain>> {
+    mesh.session().await?;
+    let server = model_server(state);
+    if !server.is_set() {
+        return None;
+    }
+    let mut kept = agent.server.lock().unwrap();
+    if kept.as_ref().is_none_or(|(s, _)| *s != server) {
+        *kept = Some((server.clone(), Arc::new(HttpBrain::new(server.clone()).ok()?)));
+    }
+    kept.as_ref().map(|(_, b)| b.clone() as Arc<dyn Brain>)
+}
+
 /// The model the Agent page would use now, by name; empty with none.
 #[tauri::command]
 pub async fn agent_model(state: State<'_, AppState>, mesh: State<'_, MeshState>, agent: State<'_, AgentState>) -> CmdResult<String> {
@@ -170,6 +185,7 @@ pub fn agent_new(state: State<'_, AppState>, folder: Option<String>) -> CmdResul
 #[tauri::command]
 pub async fn agent_send(app: AppHandle, state: State<'_, AppState>, mesh: State<'_, MeshState>, agent: State<'_, AgentState>, conversation: String, text: String, settings: Settings) -> CmdResult<()> {
     let (brain, _) = brain(&state, &mesh, &agent).await?;
+    let fallback = fallback(&state, &mesh, &agent).await;
     let mem = memory(&state);
     let chat = chat(&agent, &mem, &conversation).await?;
     let mut chat = chat.try_lock().map_err(|_| "This conversation is still working; stop it or wait.".to_string())?;
@@ -184,6 +200,7 @@ pub async fn agent_send(app: AppHandle, state: State<'_, AppState>, mesh: State<
     let conv_for_approve = conversation.clone();
     let a = Agent {
         brain,
+        fallback,
         tools,
         memory: mem,
         events: Arc::new(move |e| {
