@@ -63,14 +63,17 @@ pub async fn paired_devices(cloud: &CloudClient, me: &str) -> Result<Vec<(String
 
 /// Devices a Mesh may use: those paired on this account, and computers shared with this
 /// device as a guest. A shared computer takes part only if its owner lets guests use it
-/// in their Mesh; otherwise it turns the probe away and is left out. Signed out, only
-/// shared computers.
+/// in their Mesh; otherwise it turns the probe away and is left out. Signed out, or with
+/// the account's cloud out of reach (the Mac that hosts it closed or asleep), only shared
+/// computers: the Mesh still runs on this computer alone rather than failing.
 pub async fn mesh_targets(cloud: &CloudClient, me: &str, home: &std::path::Path) -> Result<Vec<(String, EndpointAddr)>> {
     let shared = crate::shared::list(home);
     let mut out = match paired_devices(cloud, me).await {
         Ok(p) => p,
-        Err(_) if !shared.is_empty() => Vec::new(),
-        Err(e) => return Err(e),
+        Err(e) => {
+            eprintln!("paired devices left out: {e:#}");
+            Vec::new()
+        }
     };
     for s in shared {
         if let Ok(id) = s.id.parse::<EndpointId>() {
