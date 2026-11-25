@@ -22,9 +22,30 @@ let live = null;
 let modelReady = false;
 
 $("agent-think").checked = store.get("agent-think") === "1";
-$("agent-auto").checked = store.get("agent-auto") === "1";
 $("agent-think").addEventListener("change", () => store.set("agent-think", $("agent-think").checked ? "1" : "0"));
-$("agent-auto").addEventListener("change", () => store.set("agent-auto", $("agent-auto").checked ? "1" : "0"));
+
+// Which calls run without asking (`Mode` in bc_cli::agent). The old "Don't ask" switch
+// becomes Auto.
+const MODES = ["ask", "edits", "auto", "plan"];
+let mode = store.get("agent-mode") || (store.get("agent-auto") === "1" ? "auto" : "ask");
+if (!MODES.includes(mode)) mode = "ask";
+// true: runs without asking; false: refused; null: asks. The same table as `Mode::allows`.
+const allows = (m, risk) => (risk === "read" || m === "auto" || (m === "edits" && risk === "write") || (m === "plan" && risk === "net") ? true : m === "plan" ? false : null);
+function setMode(m) {
+  mode = m;
+  store.set("agent-mode", m);
+  for (const b of $("agent-mode").querySelectorAll("[data-mode]")) b.setAttribute("aria-pressed", String(b.dataset.mode === m));
+  // A turn already running took the mode it started with; calls still waiting follow the new one.
+  for (const box of document.querySelectorAll("#agent-log .a-approve:not(.hidden)")) {
+    const ok = allows(m, box.dataset.risk);
+    if (ok !== null) decide(box.closest("[data-call]"), ok ? "allow" : "deny");
+  }
+}
+$("agent-mode").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-mode]");
+  if (b) setMode(b.dataset.mode);
+});
+setMode(mode);
 
 const when = (secs) => {
   const d = new Date(secs * 1000);
@@ -243,7 +264,7 @@ async function send(e) {
   controls();
   renderList();
   try {
-    await invoke("agent_send", { conversation: id, text, settings: { think: $("agent-think").checked, auto_approve: $("agent-auto").checked } });
+    await invoke("agent_send", { conversation: id, text, settings: { think: $("agent-think").checked, mode } });
   } catch {
     // The error came as an event too.
   } finally {
@@ -281,9 +302,13 @@ listen("agent-event", ({ payload }) => {
     case "approve": {
       const card = log.querySelector(`[data-call="${CSS.escape(ev.id)}"]`);
       if (!card) break;
+      // The mode changed after the turn began: answer for it.
+      const ok = allows(mode, ev.risk);
+      if (ok !== null) { decide(card, ok ? "allow" : "deny"); break; }
       card.querySelector(".a-state").textContent = "Waiting";
       const what = { write: "It wants to change files.", run: "It wants to run a command.", net: "It wants to read a web page." }[ev.risk] || "";
       const box = card.querySelector(".a-approve");
+      box.dataset.risk = ev.risk;
       box.innerHTML = `<span class="hint">${what}</span><button data-decide="deny">Deny</button><button data-decide="allow_always">Always allow ${esc(ev.name)}</button><button class="primary" data-decide="allow">Allow</button>`;
       box.classList.remove("hidden");
       card.querySelector(".a-args").open = true;
@@ -315,13 +340,14 @@ $("agent-reminders").addEventListener("click", (e) => {
   if (e.target.closest("[data-dismiss]")) e.target.closest(".agent-reminder").remove();
 });
 
+function decide(card, decision) {
+  card.querySelector(".a-approve").classList.add("hidden");
+  card.querySelector(".a-state").textContent = decision === "deny" ? "" : "Running";
+  invoke("agent_approve", { call: card.dataset.call, decision });
+}
 $("agent-log").addEventListener("click", (e) => {
   const b = e.target.closest("[data-decide]");
-  if (!b) return;
-  const card = b.closest("[data-call]");
-  card.querySelector(".a-approve").classList.add("hidden");
-  card.querySelector(".a-state").textContent = b.dataset.decide === "deny" ? "" : "Running";
-  invoke("agent_approve", { call: card.dataset.call, decision: b.dataset.decide });
+  if (b) decide(b.closest("[data-call]"), b.dataset.decide);
 });
 
 $("agent-list").addEventListener("click", async (e) => {

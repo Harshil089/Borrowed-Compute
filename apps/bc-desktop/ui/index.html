@@ -376,7 +376,12 @@
               <textarea id="agent-input" rows="2" placeholder="Ask something, or give it a task in the folder" aria-label="Message"></textarea>
               <div class="agent-compose-foot">
                 <label class="check" title="Lets the model reason before it answers: better plans, slower steps"><input id="agent-think" type="checkbox"><span>Think first</span></label>
-                <label class="check" title="Changes files, runs commands and reads the web without asking"><input id="agent-auto" type="checkbox"><span>Don't ask</span></label>
+                <div id="agent-mode" class="segmented" role="group" aria-label="What runs without asking">
+                  <button type="button" data-mode="ask" title="Asks before it changes files, runs a command or reads a web page">Manual</button>
+                  <button type="button" data-mode="edits" title="Changes files without asking; still asks before commands and web pages">Accept edits</button>
+                  <button type="button" data-mode="auto" title="Does everything without asking">Auto</button>
+                  <button type="button" data-mode="plan" title="Looks around and reads the web, changes nothing, and answers with a plan">Plan</button>
+                </div>
                 <span class="agent-spacer"></span>
                 <button id="agent-stop" type="button" class="danger hidden">Stop</button>
                 <button id="agent-send" type="submit" class="primary">Send</button>

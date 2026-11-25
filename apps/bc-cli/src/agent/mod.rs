@@ -184,14 +184,41 @@ pub struct Settings {
     /// Let the model reason before it answers: better plans, more tokens a step.
     #[serde(default)]
     pub think: bool,
-    /// Run every call without asking.
+    /// Which calls run without asking.
     #[serde(default)]
-    pub auto_approve: bool,
+    pub mode: Mode,
     /// Run the decision step for messages no shortcut routes. Off by default: on real
     /// qwen3-0.6b weights it added time and no passes (`docs/harness.md`); `bc agent eval
     /// --decision` measures it again for other models.
     #[serde(default)]
     pub decision: bool,
+}
+
+/// How calls are approved, as in Claude Code's modes. Reading never asks in any of them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    /// Every change, command and web read asks.
+    #[default]
+    Ask,
+    /// File edits and notes run; commands and web reads ask.
+    Edits,
+    /// Everything runs without asking.
+    Auto,
+    /// Looks around and reads the web, changes nothing, and answers with a plan.
+    Plan,
+}
+
+impl Mode {
+    /// Whether a call of this risk runs without asking (`Some(true)`), asks (`None`), or
+    /// is refused (`Some(false)`).
+    fn allows(self, risk: Risk) -> Option<bool> {
+        match (self, risk) {
+            (_, Risk::Read) | (Mode::Auto, _) | (Mode::Edits, Risk::Write) | (Mode::Plan, Risk::Net) => Some(true),
+            (Mode::Plan, _) => Some(false),
+            _ => None,
+        }
+    }
 }
 
 /// One open conversation: what it says, and what the model has been fed of it.
@@ -337,6 +364,9 @@ impl Agent {
         // it made short ones ("hmmm") nearly the same as the last, and a small model then
         // repeated its last answer. Not saved, so a re-render (reopening, trimming) drops it.
         let mut read = if route::asks_time(text) { format!("{text}\n\n(Sent {})", chrono::Local::now().format("%A %Y-%m-%d %H:%M, local time")) } else { text.to_string() };
+        if settings.mode == Mode::Plan {
+            read.push_str("\n\n(Plan mode: look with the reading tools and the web as needed, change nothing and run nothing, then answer with a short numbered plan of what you would do.)");
+        }
         if !cut.is_empty() {
             read.push_str(&format!("\n\n(The app stopped during your last answer while running: {}. It may or may not have finished; check before doing it again.)", cut.join("; ")));
         }
@@ -694,7 +724,12 @@ impl Agent {
             return text;
         };
         let risk = self.tools.risk(&call.name);
-        let asked = risk != Risk::Read && !settings.auto_approve && !allowed.lock().unwrap().contains(&call.name);
+        if settings.mode.allows(risk) == Some(false) {
+            let text = "Not run: plan mode changes nothing. Finish the plan instead; the person carries it out by switching modes.".to_string();
+            (self.events)(Event::Result { id: view.id.clone(), name: call.name.clone(), ok: false, text: text.clone() });
+            return text;
+        }
+        let asked = settings.mode.allows(risk).is_none() && !allowed.lock().unwrap().contains(&call.name);
         if asked {
             let approval = Approval { id: view.id.clone(), name: call.name.clone(), arguments: call.arguments.clone(), risk };
             (self.events)(Event::Approve(approval.clone()));
@@ -851,9 +886,29 @@ mod tests {
         // Auto-approve asks nobody.
         let r = agent(&[WRITE, "Done."], Decision::Deny);
         let mut chat = Chat::new(Conversation::new(None));
-        r.agent.turn(&mut chat, "make a.txt", Settings { auto_approve: true, ..Default::default() }, Arc::default()).await.unwrap();
+        r.agent.turn(&mut chat, "make a.txt", Settings { mode: Mode::Auto, ..Default::default() }, Arc::default()).await.unwrap();
         assert!(r.dir.path().join("project/a.txt").exists());
         assert!(!r.seen.lock().unwrap().iter().any(|e| matches!(e, Event::Approve(_))));
+    }
+
+    #[tokio::test]
+    async fn modes_decide_what_asks() {
+        use Risk::*;
+        let table: Vec<[Option<bool>; 4]> = [Mode::Ask, Mode::Edits, Mode::Auto, Mode::Plan].iter().map(|m| [Read, Write, Run, Net].map(|r| m.allows(r))).collect();
+        let (y, ask, no) = (Some(true), None, Some(false));
+        assert_eq!(table, [[y, ask, ask, ask], [y, y, ask, ask], [y, y, y, y], [y, no, no, y]]);
+        // Accept edits writes without asking.
+        let r = agent(&[WRITE, "Done."], Decision::Deny);
+        let mut chat = Chat::new(Conversation::new(None));
+        r.agent.turn(&mut chat, "make a.txt", Settings { mode: Mode::Edits, ..Default::default() }, Arc::default()).await.unwrap();
+        assert!(r.dir.path().join("project/a.txt").exists());
+        // Plan mode neither writes nor asks, and the model hears why.
+        let r = agent(&[WRITE, "1. Write a.txt."], Decision::Allow);
+        let mut chat = Chat::new(Conversation::new(None));
+        r.agent.turn(&mut chat, "make a.txt", Settings { mode: Mode::Plan, ..Default::default() }, Arc::default()).await.unwrap();
+        assert!(!r.dir.path().join("project/a.txt").exists());
+        assert!(!r.seen.lock().unwrap().iter().any(|e| matches!(e, Event::Approve(_))));
+        assert!(chat.conv.messages[2].content.starts_with("Not run: plan mode"));
     }
 
     #[tokio::test]
