@@ -67,10 +67,15 @@ async fn run_proxy(endpoint: Endpoint, listener: TcpListener, mac: EndpointAddr)
                 let mut conn = conn.lock().await;
                 // One connection for all requests; dial again once it is gone.
                 if conn.as_ref().is_none_or(|c| c.close_reason().is_some()) {
-                    match endpoint.connect(mac, CLOUD_ALPN).await {
-                        Ok(c) => *conn = Some(c),
-                        Err(e) => {
+                    // An offline Mac would otherwise hold the request until the client gives up.
+                    match tokio::time::timeout(std::time::Duration::from_secs(10), endpoint.connect(mac, CLOUD_ALPN)).await {
+                        Ok(Ok(c)) => *conn = Some(c),
+                        Ok(Err(e)) => {
                             eprintln!("cannot reach the Mac's cloud: {e:#}");
+                            return;
+                        }
+                        Err(_) => {
+                            eprintln!("cannot reach the Mac's cloud: no answer in 10 s");
                             return;
                         }
                     }

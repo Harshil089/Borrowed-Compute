@@ -146,7 +146,10 @@ impl CloudClient {
         let resp = req
             .send()
             .await
-            .with_context(|| format!("cannot reach the cloud at {}", self.base))?;
+            .with_context(|| match self.base.starts_with(MAC_CODE_SCHEME) {
+                true => "cannot reach the Mac's cloud: open Borrowed Compute on the Mac and keep it awake".to_string(),
+                false => format!("cannot reach the cloud at {}", self.base),
+            })?;
         let status = resp.status();
         let text = resp.text().await?;
         if !status.is_success() {
